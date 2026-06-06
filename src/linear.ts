@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect";
+
 import {
   type Executor,
   type JobSpec,
@@ -19,7 +20,9 @@ export const decodeWebhook: (u: unknown) => Effect.Effect<LinearWebhook, Schema.
 
 const hmacHex = (rawBody: ArrayBuffer, secret: string): Promise<string> =>
   crypto.subtle
-    .importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+    .importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+      "sign",
+    ])
     .then((key) => crypto.subtle.sign("HMAC", key, rawBody))
     .then((mac) =>
       Array.from(new Uint8Array(mac))
@@ -41,8 +44,11 @@ export const verifyLinearSignature = (
 ): Effect.Effect<boolean> =>
   Effect.promise(async () => constantTimeEqual(await hmacHex(rawBody, secret), signature));
 
-export const isFreshTimestamp = (webhookTimestamp: number, nowMs: number, toleranceMs = 60_000): boolean =>
-  Math.abs(nowMs - webhookTimestamp) <= toleranceMs;
+export const isFreshTimestamp = (
+  webhookTimestamp: number,
+  nowMs: number,
+  toleranceMs = 60_000,
+): boolean => Math.abs(nowMs - webhookTimestamp) <= toleranceMs;
 
 export interface LinearConfig {
   readonly defaultRepo?: string;
@@ -147,7 +153,10 @@ export const eventToJobSpec = (
       repo,
       branch: `runway/${slug}`,
       plan: trigger.plan,
-      executor: pickExecutor(`${trigger.title ?? ""}\n${trigger.executorText}`, config.defaultExecutor),
+      executor: pickExecutor(
+        `${trigger.title ?? ""}\n${trigger.executorText}`,
+        config.defaultExecutor,
+      ),
       base: config.defaultBase,
       source,
       ...(trigger.title ? { title: trigger.title } : {}),

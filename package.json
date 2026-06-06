@@ -3,8 +3,34 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Launch coding-agent jobs from Linear issues or markdown plans on Cloudflare Workers + Containers.",
-  "packageManager": "pnpm@11.5.0",
+  "scripts": {
+    "dev": "alchemy dev",
+    "deploy": "alchemy deploy",
+    "destroy": "alchemy destroy",
+    "format": "oxfmt",
+    "format-check": "oxfmt --check",
+    "lint": "oxlint",
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run",
+    "probe:auth": "tsx src/auth-handoff.ts"
+  },
+  "dependencies": {
+    "@octokit/core": "catalog:",
+    "@octokit/plugin-rest-endpoint-methods": "catalog:",
+    "alchemy": "catalog:",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
@@ -18,25 +44,5 @@
   "engines": {
     "node": "^26"
   },
-  "scripts": {
-    "dev": "alchemy dev",
-    "deploy": "alchemy deploy",
-    "destroy": "alchemy destroy",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "probe:auth": "tsx src/auth-handoff.ts"
-  },
-  "dependencies": {
-    "@octokit/core": "^7.0.6",
-    "@octokit/plugin-rest-endpoint-methods": "^17.0.0",
-    "alchemy": "2.0.0-beta.52",
-    "effect": "4.0.0-beta.78"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240000.0",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
-  }
+  "packageManager": "pnpm@11.5.0"
 }

@@ -1,7 +1,7 @@
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, copyFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import process from "node:process";
 
 type Level = "ok" | "partial" | "missing";
@@ -48,9 +48,14 @@ function checkCodex(): Check {
       hasBackendTokens = false;
     }
   }
-  if (hasBackendTokens) return { name, level: "ok", reason: `${cli}; auth.json has backend tokens` };
+  if (hasBackendTokens)
+    return { name, level: "ok", reason: `${cli}; auth.json has backend tokens` };
   if (process.env.OPENAI_API_KEY)
-    return { name, level: "partial", reason: `${cli}; api key won't authenticate codex cloud (no backend tokens)` };
+    return {
+      name,
+      level: "partial",
+      reason: `${cli}; api key won't authenticate codex cloud (no backend tokens)`,
+    };
   return { name, level: "missing", reason: `${cli}; no auth.json tokens and no OPENAI_API_KEY` };
 }
 
@@ -60,7 +65,11 @@ function checkPi(): Check {
   const hasSettings = existsSync(join(homedir(), ".pi", "agent", "settings.json"));
   const hasKey = Boolean(process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY);
   if (hasKey || hasSettings) {
-    return { name, level: "ok", reason: `${cli}; ${hasKey ? "api key set" : "settings.json present"}` };
+    return {
+      name,
+      level: "ok",
+      reason: `${cli}; ${hasKey ? "api key set" : "settings.json present"}`,
+    };
   }
   return { name, level: "missing", reason: `${cli}; no api key and no ~/.pi/agent/settings.json` };
 }
@@ -75,7 +84,9 @@ function checkGitHub(): Check {
 
 function checkLinear(): Check {
   const name = "Linear";
-  const apiKeyNote = process.env.LINEAR_API_KEY ? "; LINEAR_API_KEY also set" : "; LINEAR_API_KEY optional, not set";
+  const apiKeyNote = process.env.LINEAR_API_KEY
+    ? "; LINEAR_API_KEY also set"
+    : "; LINEAR_API_KEY optional, not set";
   if (process.env.LINEAR_WEBHOOK_SECRET)
     return {
       name,
@@ -88,9 +99,17 @@ function checkLinear(): Check {
 function checkCloudflare(): Check {
   const name = "Cloudflare";
   if (process.env.CLOUDFLARE_API_TOKEN)
-    return { name, level: "ok", reason: `CLOUDFLARE_API_TOKEN ${presenceHint(process.env.CLOUDFLARE_API_TOKEN)}` };
+    return {
+      name,
+      level: "ok",
+      reason: `CLOUDFLARE_API_TOKEN ${presenceHint(process.env.CLOUDFLARE_API_TOKEN)}`,
+    };
   if (process.env.CLOUDFLARE_ACCOUNT_ID)
-    return { name, level: "partial", reason: "CLOUDFLARE_ACCOUNT_ID set; CLOUDFLARE_API_TOKEN missing" };
+    return {
+      name,
+      level: "partial",
+      reason: "CLOUDFLARE_ACCOUNT_ID set; CLOUDFLARE_API_TOKEN missing",
+    };
   return { name, level: "missing", reason: "no CLOUDFLARE_API_TOKEN (needed by alchemy deploy)" };
 }
 
@@ -100,7 +119,9 @@ function runReport(): void {
   for (const c of checks) console.log(`${MARKER[c.level]} ${c.name.padEnd(11)} ${c.reason}`);
 
   const count = (level: Level) => checks.filter((c) => c.level === level).length;
-  console.log(`\nSummary: ${count("ok")} ok, ${count("partial")} partial, ${count("missing")} missing`);
+  console.log(
+    `\nSummary: ${count("ok")} ok, ${count("partial")} partial, ${count("missing")} missing`,
+  );
 }
 
 function packageAuth(): void {
@@ -120,7 +141,9 @@ function packageAuth(): void {
   }
 
   console.log(`Packaging local auth into ${outDir}\n`);
-  console.log(bundled.length ? bundled.join("\n") : "  (nothing to bundle: no local auth artifacts found)");
+  console.log(
+    bundled.length ? bundled.join("\n") : "  (nothing to bundle: no local auth artifacts found)",
+  );
   console.log(
     "\nWARNING: .runway-auth/ is a private dev helper for manually seeding a sandbox." +
       "\nIt is NOT hosted credential custody. Keep it gitignored and never share it.",

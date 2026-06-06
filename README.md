@@ -7,6 +7,7 @@ V1 is narrow: one Cloudflare Worker control plane, Cloudflare Sandbox as the onl
 two executors, Linear as the first source, a direct `POST /jobs` as the dev/markdown path.
 
 ## Layout
+
 ```
 src/
   index.ts            Worker entry: routes, dispatch, job state
@@ -23,6 +24,7 @@ tests/                vitest unit tests
 ```
 
 ## Develop
+
 ```
 npm install
 npm run typecheck      # tsc --noEmit
@@ -34,6 +36,7 @@ npm run dev            # wrangler dev (needs Docker for the container)
 ```
 
 ## Configure
+
 Non-secret config lives in `wrangler.jsonc` → `vars` (`DEFAULT_EXECUTOR`, `DEFAULT_REPO`,
 `GITHUB_OWNER`, `CODEX_CLOUD_ENV_ID`, `LINEAR_TRIGGER_STATE`, `LINEAR_TRIGGER_COMMENT`).
 
@@ -45,12 +48,14 @@ Auth is bring-your-own: nothing is hosted for you. `npm run probe:auth` checks e
 `npm run probe:auth -- --package` writes a local, gitignored bundle for seeding a sandbox by hand.
 
 ## Endpoints
+
 - `POST /webhooks/linear` — verified Linear webhook (HMAC signature + fresh timestamp required) → job.
 - `POST /jobs` — submit a JobSpec directly (markdown/dev path). Requires `Authorization: Bearer $RUNWAY_API_TOKEN`; disabled if that secret is unset.
 - `GET /jobs/:id` — job state.
 - `GET /health` — liveness.
 
 ## Deploy
+
 ```
 wrangler kv namespace create JOBS      # optional job-state store; paste id into wrangler.jsonc
 wrangler secret put GITHUB_TOKEN       # ...and the other secrets
@@ -58,6 +63,7 @@ wrangler deploy
 ```
 
 ### Deploy-time checks (need a Cloudflare account + Docker + real creds)
+
 - Sandbox runs the Codex Cloud submit command and stops.
 - Sandbox runs a Pi job and stops.
-These can't run in CI without credentials; verify after `wrangler deploy` with a real repo.
+  These can't run in CI without credentials; verify after `wrangler deploy` with a real repo.

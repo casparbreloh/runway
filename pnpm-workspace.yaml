@@ -2,6 +2,20 @@ allowBuilds:
   esbuild: true
   msgpackr-extract: false
   workerd: true
-minimumReleaseAgeExclude:
-  - alchemy@2.0.0-beta.52
-  - effect@4.0.0-beta.78
+
+catalog:
+  "@cloudflare/workers-types": ^4.20260605.1
+  "@octokit/core": ^7.0.6
+  "@octokit/plugin-rest-endpoint-methods": ^17.0.0
+  "@types/node": 25.6.0
+  "@typescript/native-preview": 7.0.0-dev.20260506.1
+  alchemy: 2.0.0-beta.51
+  effect: 4.0.0-beta.78
+  oxfmt: 0.48.0
+  oxlint: 1.63.0
+  oxlint-tsgolint: 0.22.1
+  tsx: 4.21.0
+  typescript: 6.0.3
+  vitest: 2.1.9
+
+catalogMode: strict

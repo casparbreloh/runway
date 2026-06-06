@@ -1,6 +1,7 @@
-import { Context, Effect, Layer } from "effect";
 import { Octokit } from "@octokit/core";
 import { restEndpointMethods } from "@octokit/plugin-rest-endpoint-methods";
+import { Context, Effect, Layer } from "effect";
+
 import { GitHubError, type PullRequest } from "./domain.ts";
 
 const OctokitRest = Octokit.plugin(restEndpointMethods);
@@ -32,16 +33,21 @@ const toPullRequest = (data: { number: number; html_url: string; draft?: boolean
     : { number: data.number, html_url: data.html_url, draft: data.draft };
 
 const toGitHubError = (e: unknown): GitHubError =>
-  new GitHubError({ status: Number((e as any)?.status ?? 0), message: String((e as any)?.message ?? e) });
+  new GitHubError({
+    status: Number((e as any)?.status ?? 0),
+    message: String((e as any)?.message ?? e),
+  });
 
 const buildService = (config: GitHubConfig): GitHubService => {
   const octokit =
-    (config.octokit as any) ?? new OctokitRest({ auth: config.token, userAgent: config.userAgent ?? "runway" });
+    (config.octokit as any) ??
+    new OctokitRest({ auth: config.token, userAgent: config.userAgent ?? "runway" });
   const { owner, repo } = config;
 
   const findOpenPR: GitHubService["findOpenPR"] = (headBranch) =>
     Effect.tryPromise({
-      try: () => octokit.rest.pulls.list({ owner, repo, head: `${owner}:${headBranch}`, state: "open" }),
+      try: () =>
+        octokit.rest.pulls.list({ owner, repo, head: `${owner}:${headBranch}`, state: "open" }),
       catch: toGitHubError,
     }).pipe(Effect.map((res: any) => (res.data[0] ? toPullRequest(res.data[0]) : null)));
 
@@ -51,7 +57,13 @@ const buildService = (config: GitHubConfig): GitHubService => {
         Effect.tryPromise({
           try: () =>
             found
-              ? octokit.rest.pulls.update({ owner, repo, pull_number: found.number, title: args.title, body: args.body })
+              ? octokit.rest.pulls.update({
+                  owner,
+                  repo,
+                  pull_number: found.number,
+                  title: args.title,
+                  body: args.body,
+                })
               : octokit.rest.pulls.create({ owner, repo, ...args, draft: true }),
           catch: toGitHubError,
         }),
@@ -61,7 +73,8 @@ const buildService = (config: GitHubConfig): GitHubService => {
 
   const postComment: GitHubService["postComment"] = (issueNumber, body) =>
     Effect.tryPromise({
-      try: () => octokit.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body }),
+      try: () =>
+        octokit.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body }),
       catch: toGitHubError,
     }).pipe(Effect.asVoid);
 

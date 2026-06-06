@@ -1,11 +1,13 @@
 import { createHmac } from "node:crypto";
+
 import { Effect, Ref } from "effect";
 import { describe, expect, it } from "vitest";
+
 import type { JobSpec, LinearWebhook } from "../src/domain.ts";
-import { eventToJobSpec, verifyLinearSignature } from "../src/Linear.ts";
-import { Recorder, RecordingSandbox } from "../src/Sandbox.ts";
-import { runCodexCloud } from "../src/executors/codexCloud.ts";
+import { runCodexCloud } from "../src/executors/codex-cloud.ts";
 import { runPi } from "../src/executors/pi.ts";
+import { eventToJobSpec, verifyLinearSignature } from "../src/linear.ts";
+import { Recorder, RecordingSandbox } from "../src/sandbox.ts";
 
 const spec: JobSpec = {
   id: "job-1",
@@ -32,12 +34,16 @@ describe("runway", () => {
       return { result, commands };
     });
 
-    const { result, commands } = await Effect.runPromise(program.pipe(Effect.provide(RecordingSandbox(responder))));
+    const { result, commands } = await Effect.runPromise(
+      program.pipe(Effect.provide(RecordingSandbox(responder))),
+    );
 
     expect(result.status).toBe("success");
     expect(result.pushed).toBe(true);
     expect(commands.some((c) => c.includes("git clone"))).toBe(true);
-    expect(commands.some((c) => c.includes("pi --mode json") && !c.includes("--approve"))).toBe(true);
+    expect(commands.some((c) => c.includes("pi --mode json") && !c.includes("--approve"))).toBe(
+      true,
+    );
     expect(commands.some((c) => c.includes("git push"))).toBe(true);
     expect(commands.join("\n")).not.toContain("secret-token");
   });
@@ -60,7 +66,13 @@ describe("runway", () => {
       action: "create",
       type: "Issue",
       webhookTimestamp: 1,
-      data: { id: "u1", identifier: "ENG-1", title: "Add hello", description: "repo: acme/widgets", state: { name: "Runway" } },
+      data: {
+        id: "u1",
+        identifier: "ENG-1",
+        title: "Add hello",
+        description: "repo: acme/widgets",
+        state: { name: "Runway" },
+      },
     };
     const body = JSON.stringify(payload);
     const signature = createHmac("sha256", secret).update(body).digest("hex");
@@ -70,7 +82,12 @@ describe("runway", () => {
     expect(verified).toBe(true);
 
     const job = await Effect.runPromise(
-      eventToJobSpec(payload, { defaultExecutor: "pi", defaultBase: "main", triggerState: "Runway", triggerComment: "/runway" }),
+      eventToJobSpec(payload, {
+        defaultExecutor: "pi",
+        defaultBase: "main",
+        triggerState: "Runway",
+        triggerComment: "/runway",
+      }),
     );
     expect(job?.repo).toEqual({ owner: "acme", name: "widgets" });
     expect(job?.executor).toBe("pi");

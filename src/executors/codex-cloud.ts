@@ -1,6 +1,7 @@
 import { Effect } from "effect";
+
 import { type JobResult, type JobSpec, jobResult } from "../domain.ts";
-import { Sandbox } from "../Sandbox.ts";
+import { Sandbox } from "../sandbox.ts";
 
 export const runCodexCloud = (
   spec: JobSpec,
@@ -22,7 +23,10 @@ export const runCodexCloud = (
       `cat /work/prompt.txt | codex cloud exec --env ${opts.envId} --branch ${spec.branch} -`,
     );
     if (r.exitCode !== 0) {
-      return jobResult(spec, "failure", { error: "codex cloud exec failed", logsTail: r.stderr.slice(-2000) });
+      return jobResult(spec, "failure", {
+        error: "codex cloud exec failed",
+        logsTail: r.stderr.slice(-2000),
+      });
     }
 
     const lines = r.stdout.trim().split("\n");

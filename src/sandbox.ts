@@ -25,7 +25,8 @@ export interface RecorderState {
 export const Recorder = Context.Service<RecorderState>("Recorder");
 export type Recorder = (typeof Recorder)["Identifier"];
 
-export const sandboxLayer = (impl: SandboxService): Layer.Layer<Sandbox> => Layer.succeed(Sandbox, impl);
+export const sandboxLayer = (impl: SandboxService): Layer.Layer<Sandbox> =>
+  Layer.succeed(Sandbox, impl);
 
 export const RecordingSandbox = (
   responder?: (command: string) => Partial<ExecResult>,
@@ -41,13 +42,20 @@ export const RecordingSandbox = (
           Ref.update(commands, (c) => [...c, command]).pipe(
             Effect.map((): ExecResult => {
               const r = responder?.(command) ?? {};
-              return { command, exitCode: r.exitCode ?? 0, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+              return {
+                command,
+                exitCode: r.exitCode ?? 0,
+                stdout: r.stdout ?? "",
+                stderr: r.stderr ?? "",
+              };
             }),
           ),
         writeFile: (path, content) => Ref.update(writes, (w) => [...w, { path, content }]),
         setEnvVars: (env) => Ref.update(envVars, (e) => ({ ...e, ...env })),
       };
 
-      return Context.make(Sandbox, sandbox).pipe(Context.add(Recorder, { commands, writes, envVars }));
+      return Context.make(Sandbox, sandbox).pipe(
+        Context.add(Recorder, { commands, writes, envVars }),
+      );
     }),
   );

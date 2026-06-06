@@ -51,7 +51,9 @@ export const LinearIssueData = Schema.Struct({
   identifier: Schema.optional(Schema.String),
   title: Schema.optional(Schema.String),
   description: Schema.optional(Schema.String),
-  state: Schema.optional(Schema.Struct({ name: Schema.optional(Schema.String), type: Schema.optional(Schema.String) })),
+  state: Schema.optional(
+    Schema.Struct({ name: Schema.optional(Schema.String), type: Schema.optional(Schema.String) }),
+  ),
 });
 
 export const LinearCommentData = Schema.Struct({
@@ -82,7 +84,9 @@ export const PullRequest = Schema.Struct({
 });
 export type PullRequest = typeof PullRequest.Type;
 
-export class ValidationError extends Data.TaggedError("ValidationError")<{ readonly reason: string }> {}
+export class ValidationError extends Data.TaggedError("ValidationError")<{
+  readonly reason: string;
+}> {}
 export class WebhookError extends Data.TaggedError("WebhookError")<{ readonly reason: string }> {}
 export class AuthError extends Data.TaggedError("AuthError")<{ readonly reason: string }> {}
 export class SandboxError extends Data.TaggedError("SandboxError")<{ readonly reason: string }> {}
@@ -95,20 +99,29 @@ export class GitHubError extends Data.TaggedError("GitHubError")<{
   readonly status: number;
   readonly message: string;
 }> {}
-export class MissingConfigError extends Data.TaggedError("MissingConfigError")<{ readonly key: string }> {}
+export class MissingConfigError extends Data.TaggedError("MissingConfigError")<{
+  readonly key: string;
+}> {}
 
 const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 export const parseRepo = (slug: string): Repo => {
   const [owner, name, ...rest] = slug.trim().split("/");
-  if (!owner || !name || rest.length) throw new Error(`invalid repo "${slug}", expected "owner/name"`);
+  if (!owner || !name || rest.length)
+    throw new Error(`invalid repo "${slug}", expected "owner/name"`);
   if (!REPO_SEGMENT.test(owner) || !REPO_SEGMENT.test(name)) {
-    throw new Error(`invalid repo "${slug}": owner/name may contain only letters, digits, '.', '_', '-'`);
+    throw new Error(
+      `invalid repo "${slug}": owner/name may contain only letters, digits, '.', '_', '-'`,
+    );
   }
   return { owner, name };
 };
 
-export const jobResult = (spec: JobSpec, status: JobStatus, extra?: Partial<JobResult>): JobResult => ({
+export const jobResult = (
+  spec: JobSpec,
+  status: JobStatus,
+  extra?: Partial<JobResult>,
+): JobResult => ({
   jobId: spec.id,
   executor: spec.executor,
   status,

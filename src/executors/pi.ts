@@ -1,6 +1,7 @@
 import { Effect } from "effect";
+
 import { type JobResult, type JobSpec, jobResult } from "../domain.ts";
-import { Sandbox } from "../Sandbox.ts";
+import { Sandbox } from "../sandbox.ts";
 
 const REDACT_TOKEN = /x-access-token:[^@\s]+@/g;
 const tail = (s: string): string => (s.length > 2000 ? s.slice(-2000) : s);
@@ -36,7 +37,10 @@ export const runPi = (
       `git clone --depth 1 https://x-access-token:\${GITHUB_TOKEN}@github.com/${spec.repo.owner}/${spec.repo.name}.git ${repoDir}`,
     );
     if (clone.exitCode !== 0) {
-      return jobResult(spec, "failure", { error: "git clone failed", logsTail: redact(clone.stderr) });
+      return jobResult(spec, "failure", {
+        error: "git clone failed",
+        logsTail: redact(clone.stderr),
+      });
     }
 
     yield* sandbox.exec(
@@ -49,10 +53,15 @@ export const runPi = (
     );
     const events = parseJsonLines(pi.stdout);
     const ended = events.some((e) => e?.type === "agent_end");
-    const toolErrors = events.filter((e) => e?.type === "tool_execution_end" && e.isError).map((e) => e.toolName);
+    const toolErrors = events
+      .filter((e) => e?.type === "tool_execution_end" && e.isError)
+      .map((e) => e.toolName);
     if (pi.exitCode !== 0 || !ended) {
       const detail = toolErrors.length ? ` (tool errors: ${toolErrors.join(",")})` : "";
-      return jobResult(spec, "failure", { error: `pi step failed${detail}`, logsTail: redact(pi.stderr || pi.stdout) });
+      return jobResult(spec, "failure", {
+        error: `pi step failed${detail}`,
+        logsTail: redact(pi.stderr || pi.stdout),
+      });
     }
 
     const cmds = spec.validate ?? [];
@@ -74,12 +83,19 @@ export const runPi = (
 
     const commit = yield* sandbox.exec(`cd ${repoDir} && git commit -m "$RUNWAY_COMMIT_MSG"`);
     if (commit.exitCode !== 0) {
-      return jobResult(spec, "failure", { error: "git commit failed", logsTail: redact(commit.stderr) });
+      return jobResult(spec, "failure", {
+        error: "git commit failed",
+        logsTail: redact(commit.stderr),
+      });
     }
 
     const push = yield* sandbox.exec(`cd ${repoDir} && git push -u origin ${spec.branch}`);
     if (push.exitCode !== 0) {
-      return jobResult(spec, "failure", { pushed: false, error: "git push failed", logsTail: redact(push.stderr) });
+      return jobResult(spec, "failure", {
+        pushed: false,
+        error: "git push failed",
+        logsTail: redact(push.stderr),
+      });
     }
 
     return jobResult(spec, "success", {
