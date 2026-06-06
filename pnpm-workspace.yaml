@@ -5,15 +5,23 @@ allowBuilds:
 
 catalog:
   "@cloudflare/workers-types": ^4.20260605.1
+  "@effect/platform-node": 4.0.0-beta.78
+  "@effect/vitest": 4.0.0-beta.78
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
-  alchemy: 2.0.0-beta.51
+  alchemy: 2.0.0-beta.52
   effect: 4.0.0-beta.78
   oxfmt: 0.48.0
   oxlint: 1.63.0
   oxlint-tsgolint: 0.22.1
   tsx: 4.21.0
   typescript: 6.0.3
-  vitest: 2.1.9
+  vite: 8.0.10
+  vitest: 4.1.8
 
 catalogMode: strict
+
+# alchemy + effect betas ship in lockstep; beta.52 is the version built against effect beta.78.
+# Pinned and excluded from minimumReleaseAge so the matched pair installs.
+minimumReleaseAgeExclude:
+  - alchemy@2.0.0-beta.52
