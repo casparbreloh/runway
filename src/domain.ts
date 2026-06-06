@@ -1,7 +1,10 @@
 import { Data, Schema } from "effect";
 
-export const Executor = Schema.Literals(["codex-cloud", "pi"]);
-export type Executor = typeof Executor.Type;
+export const AgentName = Schema.Literals(["codex", "pi"]);
+export type AgentName = typeof AgentName.Type;
+
+export const SourceName = Schema.Literals(["linear", "markdown"]);
+export type SourceName = typeof SourceName.Type;
 
 export const Repo = Schema.Struct({
   owner: Schema.String,
@@ -10,7 +13,7 @@ export const Repo = Schema.Struct({
 export type Repo = typeof Repo.Type;
 
 export const JobSource = Schema.Struct({
-  type: Schema.Literals(["linear", "markdown", "api"]),
+  type: SourceName,
   ref: Schema.optional(Schema.String),
 });
 
@@ -19,7 +22,7 @@ export const JobSpec = Schema.Struct({
   repo: Repo,
   branch: Schema.String,
   plan: Schema.String,
-  executor: Executor,
+  agent: AgentName,
   base: Schema.String,
   validate: Schema.optional(Schema.Array(Schema.String)),
   title: Schema.optional(Schema.String),
@@ -32,7 +35,7 @@ export type JobStatus = typeof JobStatus.Type;
 
 export const JobResult = Schema.Struct({
   jobId: Schema.String,
-  executor: Executor,
+  agent: AgentName,
   status: JobStatus,
   taskUrl: Schema.optional(Schema.String),
   taskId: Schema.optional(Schema.String),
@@ -99,9 +102,7 @@ export class GitHubError extends Data.TaggedError("GitHubError")<{
   readonly status: number;
   readonly message: string;
 }> {}
-export class MissingConfigError extends Data.TaggedError("MissingConfigError")<{
-  readonly key: string;
-}> {}
+export class StoreError extends Data.TaggedError("StoreError")<{ readonly reason: string }> {}
 
 const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
@@ -123,7 +124,7 @@ export const jobResult = (
   extra?: Partial<JobResult>,
 ): JobResult => ({
   jobId: spec.id,
-  executor: spec.executor,
+  agent: spec.agent,
   status,
   ...extra,
 });

@@ -10,6 +10,7 @@ export interface ExecResult {
 export interface SandboxService {
   readonly exec: (command: string) => Effect.Effect<ExecResult>;
   readonly writeFile: (path: string, content: string) => Effect.Effect<void>;
+  readonly readFile: (path: string) => Effect.Effect<string>;
   readonly setEnvVars: (env: Record<string, string>) => Effect.Effect<void>;
 }
 
@@ -28,9 +29,12 @@ export type Recorder = (typeof Recorder)["Identifier"];
 export const sandboxLayer = (impl: SandboxService): Layer.Layer<Sandbox> =>
   Layer.succeed(Sandbox, impl);
 
-export const RecordingSandbox = (
-  responder?: (command: string) => Partial<ExecResult>,
-): Layer.Layer<Sandbox | Recorder> =>
+export interface RecordingOptions {
+  readonly exec?: (command: string) => Partial<ExecResult>;
+  readonly read?: (path: string) => string | undefined;
+}
+
+export const RecordingSandbox = (options: RecordingOptions = {}): Layer.Layer<Sandbox | Recorder> =>
   Layer.effectContext(
     Effect.gen(function* () {
       const commands = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -41,7 +45,7 @@ export const RecordingSandbox = (
         exec: (command) =>
           Ref.update(commands, (c) => [...c, command]).pipe(
             Effect.map((): ExecResult => {
-              const r = responder?.(command) ?? {};
+              const r = options.exec?.(command) ?? {};
               return {
                 command,
                 exitCode: r.exitCode ?? 0,
@@ -51,6 +55,12 @@ export const RecordingSandbox = (
             }),
           ),
         writeFile: (path, content) => Ref.update(writes, (w) => [...w, { path, content }]),
+        readFile: (path) =>
+          Ref.get(writes).pipe(
+            Effect.map(
+              (w) => options.read?.(path) ?? w.findLast((f) => f.path === path)?.content ?? "",
+            ),
+          ),
         setEnvVars: (env) => Ref.update(envVars, (e) => ({ ...e, ...env })),
       };
 

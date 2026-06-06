@@ -18,6 +18,7 @@ export interface GitHubService {
 }
 
 export const GitHub = Context.Service<GitHubService>("GitHub");
+export type GitHub = (typeof GitHub)["Identifier"];
 
 export interface GitHubConfig {
   readonly token: string;

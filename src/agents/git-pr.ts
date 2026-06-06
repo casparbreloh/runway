@@ -7,60 +7,45 @@ const REDACT_TOKEN = /x-access-token:[^@\s]+@/g;
 const tail = (s: string): string => (s.length > 2000 ? s.slice(-2000) : s);
 const redact = (s: string): string => tail(s).replace(REDACT_TOKEN, "x-access-token:***@");
 
-const parseJsonLines = (text: string): any[] =>
-  text.split("\n").flatMap((line) => {
-    try {
-      return [JSON.parse(line)];
-    } catch {
-      return [];
-    }
-  });
+export interface GitPrOptions {
+  readonly agentCommand: string;
+  readonly succeeded?: (stdout: string) => boolean;
+  readonly workdir?: string;
+}
 
-export const runPi = (
+export const runGitPr = (
   spec: JobSpec,
-  opts: { githubToken: string; anthropicApiKey?: string; openaiApiKey?: string; workdir?: string },
+  opts: GitPrOptions,
 ): Effect.Effect<JobResult, never, Sandbox> =>
   Effect.gen(function* () {
     const sandbox = yield* Sandbox;
     const repoDir = `${opts.workdir ?? "/work"}/repo`;
 
-    const env: Record<string, string> = {
+    yield* sandbox.setEnvVars({
       GIT_TERMINAL_PROMPT: "0",
-      GITHUB_TOKEN: opts.githubToken,
       RUNWAY_COMMIT_MSG: spec.title ?? `Runway: ${spec.branch}`,
-    };
-    if (opts.anthropicApiKey !== undefined) env.ANTHROPIC_API_KEY = opts.anthropicApiKey;
-    if (opts.openaiApiKey !== undefined) env.OPENAI_API_KEY = opts.openaiApiKey;
-    yield* sandbox.setEnvVars(env);
+    });
 
     const clone = yield* sandbox.exec(
       `git clone --depth 1 https://x-access-token:\${GITHUB_TOKEN}@github.com/${spec.repo.owner}/${spec.repo.name}.git ${repoDir}`,
     );
-    if (clone.exitCode !== 0) {
+    if (clone.exitCode !== 0)
       return jobResult(spec, "failure", {
         error: "git clone failed",
         logsTail: redact(clone.stderr),
       });
-    }
 
     yield* sandbox.exec(
       `cd ${repoDir} && git checkout -B ${spec.branch} && git config user.email runway@local && git config user.name Runway`,
     );
     yield* sandbox.writeFile(`${repoDir}/PLAN.md`, spec.plan);
 
-    const pi = yield* sandbox.exec(
-      `cd ${repoDir} && pi --mode json -p "Read PLAN.md and implement it. Make the smallest change that satisfies it."`,
-    );
-    const events = parseJsonLines(pi.stdout);
-    const ended = events.some((e) => e?.type === "agent_end");
-    const toolErrors = events
-      .filter((e) => e?.type === "tool_execution_end" && e.isError)
-      .map((e) => e.toolName);
-    if (pi.exitCode !== 0 || !ended) {
-      const detail = toolErrors.length ? ` (tool errors: ${toolErrors.join(",")})` : "";
+    const run = yield* sandbox.exec(`cd ${repoDir} && ${opts.agentCommand}`);
+    const ok = opts.succeeded ? opts.succeeded(run.stdout) : run.exitCode === 0;
+    if (run.exitCode !== 0 || !ok) {
       return jobResult(spec, "failure", {
-        error: `pi step failed${detail}`,
-        logsTail: redact(pi.stderr || pi.stdout),
+        error: "agent step failed",
+        logsTail: redact(run.stderr || run.stdout),
       });
     }
 
@@ -77,17 +62,16 @@ export const runPi = (
       return jobResult(spec, "success", {
         pushed: false,
         ...(validated !== undefined ? { validated } : {}),
-        summary: "pi job completed; no changes produced, nothing to push.",
+        summary: "agent completed; no changes produced, nothing to push.",
       });
     }
 
     const commit = yield* sandbox.exec(`cd ${repoDir} && git commit -m "$RUNWAY_COMMIT_MSG"`);
-    if (commit.exitCode !== 0) {
+    if (commit.exitCode !== 0)
       return jobResult(spec, "failure", {
         error: "git commit failed",
         logsTail: redact(commit.stderr),
       });
-    }
 
     const push = yield* sandbox.exec(`cd ${repoDir} && git push -u origin ${spec.branch}`);
     if (push.exitCode !== 0) {
@@ -103,7 +87,7 @@ export const runPi = (
       ...(validated !== undefined ? { validated } : {}),
       summary:
         validated === false
-          ? `pi job completed; validation failed; branch ${spec.branch} pushed.`
-          : `pi job completed; branch ${spec.branch} pushed.`,
+          ? `agent completed; validation failed; branch ${spec.branch} pushed.`
+          : `agent completed; branch ${spec.branch} pushed.`,
     });
   });

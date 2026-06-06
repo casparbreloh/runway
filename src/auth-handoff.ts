@@ -127,6 +127,7 @@ function runReport(): void {
 function packageAuth(): void {
   const targets = [
     { label: "codex auth.json", src: join(codexHome(), "auth.json") },
+    { label: "pi auth.json", src: join(homedir(), ".pi", "agent", "auth.json") },
     { label: "pi settings.json", src: join(homedir(), ".pi", "agent", "settings.json") },
   ];
   const outDir = join(process.cwd(), ".runway-auth");
