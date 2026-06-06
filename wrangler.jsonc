@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "runway",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-06",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Cloudflare Sandbox = the only cloud runtime. Image must match the SDK version.
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 5
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }]
+  },
+  "migrations": [{ "new_sqlite_classes": ["Sandbox"], "tag": "v1" }],
+
+  // Non-secret config. Secrets go via `wrangler secret put` (see README).
+  "vars": {
+    "DEFAULT_EXECUTOR": "pi",
+    "DEFAULT_BASE": "main",
+    "DEFAULT_REPO": "",
+    "GITHUB_OWNER": "",
+    "CODEX_CLOUD_ENV_ID": "",
+    "LINEAR_TRIGGER_STATE": "Runway",
+    "LINEAR_TRIGGER_COMMENT": "/runway"
+  }
+
+  // Optional job-state store. Create with `wrangler kv namespace create JOBS`,
+  // then uncomment and paste the id. Runway runs fine without it (state is best-effort).
+  // "kv_namespaces": [{ "binding": "JOBS", "id": "<your-kv-id>" }]
+}

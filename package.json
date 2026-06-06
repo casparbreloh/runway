@@ -1,0 +1,27 @@
+{
+  "name": "runway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Launch coding-agent jobs from Linear issues or markdown plans on Cloudflare Sandbox.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "probe:auth": "tsx src/auth-handoff.ts",
+    "codex-cloud:dry": "tsx scripts/codex-cloud-dry.ts",
+    "pi:dry": "tsx scripts/pi-dry.ts"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.11.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240000.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^4.0.0"
+  }
+}
