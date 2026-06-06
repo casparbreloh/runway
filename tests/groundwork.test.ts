@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import { agents } from "../src/agents/index.ts";
 import { dispatchJob } from "../src/dispatch.ts";
 import type { JobSpec, LinearWebhook } from "../src/domain.ts";
-import { GitHub } from "../src/github.ts";
 import { Recorder, RecordingSandbox } from "../src/sandbox.ts";
 import { isFreshTimestamp, linearSource, verifyLinearSignature } from "../src/sources/linear.ts";
 import { inMemoryStore, Store } from "../src/store.ts";
@@ -39,23 +38,14 @@ const piSpec: JobSpec = {
   title: "feat: add hello",
 };
 
-// Sandbox responder: real changes staged, and the pi JSON stream ends with agent_end.
+// Sandbox responder: changes staged, pi JSON stream ends with agent_end, gh prints the PR url.
 const happyRun = (command: string) => {
   if (command.includes("git diff --cached --quiet")) return { exitCode: 1 };
   if (command.includes("--mode json")) return { stdout: '{"type":"agent_end"}\n' };
+  if (command.includes("gh pr create"))
+    return { stdout: "https://github.com/acme/widgets/pull/7\n" };
   return {};
 };
-
-const mockGitHub = (record: { head?: string }): Layer.Layer<GitHub> =>
-  Layer.succeed(GitHub, {
-    findOpenPR: () => Effect.succeed(null),
-    createOrUpdateDraftPR: (args) =>
-      Effect.sync(() => {
-        record.head = args.head;
-        return { number: 7, html_url: "https://gh/pr/7" };
-      }),
-    postComment: () => Effect.void,
-  });
 
 describe("groundwork", () => {
   it("maps a Linear issue to a job, resolving the repo via the RepoMap", async () => {
@@ -118,26 +108,22 @@ describe("groundwork", () => {
 
   it("seeds the subscription credential, never leaks it, and writes back the rotated token", async () => {
     const store = inMemoryStore({ credentials: { codex: '{"tok":"SEED"}' } });
-    const record: { head?: string } = {};
     const sandbox = RecordingSandbox({
       exec: happyRun,
       read: (path) => (path === "/work/.codex/auth.json" ? '{"tok":"ROTATED"}' : undefined),
     });
 
     const program = Effect.gen(function* () {
-      const result = yield* dispatchJob(
-        { ...piSpec, agent: "codex" },
-        { githubToken: "GH-SECRET" },
-      );
+      yield* dispatchJob({ ...piSpec, agent: "codex" }, { githubToken: "GH-SECRET" });
       const writes = yield* Ref.get((yield* Recorder).writes);
       const env = yield* Ref.get((yield* Recorder).envVars);
       const commands = yield* Ref.get((yield* Recorder).commands);
       const stored = yield* (yield* Store).getCredential("codex");
-      return { result, writes, env, commands, stored };
+      return { writes, env, commands, stored };
     });
 
     const out = await Effect.runPromise(
-      program.pipe(Effect.provide(Layer.mergeAll(sandbox, store, mockGitHub(record)))),
+      program.pipe(Effect.provide(Layer.mergeAll(sandbox, store))),
     );
 
     expect(out.writes).toContainEqual({
@@ -153,21 +139,25 @@ describe("groundwork", () => {
     expect(out.stored?.content).toBe('{"tok":"ROTATED"}');
   });
 
-  it("runs a pi job and opens a draft PR for the pushed branch", async () => {
+  it("runs a pi job and opens a draft PR in the sandbox via gh", async () => {
     const store = inMemoryStore({ credentials: { pi: '{"tok":"SEED"}' } });
-    const record: { head?: string } = {};
 
-    const result = await Effect.runPromise(
-      dispatchJob(piSpec, { githubToken: "GH-SECRET" }).pipe(
-        Effect.provide(
-          Layer.mergeAll(RecordingSandbox({ exec: happyRun }), store, mockGitHub(record)),
-        ),
-      ),
+    const program = Effect.gen(function* () {
+      const result = yield* dispatchJob(piSpec, { githubToken: "GH-SECRET" });
+      const commands = yield* Ref.get((yield* Recorder).commands);
+      return { result, commands };
+    });
+
+    const out = await Effect.runPromise(
+      program.pipe(Effect.provide(Layer.mergeAll(RecordingSandbox({ exec: happyRun }), store))),
     );
 
-    expect(result.status).toBe("success");
-    expect(result.pushed).toBe(true);
-    expect(result.prNumber).toBe(7);
-    expect(record.head).toBe("runway/feature");
+    expect(out.result.status).toBe("success");
+    expect(out.result.pushed).toBe(true);
+    expect(out.result.prUrl).toBe("https://github.com/acme/widgets/pull/7");
+    expect(out.result.prNumber).toBe(7);
+    expect(
+      out.commands.some((c) => c.includes("gh pr create --draft") && c.includes("runway/feature")),
+    ).toBe(true);
   });
 });

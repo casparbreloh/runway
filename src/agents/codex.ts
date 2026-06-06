@@ -7,6 +7,6 @@ export const codexAgent: Agent = {
   authProvider: "codex-subscription",
   run: (spec) =>
     runGitPr(spec, {
-      agentCommand: `codex exec --full-auto "Read PLAN.md and implement it. Make the smallest change that satisfies it."`,
+      agentCommand: `codex exec --full-auto "Read /work/PLAN.md and implement it. Make the smallest change that satisfies it. Optionally write a short PR.md summarizing your change."`,
     }),
 };

@@ -3,7 +3,6 @@ import { Effect } from "effect";
 import { agents } from "./agents/index.ts";
 import { authProviders } from "./auth/index.ts";
 import { type JobResult, type JobSpec, jobResult } from "./domain.ts";
-import { GitHub } from "./github.ts";
 import { Sandbox } from "./sandbox.ts";
 import { Store } from "./store.ts";
 
@@ -12,18 +11,10 @@ export interface DispatchSecrets {
   readonly openaiApiKey?: string;
 }
 
-const prBody = (spec: JobSpec, result: JobResult): string =>
-  [
-    `Automated draft PR by Runway (agent: ${spec.agent}).`,
-    result.validated === undefined ? "" : `Validation: ${result.validated ? "passed" : "failed"}`,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
 export const dispatchJob = (
   spec: JobSpec,
   secrets: DispatchSecrets,
-): Effect.Effect<JobResult, never, Sandbox | Store | GitHub> =>
+): Effect.Effect<JobResult, never, Sandbox | Store> =>
   Effect.gen(function* () {
     const sandbox = yield* Sandbox;
     const store = yield* Store;
@@ -51,7 +42,7 @@ export const dispatchJob = (
       return jobResult(spec, "failure", { error: "no OPENAI_API_KEY for api-key provider" });
     }
 
-    let result = yield* agent.run(spec);
+    const result = yield* agent.run(spec);
 
     if (provider.credentialKey !== null) {
       const rotated = yield* provider.collect();
@@ -59,40 +50,6 @@ export const dispatchJob = (
         yield* store
           .putCredential(provider.credentialKey, rotated, credUpdatedAt)
           .pipe(Effect.orElseSucceed(() => undefined));
-      }
-    }
-
-    if (result.status === "success" && result.pushed === true) {
-      const github = yield* GitHub;
-      const outcome = yield* github
-        .createOrUpdateDraftPR({
-          head: spec.branch,
-          base: spec.base,
-          title: spec.title ?? `Runway: ${spec.branch}`,
-          body: prBody(spec, result),
-        })
-        .pipe(
-          Effect.map((pr) => ({ ok: true as const, pr })),
-          Effect.catchTag("GitHubError", (e) =>
-            Effect.succeed({ ok: false as const, message: e.message }),
-          ),
-        );
-      if (outcome.ok) {
-        yield* github
-          .postComment(outcome.pr.number, result.summary ?? `job ${spec.id}: ${result.status}`)
-          .pipe(Effect.catchTag("GitHubError", () => Effect.void));
-        result = {
-          ...result,
-          prUrl: outcome.pr.html_url,
-          prNumber: outcome.pr.number,
-          summary: `Draft PR #${outcome.pr.number} ready: ${outcome.pr.html_url}`,
-        };
-      } else {
-        result = {
-          ...result,
-          error: `branch ${spec.branch} pushed but PR creation failed: ${outcome.message}`,
-          summary: `Branch ${spec.branch} pushed; draft PR creation failed.`,
-        };
       }
     }
 

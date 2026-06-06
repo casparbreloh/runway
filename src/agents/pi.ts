@@ -16,7 +16,7 @@ export const piAgent: Agent = {
   authProvider: "pi-subscription",
   run: (spec) =>
     runGitPr(spec, {
-      agentCommand: `pi --model openai-codex/gpt-5.5 --mode json -p "Read PLAN.md and implement it. Make the smallest change that satisfies it."`,
+      agentCommand: `pi --model openai-codex/gpt-5.5 --mode json -p "Read /work/PLAN.md and implement it. Make the smallest change that satisfies it. Optionally write a short PR.md summarizing your change."`,
       succeeded: piSucceeded,
     }),
 };

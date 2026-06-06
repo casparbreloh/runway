@@ -208,12 +208,6 @@ catalogs:
     '@cloudflare/workers-types':
       specifier: ^4.20260605.1
       version: 4.20260605.1
-    '@octokit/core':
-      specifier: ^7.0.6
-      version: 7.0.6
-    '@octokit/plugin-rest-endpoint-methods':
-      specifier: ^17.0.0
-      version: 17.0.0
     '@types/node':
       specifier: 25.6.0
       version: 25.6.0
@@ -249,12 +243,6 @@ importers:
 
   .:
     dependencies:
-      '@octokit/core':
-        specifier: 'catalog:'
-        version: 7.0.6
-      '@octokit/plugin-rest-endpoint-methods':
-        specifier: 'catalog:'
-        version: 17.0.0(@octokit/core@7.0.6)
       alchemy:
         specifier: 'catalog:'
         version: 2.0.0-beta.51(@types/node@25.6.0)(effect@4.0.0-beta.78)(vite@5.4.21(@types/node@25.6.0))(vitest@2.1.9(@types/node@25.6.0))(workerd@1.20260526.1)(ws@8.21.0)

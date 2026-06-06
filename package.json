@@ -15,8 +15,6 @@
     "probe:auth": "tsx src/auth-handoff.ts"
   },
   "dependencies": {
-    "@octokit/core": "catalog:",
-    "@octokit/plugin-rest-endpoint-methods": "catalog:",
     "alchemy": "catalog:",
     "effect": "catalog:"
   },
