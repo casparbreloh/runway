@@ -1,10 +1,35 @@
-node_modules/
-dist/
-.wrangler/
-.dev.vars
-.dev.vars.*
-!.dev.vars.example
-.runway-auth/
-spike/
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+build
+*.tsbuildinfo
+
+# Alchemy local state
+.alchemy
+
+# Environment variables
+.env*
+!.env*.example
+
+# Local auth bundle (private dev helper)
+.runway-auth
+
+# IDEs and editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea
+*.swp
+*.swo
+*~
+
+# Logs
+logs
 *.log
+
+# OS
 .DS_Store
