@@ -1,5 +1,3 @@
-// The sandbox command-runner service: exec/writeFile/setEnvVars over a Cloudflare Sandbox,
-// plus a recording test double that captures everything into shared Refs.
 import { Context, Effect, Layer, Ref } from "effect";
 
 export interface ExecResult {
@@ -10,7 +8,6 @@ export interface ExecResult {
 }
 
 export interface SandboxService {
-  /** Non-zero exitCode is DATA, not a failure — callers decide what to do with it. */
   readonly exec: (command: string) => Effect.Effect<ExecResult>;
   readonly writeFile: (path: string, content: string) => Effect.Effect<void>;
   readonly setEnvVars: (env: Record<string, string>) => Effect.Effect<void>;
@@ -28,13 +25,8 @@ export interface RecorderState {
 export const Recorder = Context.Service<RecorderState>("Recorder");
 export type Recorder = (typeof Recorder)["Identifier"];
 
-/** = Layer.succeed(Sandbox, impl) — wrap a concrete SandboxService as a Layer. */
 export const sandboxLayer = (impl: SandboxService): Layer.Layer<Sandbox> => Layer.succeed(Sandbox, impl);
 
-/**
- * A recording test double. Provides both Sandbox and Recorder over shared Refs:
- * exec/writeFile/setEnvVars record their inputs, and exec's result comes from `responder`.
- */
 export const RecordingSandbox = (
   responder?: (command: string) => Partial<ExecResult>,
 ): Layer.Layer<Sandbox | Recorder> =>
@@ -47,22 +39,15 @@ export const RecordingSandbox = (
       const sandbox: SandboxService = {
         exec: (command) =>
           Ref.update(commands, (c) => [...c, command]).pipe(
-            Effect.as<ExecResult>(((): ExecResult => {
+            Effect.map((): ExecResult => {
               const r = responder?.(command) ?? {};
-              return {
-                command,
-                exitCode: r.exitCode ?? 0,
-                stdout: r.stdout ?? "",
-                stderr: r.stderr ?? "",
-              };
-            })()),
+              return { command, exitCode: r.exitCode ?? 0, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+            }),
           ),
         writeFile: (path, content) => Ref.update(writes, (w) => [...w, { path, content }]),
         setEnvVars: (env) => Ref.update(envVars, (e) => ({ ...e, ...env })),
       };
 
-      const recorder: RecorderState = { commands, writes, envVars };
-
-      return Context.make(Sandbox, sandbox).pipe(Context.add(Recorder, recorder));
+      return Context.make(Sandbox, sandbox).pipe(Context.add(Recorder, { commands, writes, envVars }));
     }),
   );

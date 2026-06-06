@@ -1,8 +1,9 @@
-// GitHub draft-PR service over slim Octokit (@octokit/core + plugin-rest-endpoint-methods).
 import { Context, Effect, Layer } from "effect";
 import { Octokit } from "@octokit/core";
 import { restEndpointMethods } from "@octokit/plugin-rest-endpoint-methods";
 import { GitHubError, type PullRequest } from "./domain.ts";
+
+const OctokitRest = Octokit.plugin(restEndpointMethods);
 
 export interface GitHubService {
   readonly findOpenPR: (headBranch: string) => Effect.Effect<PullRequest | null, GitHubError>;
@@ -25,7 +26,6 @@ export interface GitHubConfig {
   readonly octokit?: unknown;
 }
 
-/** Normalize an octokit PR record into the domain shape, omitting `draft` when absent (exactOptionalPropertyTypes). */
 const toPullRequest = (data: { number: number; html_url: string; draft?: boolean }): PullRequest =>
   data.draft === undefined
     ? { number: data.number, html_url: data.html_url }
@@ -35,46 +35,26 @@ const toGitHubError = (e: unknown): GitHubError =>
   new GitHubError({ status: Number((e as any)?.status ?? 0), message: String((e as any)?.message ?? e) });
 
 const buildService = (config: GitHubConfig): GitHubService => {
-  const MyOctokit = Octokit.plugin(restEndpointMethods);
   const octokit =
-    (config.octokit as any) ?? new MyOctokit({ auth: config.token, userAgent: config.userAgent ?? "runway" });
-  const owner = config.owner;
-  const repo = config.repo;
+    (config.octokit as any) ?? new OctokitRest({ auth: config.token, userAgent: config.userAgent ?? "runway" });
+  const { owner, repo } = config;
 
   const findOpenPR: GitHubService["findOpenPR"] = (headBranch) =>
     Effect.tryPromise({
-      try: () => octokit.rest.pulls.list({ owner, repo, head: owner + ":" + headBranch, state: "open" }),
+      try: () => octokit.rest.pulls.list({ owner, repo, head: `${owner}:${headBranch}`, state: "open" }),
       catch: toGitHubError,
     }).pipe(Effect.map((res: any) => (res.data[0] ? toPullRequest(res.data[0]) : null)));
 
   const createOrUpdateDraftPR: GitHubService["createOrUpdateDraftPR"] = (args) =>
     findOpenPR(args.head).pipe(
       Effect.flatMap((found) =>
-        found
-          ? Effect.tryPromise({
-              try: () =>
-                octokit.rest.pulls.update({
-                  owner,
-                  repo,
-                  pull_number: found.number,
-                  title: args.title,
-                  body: args.body,
-                }),
-              catch: toGitHubError,
-            })
-          : Effect.tryPromise({
-              try: () =>
-                octokit.rest.pulls.create({
-                  owner,
-                  repo,
-                  title: args.title,
-                  head: args.head,
-                  base: args.base,
-                  body: args.body,
-                  draft: true,
-                }),
-              catch: toGitHubError,
-            }),
+        Effect.tryPromise({
+          try: () =>
+            found
+              ? octokit.rest.pulls.update({ owner, repo, pull_number: found.number, title: args.title, body: args.body })
+              : octokit.rest.pulls.create({ owner, repo, ...args, draft: true }),
+          catch: toGitHubError,
+        }),
       ),
       Effect.map((res: any) => toPullRequest(res.data)),
     );

@@ -1,4 +1,3 @@
-// Linear webhook verification + decode + mapping to a JobSpec.
 import { Effect, Schema } from "effect";
 import {
   type Executor,
@@ -12,12 +11,12 @@ import {
 
 const decodeIssueData = Schema.decodeUnknownSync(LinearIssueData);
 const decodeCommentData = Schema.decodeUnknownSync(LinearCommentData);
+const CODEX_RE = /codex/i;
+const PI_RE = /\bpi\b/i;
 
-/** Decode the top-level webhook envelope; `data` stays loose. */
 export const decodeWebhook: (u: unknown) => Effect.Effect<LinearWebhook, Schema.SchemaError> =
   Schema.decodeUnknownEffect(LinearWebhook);
 
-/** Lowercase hex HMAC-SHA256 of the raw body bytes with `secret`. */
 const hmacHex = (rawBody: ArrayBuffer, secret: string): Promise<string> =>
   crypto.subtle
     .importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
@@ -28,7 +27,6 @@ const hmacHex = (rawBody: ArrayBuffer, secret: string): Promise<string> =>
         .join(""),
     );
 
-/** Constant-time compare of two equal-length strings; false on length mismatch. */
 const constantTimeEqual = (a: string, b: string): boolean => {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -36,7 +34,6 @@ const constantTimeEqual = (a: string, b: string): boolean => {
   return diff === 0;
 };
 
-/** Verify the hex HMAC-SHA256 signature of the raw body bytes. */
 export const verifyLinearSignature = (
   rawBody: ArrayBuffer,
   signature: string,
@@ -44,7 +41,6 @@ export const verifyLinearSignature = (
 ): Effect.Effect<boolean> =>
   Effect.promise(async () => constantTimeEqual(await hmacHex(rawBody, secret), signature));
 
-/** True when the webhook timestamp is within `toleranceMs` of `nowMs`. */
 export const isFreshTimestamp = (webhookTimestamp: number, nowMs: number, toleranceMs = 60_000): boolean =>
   Math.abs(nowMs - webhookTimestamp) <= toleranceMs;
 
@@ -62,20 +58,17 @@ const slugify = (s: string): string =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-/** Pick executor from free text: explicit "codex" wins, then a standalone "pi" token, else the default. */
 const pickExecutor = (text: string, fallback: Executor): Executor => {
-  if (/codex/i.test(text)) return "codex-cloud";
-  if (/\bpi\b/i.test(text)) return "pi";
+  if (CODEX_RE.test(text)) return "codex-cloud";
+  if (PI_RE.test(text)) return "pi";
   return fallback;
 };
 
-/** A `repo: owner/name` line in the issue description overrides the configured default. */
 const repoSlugFor = (description: string, config: LinearConfig): string | undefined => {
   const match = description.match(/^repo:\s*(\S+\/\S+)/im);
   return match ? match[1] : config.defaultRepo;
 };
 
-/** Resolve the repo slug to a Repo; null when missing or `parseRepo` rejects it. */
 const resolveRepo = (slug: string | undefined): JobSpec["repo"] | null => {
   if (!slug) return null;
   try {
@@ -90,10 +83,9 @@ interface Trigger {
   readonly title: string | undefined;
   readonly ref: string | undefined;
   readonly description: string;
-  readonly executorText: string; // free text scanned for an executor keyword (incl. the command line)
+  readonly executorText: string;
 }
 
-/** Detect an issue trigger (create/update, optionally gated on state name). */
 const issueTrigger = (payload: LinearWebhook, config: LinearConfig): Trigger | null => {
   if (payload.type !== "Issue") return null;
   if (payload.action !== "create" && payload.action !== "update") return null;
@@ -110,7 +102,6 @@ const issueTrigger = (payload: LinearWebhook, config: LinearConfig): Trigger | n
   return { plan, title, ref: data.identifier, description, executorText: plan };
 };
 
-/** Detect a comment trigger: action create, body starts with the configured command prefix. */
 const commentTrigger = (payload: LinearWebhook, config: LinearConfig): Trigger | null => {
   if (payload.type !== "Comment" || payload.action !== "create") return null;
   if (!config.triggerComment) return null;
@@ -122,18 +113,17 @@ const commentTrigger = (payload: LinearWebhook, config: LinearConfig): Trigger |
   }
   const body = data.body ?? "";
   if (!body.trim().startsWith(config.triggerComment)) return null;
-  const lines = body.split("\n");
-  const rest = lines.slice(1).join("\n").trim();
-  const plan = rest || body;
+  const rest = body.split("\n").slice(1).join("\n").trim();
   const issue = data.issue;
-  const description = issue?.description ?? "";
-  return { plan, title: issue?.title, ref: issue?.identifier, description, executorText: body };
+  return {
+    plan: rest || body,
+    title: issue?.title,
+    ref: issue?.identifier,
+    description: issue?.description ?? "",
+    executorText: body,
+  };
 };
 
-/**
- * Map a webhook to a JobSpec, or null when it is not a trigger / the repo can't be resolved.
- * Reads `payload.data` defensively via the domain Schemas.
- */
 export const eventToJobSpec = (
   payload: LinearWebhook,
   config: LinearConfig,
@@ -145,8 +135,6 @@ export const eventToJobSpec = (
     const repo = resolveRepo(repoSlugFor(trigger.description, config));
     if (!repo) return null;
 
-    const executor = pickExecutor(`${trigger.title ?? ""}\n${trigger.executorText}`, config.defaultExecutor);
-
     const slug = slugify(trigger.ref ?? trigger.title ?? trigger.plan);
     if (!slug) return null;
 
@@ -154,15 +142,14 @@ export const eventToJobSpec = (
       ? { type: "linear", ref: trigger.ref }
       : { type: "linear" };
 
-    const spec: JobSpec = {
+    return {
       id: `linear-${slug}`,
       repo,
       branch: `runway/${slug}`,
       plan: trigger.plan,
-      executor,
+      executor: pickExecutor(`${trigger.title ?? ""}\n${trigger.executorText}`, config.defaultExecutor),
       base: config.defaultBase,
       source,
       ...(trigger.title ? { title: trigger.title } : {}),
     };
-    return spec;
   });

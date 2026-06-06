@@ -1,7 +1,5 @@
-// Runway domain: Effect Schema for the data crossing boundaries + tagged errors for the typed E channel.
 import { Data, Schema } from "effect";
 
-// ── Job ───────────────────────────────────────────────────────────────────
 export const Executor = Schema.Literals(["codex-cloud", "pi"]);
 export type Executor = typeof Executor.Type;
 
@@ -16,14 +14,13 @@ export const JobSource = Schema.Struct({
   ref: Schema.optional(Schema.String),
 });
 
-/** The minimal unit of work. */
 export const JobSpec = Schema.Struct({
-  id: Schema.String, // lowercase; also the sandbox/job key
+  id: Schema.String,
   repo: Repo,
   branch: Schema.String,
   plan: Schema.String,
   executor: Executor,
-  base: Schema.String, // PR base, default "main"
+  base: Schema.String,
   validate: Schema.optional(Schema.Array(Schema.String)),
   title: Schema.optional(Schema.String),
   source: Schema.optional(JobSource),
@@ -37,9 +34,9 @@ export const JobResult = Schema.Struct({
   jobId: Schema.String,
   executor: Executor,
   status: JobStatus,
-  taskUrl: Schema.optional(Schema.String), // codex-cloud
+  taskUrl: Schema.optional(Schema.String),
   taskId: Schema.optional(Schema.String),
-  prUrl: Schema.optional(Schema.String), // pi
+  prUrl: Schema.optional(Schema.String),
   prNumber: Schema.optional(Schema.Number),
   pushed: Schema.optional(Schema.Boolean),
   validated: Schema.optional(Schema.Boolean),
@@ -49,7 +46,6 @@ export const JobResult = Schema.Struct({
 });
 export type JobResult = typeof JobResult.Type;
 
-// ── Linear webhook payloads (only the fields Runway reads) ──────────────────
 export const LinearIssueData = Schema.Struct({
   id: Schema.String,
   identifier: Schema.optional(Schema.String),
@@ -71,7 +67,6 @@ export const LinearCommentData = Schema.Struct({
   ),
 });
 
-/** Top-level webhook envelope; `data` is left loose and decoded per `type` downstream. */
 export const LinearWebhook = Schema.Struct({
   action: Schema.Literals(["create", "update", "remove"]),
   type: Schema.String,
@@ -80,7 +75,6 @@ export const LinearWebhook = Schema.Struct({
 });
 export type LinearWebhook = typeof LinearWebhook.Type;
 
-// ── GitHub (minimal PR shape we consume) ────────────────────────────────────
 export const PullRequest = Schema.Struct({
   number: Schema.Number,
   html_url: Schema.String,
@@ -88,7 +82,6 @@ export const PullRequest = Schema.Struct({
 });
 export type PullRequest = typeof PullRequest.Type;
 
-// ── Tagged errors (the typed E channel) ─────────────────────────────────────
 export class ValidationError extends Data.TaggedError("ValidationError")<{ readonly reason: string }> {}
 export class WebhookError extends Data.TaggedError("WebhookError")<{ readonly reason: string }> {}
 export class AuthError extends Data.TaggedError("AuthError")<{ readonly reason: string }> {}
@@ -104,10 +97,8 @@ export class GitHubError extends Data.TaggedError("GitHubError")<{
 }> {}
 export class MissingConfigError extends Data.TaggedError("MissingConfigError")<{ readonly key: string }> {}
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
 const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
-/** Parse "owner/name", rejecting shell metacharacters (these flow into git commands). */
 export const parseRepo = (slug: string): Repo => {
   const [owner, name, ...rest] = slug.trim().split("/");
   if (!owner || !name || rest.length) throw new Error(`invalid repo "${slug}", expected "owner/name"`);
@@ -116,3 +107,10 @@ export const parseRepo = (slug: string): Repo => {
   }
   return { owner, name };
 };
+
+export const jobResult = (spec: JobSpec, status: JobStatus, extra?: Partial<JobResult>): JobResult => ({
+  jobId: spec.id,
+  executor: spec.executor,
+  status,
+  ...extra,
+});
