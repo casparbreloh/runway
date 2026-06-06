@@ -6,11 +6,13 @@
     "lib": ["ES2022"],
     "types": ["@cloudflare/workers-types", "node"],
     "strict": true,
+    "exactOptionalPropertyTypes": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "scripts", "tests"]
+  "include": ["src", "tests", "alchemy.run.ts"]
 }
