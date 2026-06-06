@@ -3,7 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Launch coding-agent jobs from Linear issues or markdown plans on Cloudflare Sandbox.",
+  "description": "Launch coding-agent jobs from Linear issues or markdown plans on Cloudflare Workers + Containers.",
+  "packageManager": "pnpm@11.5.0",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.0"
+    },
+    "runtime": {
+      "name": "node",
+      "version": "^26"
+    }
+  },
+  "engines": {
+    "node": "^26"
+  },
   "scripts": {
     "dev": "alchemy dev",
     "deploy": "alchemy deploy",
@@ -15,8 +29,8 @@
   "dependencies": {
     "@octokit/core": "^7.0.6",
     "@octokit/plugin-rest-endpoint-methods": "^17.0.0",
-    "alchemy": "^2.0.0-beta.52",
-    "effect": "^4.0.0-beta.78"
+    "alchemy": "2.0.0-beta.52",
+    "effect": "4.0.0-beta.78"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240000.0",
