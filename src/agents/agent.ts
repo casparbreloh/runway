@@ -10,6 +10,5 @@ export interface RunOptions {
 export interface Agent {
   readonly name: string;
   readonly container: string;
-  readonly authProvider: string;
   readonly run: (spec: JobSpec, opts?: RunOptions) => Effect.Effect<JobResult, never, Sandbox>;
 }

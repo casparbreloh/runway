@@ -13,7 +13,6 @@ const piSucceeded = (stdout: string): boolean =>
 export const piAgent: Agent = {
   name: "pi",
   container: "pi",
-  authProvider: "pi-subscription",
   run: (spec, opts) =>
     runGitPr(spec, {
       agentCommand: `pi --model openai-codex/gpt-5.5 --mode json -p "Read /work/PLAN.md and follow it. If you change files, write a short PR.md summarizing the change."`,
