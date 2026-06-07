@@ -193,6 +193,37 @@ export default class Api extends Cloudflare.Worker<Api>()(
           );
         }
 
+        // Secret auth write path: `runway secret set <name> <value>` posts here.
+        // Subscriptions (OAuth login) get their own device-code endpoint later.
+        if (request.method === "POST" && path === "/secrets") {
+          const auth = request.headers["authorization"] ?? "";
+          if (!constantTimeEqual(auth, `Bearer ${runwayApiToken}`)) {
+            return HttpServerResponse.empty({ status: 401 });
+          }
+          let secretBody: { name?: unknown; value?: unknown };
+          try {
+            secretBody = JSON.parse((yield* request.text) || "{}") as {
+              name?: unknown;
+              value?: unknown;
+            };
+          } catch {
+            return HttpServerResponse.empty({ status: 400 });
+          }
+          const { name, value } = secretBody;
+          if (typeof name !== "string" || typeof value !== "string") {
+            return yield* HttpServerResponse.json(
+              { error: "name and value are required" },
+              { status: 400 },
+            );
+          }
+          yield* Store.pipe(
+            Effect.flatMap((store) => store.putCredential(name, value)),
+            Effect.orElseSucceed(() => undefined),
+            Effect.provide(storeLayer),
+          );
+          return yield* HttpServerResponse.json({ ok: true });
+        }
+
         if (request.method === "GET" && path.startsWith("/jobs/")) {
           const id = path.slice("/jobs/".length);
           const job = yield* Store.pipe(
