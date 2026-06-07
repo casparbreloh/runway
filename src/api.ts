@@ -9,15 +9,17 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import AgentDO from "./agent-do.ts";
 import { Db } from "./db.ts";
-import type { AgentName, JobSpec } from "./domain.ts";
-import { runFlow, runKey } from "./flow/engine.ts";
-import { linearToPr } from "./flows.ts";
+import type { AgentName } from "./domain.ts";
+import { runFlow } from "./flow/engine.ts";
+import { evalBool } from "./flow/expr.ts";
+import { type FlowManifest, isWebhook } from "./flow/manifest.ts";
+import { flowsById } from "./flows.ts";
 import { sandboxLayer, type SandboxService } from "./sandbox.ts";
-import { sources, type SourceConfig } from "./sources/index.ts";
-import { verifyLinearSignature } from "./sources/linear.ts";
-import { markdownSource } from "./sources/markdown.ts";
+import { verifySignature } from "./signature.ts";
 import { d1Store } from "./store-d1.ts";
 import { importKey, Store } from "./store.ts";
+
+const SECRET_REF = /secrets\.([A-Za-z0-9_]+)/;
 
 const constantTimeEqual = (a: string, b: string): boolean => {
   if (a.length !== b.length) return false;
@@ -25,8 +27,6 @@ const constantTimeEqual = (a: string, b: string): boolean => {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 };
-
-const isAgentName = (s: string): s is AgentName => s === "codex" || s === "pi";
 
 const now = (): string => new Date().toISOString();
 
@@ -39,39 +39,15 @@ export default class Api extends Cloudflare.Worker<Api>()(
       DB: Db,
       AUTH_BLOB_KEY: Config.redacted("AUTH_BLOB_KEY"),
       RUNWAY_API_TOKEN: Config.redacted("RUNWAY_API_TOKEN"),
-      LINEAR_WEBHOOK_SECRET: Config.redacted("LINEAR_WEBHOOK_SECRET"),
-      DEFAULT_AGENT: Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex")),
-      DEFAULT_BASE: Config.string("DEFAULT_BASE").pipe(Config.withDefault("main")),
-      DEFAULT_REPO: Config.string("DEFAULT_REPO").pipe(Config.withDefault("")),
-      LINEAR_TRIGGER_STATE: Config.string("LINEAR_TRIGGER_STATE").pipe(Config.withDefault("")),
-      LINEAR_TRIGGER_COMMENT: Config.string("LINEAR_TRIGGER_COMMENT").pipe(Config.withDefault("")),
     },
   },
   Effect.gen(function* () {
     const agentDO = yield* AgentDO;
     const conn = yield* Cloudflare.D1Connection.bind(Db);
 
-    // Secrets and plain config resolved once at init (ConfigError allowed here).
     const authBlobKey = Redacted.value(yield* Config.redacted("AUTH_BLOB_KEY"));
     const runwayApiToken = Redacted.value(yield* Config.redacted("RUNWAY_API_TOKEN"));
-    const linearWebhookSecret = Redacted.value(yield* Config.redacted("LINEAR_WEBHOOK_SECRET"));
-    const defaultAgentRaw = yield* Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex"));
-    const defaultBase = yield* Config.string("DEFAULT_BASE").pipe(Config.withDefault("main"));
-    const defaultRepo = yield* Config.string("DEFAULT_REPO").pipe(Config.withDefault(""));
-    const triggerState = yield* Config.string("LINEAR_TRIGGER_STATE").pipe(Config.withDefault(""));
-    const triggerComment = yield* Config.string("LINEAR_TRIGGER_COMMENT").pipe(
-      Config.withDefault(""),
-    );
 
-    const config: SourceConfig = {
-      defaultAgent: isAgentName(defaultAgentRaw) ? defaultAgentRaw : "codex",
-      defaultBase,
-      ...(defaultRepo ? { defaultRepo } : {}),
-      ...(triggerState ? { triggerState } : {}),
-      ...(triggerComment ? { triggerComment } : {}),
-    };
-
-    // One D1 Store layer, built from the bound connection's raw handle.
     const storeLayer = Layer.unwrap(
       Effect.gen(function* () {
         const rawDb = yield* conn.raw;
@@ -100,33 +76,31 @@ export default class Api extends Cloudflare.Worker<Api>()(
       };
     };
 
-    const sourceCtx = (spec: JobSpec): Record<string, unknown> => ({
-      sourceType: spec.source?.type ?? "markdown",
-      repo: `${spec.repo.owner}/${spec.repo.name}`,
-      plan: spec.plan,
-      agent: spec.agent,
-      ...(spec.source?.ref ? { ref: spec.source.ref } : {}),
-      ...(spec.title ? { title: spec.title } : {}),
-    });
+    const getSecret = (name: string) =>
+      Store.pipe(
+        Effect.flatMap((store) => store.getCredential(name)),
+        Effect.map((cred) => cred?.content ?? ""),
+        Effect.orElseSucceed(() => ""),
+        Effect.provide(storeLayer),
+      );
 
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest;
         const execCtx = yield* Cloudflare.WorkerExecutionContext;
         const context = yield* Effect.context();
-        const url = new URL(request.url, "http://localhost");
-        const path = url.pathname;
+        const path = new URL(request.url, "http://localhost").pathname;
 
-        // Run the flow detached via waitUntil so the webhook returns 202
-        // immediately (Linear retries any webhook taking >5s). Returns the run key.
-        const launch = (spec: JobSpec, body: unknown): string => {
-          const runId = runKey(linearToPr.id, spec.source?.ref);
-          const program = runFlow(linearToPr, { ...sourceCtx(spec), body }).pipe(
-            Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, spec.agent)), storeLayer)),
+        // Run a flow detached via waitUntil so triggers return immediately (webhook
+        // senders retry slow responses). `context` carries RuntimeContext + the
+        // HttpClient at runtime; the cast reflects the program is fully provided.
+        const launch = (manifest: FlowManifest, body: unknown): string => {
+          const agent: AgentName = manifest.agent ?? "codex";
+          const runId = `${manifest.id}-${crypto.randomUUID().slice(0, 8)}`;
+          const program = runFlow(manifest, { body }).pipe(
+            Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, agent)), storeLayer)),
             Effect.provide(context),
           );
-          // `context` carries RuntimeContext (the lazy D1 handle) at runtime; the
-          // cast reflects that the program is fully provided once it is applied.
           const detached = Effect.ignore(program) as unknown as Effect.Effect<void>;
           execCtx.waitUntil(Effect.runPromise(detached));
           return runId;
@@ -136,65 +110,60 @@ export default class Api extends Cloudflare.Worker<Api>()(
           return yield* HttpServerResponse.json({ ok: true });
         }
 
-        if (request.method === "POST" && path === "/webhooks/linear") {
-          const raw = yield* request.arrayBuffer;
-          const signature = request.headers["linear-signature"] ?? "";
-          const valid = yield* verifyLinearSignature(raw, signature, linearWebhookSecret);
-          if (!valid) return HttpServerResponse.empty({ status: 401 });
-
-          let payload: { webhookTimestamp?: unknown };
-          try {
-            payload = JSON.parse(new TextDecoder().decode(raw)) as { webhookTimestamp?: unknown };
-          } catch {
-            return HttpServerResponse.empty({ status: 400 });
+        // Generic webhook trigger: verify via the flow's `trigger.sign`, filter on
+        // `when`, then run. No per-provider code — the flow declares everything.
+        if (request.method === "POST" && path.startsWith("/webhooks/")) {
+          const manifest = flowsById[path.slice("/webhooks/".length)];
+          if (!manifest || !isWebhook(manifest.trigger)) {
+            return HttpServerResponse.empty({ status: 404 });
           }
-
-          const ts = payload.webhookTimestamp;
-          if (typeof ts !== "number" || Math.abs(Date.now() - ts) > 60_000) {
+          const webhook = manifest.trigger.webhook;
+          const raw = yield* request.arrayBuffer;
+          const secretName = SECRET_REF.exec(webhook.secret)?.[1] ?? "";
+          const secret = yield* getSecret(secretName);
+          const sign = webhook.sign ?? { header: "x-signature" };
+          const signature = request.headers[sign.header.toLowerCase()] ?? "";
+          if (!(yield* verifySignature(raw, signature, secret, sign))) {
             return HttpServerResponse.empty({ status: 401 });
           }
 
-          const spec = yield* sources.linear.toJobSpec(payload, config).pipe(
-            Effect.provide(storeLayer),
-            Effect.orElseSucceed(() => null),
-          );
-          if (!spec) return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
-
-          return yield* HttpServerResponse.json({ jobId: launch(spec, payload) }, { status: 202 });
+          let body: { webhookTimestamp?: unknown };
+          try {
+            body = JSON.parse(new TextDecoder().decode(raw)) as { webhookTimestamp?: unknown };
+          } catch {
+            return HttpServerResponse.empty({ status: 400 });
+          }
+          const ts = body.webhookTimestamp;
+          if (typeof ts === "number" && Math.abs(Date.now() - ts) > 300_000) {
+            return HttpServerResponse.empty({ status: 401 });
+          }
+          if (
+            webhook.when &&
+            !evalBool(webhook.when, { body, secrets: { [secretName]: secret } })
+          ) {
+            return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
+          }
+          return yield* HttpServerResponse.json({ jobId: launch(manifest, body) }, { status: 202 });
         }
 
-        if (request.method === "POST" && path === "/jobs") {
+        // Manual trigger: `runway run <flow>` posts the payload here.
+        if (request.method === "POST" && path.startsWith("/run/")) {
           const auth = request.headers["authorization"] ?? "";
           if (!constantTimeEqual(auth, `Bearer ${runwayApiToken}`)) {
             return HttpServerResponse.empty({ status: 401 });
           }
-
-          const text = yield* request.text;
+          const manifest = flowsById[path.slice("/run/".length)];
+          if (!manifest) return HttpServerResponse.empty({ status: 404 });
           let body: unknown;
           try {
-            body = JSON.parse(text || "{}");
+            body = JSON.parse((yield* request.text) || "{}");
           } catch {
             return HttpServerResponse.empty({ status: 400 });
           }
-
-          const spec = yield* markdownSource
-            .toJobSpec(body, config)
-            .pipe(Effect.provide(storeLayer), Effect.result);
-          if (spec._tag === "Failure") {
-            return yield* HttpServerResponse.json({ error: spec.failure.reason }, { status: 400 });
-          }
-          if (!spec.success) {
-            return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
-          }
-
-          return yield* HttpServerResponse.json(
-            { jobId: launch(spec.success, body) },
-            { status: 202 },
-          );
+          return yield* HttpServerResponse.json({ jobId: launch(manifest, body) }, { status: 202 });
         }
 
-        // Secret auth write path: `runway secret set <name> <value>` posts here.
-        // Subscriptions (OAuth login) get their own device-code endpoint later.
+        // Secret write path: `runway secret set <name> <value>` posts here.
         if (request.method === "POST" && path === "/secrets") {
           const auth = request.headers["authorization"] ?? "";
           if (!constantTimeEqual(auth, `Bearer ${runwayApiToken}`)) {

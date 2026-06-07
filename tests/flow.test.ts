@@ -21,7 +21,9 @@ const recordingHttp = (calls: string[]): Layer.Layer<HttpClient.HttpClient> =>
     }),
   );
 
-const creds = inMemoryStore({ credentials: { codex: '{"tok":"SEED"}', linear: "lin_key" } });
+const creds = inMemoryStore({
+  credentials: { codex: '{"tok":"SEED"}', pi: '{"tok":"SEED"}', linear: "lin_key" },
+});
 
 describe("flow engine", () => {
   it.effect(
@@ -30,12 +32,9 @@ describe("flow engine", () => {
       const calls: string[] = [];
       return Effect.gen(function* () {
         yield* runFlow(linearToPr, {
-          sourceType: "linear",
-          repo: "acme/widgets",
-          plan: "Do it.",
-          ref: "ENG-1",
-          agent: "codex",
-          body: { data: { id: "uuid-1" } },
+          body: {
+            data: { id: "uuid-1", title: "Add hello", description: "Do it.", identifier: "ENG-1" },
+          },
         });
         const commands = yield* Ref.get((yield* Recorder).commands);
         expect(commands.some((c) => c.includes("gh pr create --draft"))).toBe(true);

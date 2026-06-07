@@ -1,12 +1,26 @@
 import type { FlowManifest } from "./flow/manifest.ts";
 
-// The Linear comment-back is now a plain `http` step (no hardcoded GraphQL client):
-// the flow declares the endpoint + `{{ secrets.linear }}`, the engine injects it.
+// Fully generic: the webhook is verified by `trigger.sign`, filtered by `when`, and
+// the steps read the payload via `{{ body.* }}`. No Linear-specific code anywhere —
+// swap the endpoints/fields and this is a GitHub or Slack flow.
 export const linearToPr: FlowManifest = {
   id: "linear-to-pr",
-  trigger: "linear",
+  trigger: {
+    webhook: {
+      secret: "{{ secrets.linear_webhook }}",
+      sign: { header: "linear-signature", alg: "sha256", encoding: "hex" },
+      when: "{{ body.data.state.name == 'Runway' }}",
+    },
+  },
+  repo: "acme/widgets",
+  agent: "pi",
   steps: [
-    { id: "pr", run: "{{ plan }}", pr: true, branch: "runway/{{ ref }}" },
+    {
+      id: "pr",
+      run: "{{ body.data.title }}\n\n{{ body.data.description }}",
+      pr: true,
+      branch: "runway/{{ body.data.identifier }}",
+    },
     {
       id: "comment",
       http: {
@@ -44,3 +58,7 @@ export const clawsweeper: FlowManifest = {
 };
 
 export const flows: readonly FlowManifest[] = [linearToPr, clawsweeper];
+
+export const flowsById: Record<string, FlowManifest> = Object.fromEntries(
+  flows.map((flow) => [flow.id, flow]),
+);

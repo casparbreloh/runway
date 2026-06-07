@@ -2,10 +2,27 @@ import { Schema } from "effect";
 
 import { AgentName } from "../domain.ts";
 
-export const Trigger = Schema.Union([
-  Schema.Literal("linear"),
-  Schema.Struct({ cron: Schema.String }),
-]);
+const Sign = Schema.Struct({
+  header: Schema.String,
+  alg: Schema.optional(Schema.Literal("sha256")),
+  encoding: Schema.optional(Schema.Union([Schema.Literal("hex"), Schema.Literal("base64")])),
+});
+
+const Webhook = Schema.Struct({
+  webhook: Schema.Struct({
+    secret: Schema.String,
+    sign: Schema.optional(Sign),
+    when: Schema.optional(Schema.String),
+  }),
+});
+
+const Cron = Schema.Struct({ cron: Schema.String });
+
+export const Trigger = Schema.Union([Webhook, Cron]);
+export type Trigger = typeof Trigger.Type;
+
+export const isWebhook = (t: Trigger): t is typeof Webhook.Type => "webhook" in t;
+export const isCron = (t: Trigger): t is typeof Cron.Type => "cron" in t;
 
 const base = {
   id: Schema.optional(Schema.String),
