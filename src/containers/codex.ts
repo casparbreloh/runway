@@ -43,9 +43,12 @@ export const CodexContainerLive = /* @__PURE__ */ CodexContainer.make(
     const cp = yield* ChildProcessSpawner;
     const fs = yield* FileSystem.FileSystem;
 
-    // In-instance env map persisted across exec calls so secrets/config set via
-    // setEnvVars are merged into every spawned process.
+    // Spawned-process env: seed from the container's own env (PATH, HOME, ... so
+    // git/gh/codex resolve) and merge in whatever setEnvVars adds.
     const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) env[key] = value;
+    }
 
     return CodexContainer.of({
       exec: (command) =>
