@@ -23,7 +23,7 @@ const recordingHttp = (calls: string[]): Layer.Layer<HttpClient.HttpClient> =>
 
 const creds = inMemoryStore({
   credentials: {
-    "openai-codex": JSON.stringify({
+    codex: JSON.stringify({
       access: "A",
       refresh: "R",
       expires: 9999999999999,

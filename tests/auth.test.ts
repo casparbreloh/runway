@@ -37,7 +37,7 @@ describe("subscription auth lifecycle", () => {
         yield* withSubscription("codex", undefined, Effect.void).pipe(Effect.orDie);
 
         const writes = yield* Ref.get((yield* Recorder).writes);
-        const stored = yield* (yield* Store).getCredential("openai-codex");
+        const stored = yield* (yield* Store).getCredential("codex");
 
         // the refresh endpoint was actually hit (token was expired)
         expect(hits.some((u) => u.includes("oauth/token"))).toBe(true);
@@ -53,7 +53,7 @@ describe("subscription auth lifecycle", () => {
             RecordingSandbox(),
             inMemoryStore({
               credentials: {
-                "openai-codex": JSON.stringify({
+                codex: JSON.stringify({
                   access: "OLD",
                   refresh: "OLD_REFRESH",
                   expires: 0,

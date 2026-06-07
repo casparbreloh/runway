@@ -6,9 +6,9 @@ import { type AgentName, AuthError } from "../domain.ts";
 import { Sandbox } from "../sandbox.ts";
 import { Store } from "../store.ts";
 
-// Both agents run on the same ChatGPT subscription, so the canonical tokens are
+// Both agents run on the same Codex subscription, so the canonical tokens are
 // stored ONCE under this key and rendered into each CLI's native auth file.
-const SUB_KEY = "openai-codex";
+const SUB_KEY = "codex";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 
