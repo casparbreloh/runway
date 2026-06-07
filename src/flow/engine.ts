@@ -7,6 +7,7 @@ import { withCodex } from "../auth/index.ts";
 import { loadSecrets } from "../auth/secrets.ts";
 import { type AgentName, type JobSpec, parseRepo } from "../domain.ts";
 import { Sandbox } from "../sandbox.ts";
+import { Sessions } from "../sessions.ts";
 import { Store } from "../store.ts";
 import { evalBool, evalValue, interpolate, interpolateValue } from "./expr.ts";
 import {
@@ -134,7 +135,7 @@ const runSteps = (
 export const runFlow = (
   manifest: FlowManifest,
   trigger: Record<string, unknown>,
-): Effect.Effect<void, never, Sandbox | Store | HttpClient.HttpClient> =>
+): Effect.Effect<void, never, Sandbox | Store | HttpClient.HttpClient | Sessions> =>
   Effect.gen(function* () {
     const secrets = yield* loadSecrets(collectSecretNames(manifest));
     const agentName: AgentName =
@@ -160,4 +161,15 @@ export const runFlow = (
         yield* runSteps(manifest, ctx);
       }),
     ).pipe(Effect.catchTag("AuthError", () => Effect.void));
+
+    const sessions = yield* Sessions;
+    yield* sessions.put(
+      `runs/${manifest.id}/${crypto.randomUUID()}.json`,
+      JSON.stringify({
+        flow: manifest.id,
+        at: new Date().toISOString(),
+        body: ctx["body"] ?? null,
+        steps: ctx["steps"],
+      }),
+    );
   });

@@ -8,13 +8,14 @@ import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import AgentDO from "./agent-do.ts";
-import { Db } from "./db.ts";
+import { Db, SessionsBucket } from "./db.ts";
 import type { AgentName } from "./domain.ts";
 import { runFlow } from "./flow/engine.ts";
 import { evalBool } from "./flow/expr.ts";
 import { type FlowManifest, isWebhook } from "./flow/manifest.ts";
 import { flowsById } from "./flows.ts";
 import { sandboxLayer, type SandboxService } from "./sandbox.ts";
+import { r2Sessions, Sessions } from "./sessions.ts";
 import { verifySignature } from "./signature.ts";
 import { d1Store } from "./store-d1.ts";
 import { importKey, Store } from "./store.ts";
@@ -37,6 +38,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
     compatibility: { flags: ["nodejs_compat"], date: "2026-03-17" },
     env: {
       DB: Db,
+      SESSIONS: SessionsBucket,
       AUTH_BLOB_KEY: Config.redacted("AUTH_BLOB_KEY"),
       RUNWAY_API_TOKEN: Config.redacted("RUNWAY_API_TOKEN"),
     },
@@ -44,6 +46,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
   Effect.gen(function* () {
     const agentDO = yield* AgentDO;
     const conn = yield* Cloudflare.D1Connection.bind(Db);
+    const sessionsBucket = yield* Cloudflare.R2Bucket.bind(SessionsBucket);
 
     const authBlobKey = Redacted.value(yield* Config.redacted("AUTH_BLOB_KEY"));
     const runwayApiToken = Redacted.value(yield* Config.redacted("RUNWAY_API_TOKEN"));
@@ -53,6 +56,13 @@ export default class Api extends Cloudflare.Worker<Api>()(
         const rawDb = yield* conn.raw;
         const key = yield* importKey(authBlobKey);
         return d1Store(rawDb as cf.D1Database, key, now);
+      }),
+    );
+
+    const sessionsLayer = Layer.unwrap(
+      Effect.gen(function* () {
+        const raw = yield* sessionsBucket.raw;
+        return Layer.succeed(Sessions, r2Sessions(raw as cf.R2Bucket));
       }),
     );
 
@@ -98,7 +108,9 @@ export default class Api extends Cloudflare.Worker<Api>()(
           const agent: AgentName = manifest.agent ?? "codex";
           const runId = `${manifest.id}-${crypto.randomUUID().slice(0, 8)}`;
           const program = runFlow(manifest, { body }).pipe(
-            Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, agent)), storeLayer)),
+            Effect.provide(
+              Layer.mergeAll(sandboxLayer(sandboxFor(runId, agent)), storeLayer, sessionsLayer),
+            ),
             Effect.provide(context),
           );
           const detached = Effect.ignore(program) as unknown as Effect.Effect<void>;
@@ -211,5 +223,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
         ),
       ),
     };
-  }).pipe(Effect.provide(Cloudflare.D1ConnectionLive)),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(Cloudflare.D1ConnectionLive, Cloudflare.R2BucketBindingLive)),
+  ),
 ) {}

@@ -7,6 +7,7 @@ import { runFlow } from "../src/flow/engine.ts";
 import type { FlowManifest } from "../src/flow/manifest.ts";
 import { linearToPr } from "../src/flows.ts";
 import { type ExecResult, Recorder, RecordingSandbox } from "../src/sandbox.ts";
+import { noopSessions } from "../src/sessions.ts";
 import { inMemoryStore } from "../src/store.ts";
 import { happyRun } from "./fixtures.ts";
 
@@ -49,7 +50,12 @@ describe("flow engine", () => {
         expect(calls).toContain("https://api.linear.app/graphql");
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(RecordingSandbox({ exec: happyRun }), creds, recordingHttp(calls)),
+          Layer.mergeAll(
+            RecordingSandbox({ exec: happyRun }),
+            creds,
+            recordingHttp(calls),
+            noopSessions,
+          ),
         ),
       );
     },
@@ -91,6 +97,7 @@ describe("flow engine", () => {
           }),
           creds,
           recordingHttp([]),
+          noopSessions,
         ),
       ),
     ),
