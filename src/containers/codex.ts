@@ -60,12 +60,14 @@ export const CodexContainerLive = /* @__PURE__ */ CodexContainer.make(
               { concurrency: "unbounded" },
             ),
           ),
-          Effect.map(([exitCode, stdout, stderr]): ExecResult => ({
-            command,
-            exitCode,
-            stdout,
-            stderr,
-          })),
+          Effect.map(
+            ([exitCode, stdout, stderr]): ExecResult => ({
+              command,
+              exitCode,
+              stdout,
+              stderr,
+            }),
+          ),
           Effect.scoped,
         ),
       writeFile: (path, content) => fs.writeFileString(path, content),

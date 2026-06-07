@@ -1,9 +1,9 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 
-import type { AgentName } from "./domain.ts";
 import { CodexContainer } from "./containers/codex.ts";
 import { PiContainer } from "./containers/pi.ts";
+import type { AgentName } from "./domain.ts";
 
 /**
  * A single Durable Object namespace that binds both agent containers. Per job

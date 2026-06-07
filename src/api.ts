@@ -12,9 +12,9 @@ import { Db } from "./db.ts";
 import { dispatchJob } from "./dispatch.ts";
 import type { AgentName, JobSpec } from "./domain.ts";
 import { sandboxLayer, type SandboxService } from "./sandbox.ts";
+import { sources, type SourceConfig } from "./sources/index.ts";
 import { verifyLinearSignature } from "./sources/linear.ts";
 import { markdownSource } from "./sources/markdown.ts";
-import { sources, type SourceConfig } from "./sources/index.ts";
 import { d1Store } from "./store-d1.ts";
 import { importKey, Store } from "./store.ts";
 
@@ -101,7 +101,8 @@ export default class Api extends Cloudflare.Worker<Api>()(
         writeFile: (path, content) =>
           stub.writeFile(agent, path, content).pipe(Effect.orElseSucceed(() => undefined)),
         readFile: (path) => stub.readFile(agent, path).pipe(Effect.orElseSucceed(() => "")),
-        setEnvVars: (env) => stub.setEnvVars(agent, env).pipe(Effect.orElseSucceed(() => undefined)),
+        setEnvVars: (env) =>
+          stub.setEnvVars(agent, env).pipe(Effect.orElseSucceed(() => undefined)),
       };
     };
 
@@ -138,9 +139,10 @@ export default class Api extends Cloudflare.Worker<Api>()(
             return HttpServerResponse.empty({ status: 401 });
           }
 
-          const spec = yield* sources.linear
-            .toJobSpec(payload, config)
-            .pipe(Effect.provide(storeLayer), Effect.orElseSucceed(() => null));
+          const spec = yield* sources.linear.toJobSpec(payload, config).pipe(
+            Effect.provide(storeLayer),
+            Effect.orElseSucceed(() => null),
+          );
           if (!spec) return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
 
           yield* runJob(spec);
@@ -161,10 +163,9 @@ export default class Api extends Cloudflare.Worker<Api>()(
             return HttpServerResponse.empty({ status: 400 });
           }
 
-          const spec = yield* markdownSource.toJobSpec(body, config).pipe(
-            Effect.provide(storeLayer),
-            Effect.result,
-          );
+          const spec = yield* markdownSource
+            .toJobSpec(body, config)
+            .pipe(Effect.provide(storeLayer), Effect.result);
           if (spec._tag === "Failure") {
             return yield* HttpServerResponse.json({ error: spec.failure.reason }, { status: 400 });
           }

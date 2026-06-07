@@ -1,8 +1,8 @@
 import { Effect, Schema } from "effect";
 
-import { type JobSpec, LinearWebhook, parseRepo } from "../domain.ts";
+import { type JobResult, type JobSpec, LinearWebhook, parseRepo } from "../domain.ts";
 import { Store } from "../store.ts";
-import type { Source, SourceConfig } from "./source.ts";
+import type { ReportOptions, Source, SourceConfig } from "./source.ts";
 
 const toHex = (buf: ArrayBuffer): string =>
   Array.from(new Uint8Array(buf))
@@ -144,6 +144,46 @@ const resolveRepo = (
     return null;
   });
 
+interface LinearIssueLookup {
+  readonly data?: { readonly issue?: { readonly id?: string } | null } | null;
+}
+
+const linearFetch = (
+  apiKey: string,
+  query: string,
+  variables: unknown,
+): Promise<LinearIssueLookup> =>
+  fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: apiKey },
+    body: JSON.stringify({ query, variables }),
+  }).then((r) => r.json() as Promise<LinearIssueLookup>);
+
+const reportToLinear = (
+  result: JobResult,
+  ref: string | undefined,
+  opts: ReportOptions,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (!ref || !opts.linearApiKey) return;
+    const apiKey = opts.linearApiKey;
+    const body = result.prUrl
+      ? `Runway — draft PR ready: ${result.prUrl}${result.summary ? `\n\n${result.summary}` : ""}`
+      : `Runway — ${result.summary ?? result.error ?? result.status}`;
+    yield* Effect.tryPromise(async () => {
+      const lookup = await linearFetch(apiKey, "query($id:String!){issue(id:$id){id}}", {
+        id: ref,
+      });
+      const issueId = lookup.data?.issue?.id;
+      if (!issueId) return;
+      await linearFetch(
+        apiKey,
+        "mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}",
+        { input: { issueId, body } },
+      );
+    }).pipe(Effect.ignore);
+  });
+
 export const linearSource: Source = {
   name: "linear",
   toJobSpec: (input, config) =>
@@ -183,4 +223,5 @@ export const linearSource: Source = {
       };
       return spec;
     }),
+  report: (result, ref, opts) => reportToLinear(result, ref, opts),
 };

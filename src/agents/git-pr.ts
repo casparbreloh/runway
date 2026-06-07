@@ -16,6 +16,7 @@ const redact = (s: string): string => tail(s).replace(REDACT_TOKEN, "x-access-to
 export interface GitPrOptions {
   readonly agentCommand: string;
   readonly succeeded?: (stdout: string) => boolean;
+  readonly pr?: boolean;
 }
 
 export const runGitPr = (
@@ -35,7 +36,7 @@ export const runGitPr = (
     });
 
     const clone = yield* sandbox.exec(
-      `git clone --depth 1 --branch ${spec.base} https://x-access-token:\${GITHUB_TOKEN}@github.com/${spec.repo.owner}/${spec.repo.name}.git ${REPO_DIR}`,
+      `rm -rf ${REPO_DIR} && git clone --depth 1 --branch ${spec.base} https://x-access-token:\${GITHUB_TOKEN}@github.com/${spec.repo.owner}/${spec.repo.name}.git ${REPO_DIR}`,
     );
     if (clone.exitCode !== 0)
       return jobResult(spec, "failure", {
@@ -66,6 +67,14 @@ export const runGitPr = (
     const validatedField = validated === undefined ? {} : { validated };
 
     const agentBody = (yield* sandbox.readFile(`${REPO_DIR}/PR.md`)).trim();
+
+    if (opts.pr === false) {
+      return jobResult(spec, "success", {
+        ...validatedField,
+        summary: agentBody || "agent run completed.",
+      });
+    }
+
     yield* sandbox.exec(`cd ${REPO_DIR} && rm -f PR.md && git add -A`);
     const staged = yield* sandbox.exec(`cd ${REPO_DIR} && git diff --cached --quiet`);
     if (staged.exitCode === 0) {
