@@ -23,6 +23,9 @@ const slug = (s: string): string =>
     .replaceAll(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "run";
 
+export const runKey = (manifestId: string, ref?: string): string =>
+  `${manifestId}-${ref ? slug(ref) : "0"}`;
+
 const tryJson = (text: string): unknown => {
   try {
     return JSON.parse(text);

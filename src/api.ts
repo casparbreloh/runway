@@ -9,8 +9,9 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 import AgentDO from "./agent-do.ts";
 import { Db } from "./db.ts";
-import { dispatchJob } from "./dispatch.ts";
 import type { AgentName, JobSpec } from "./domain.ts";
+import { runFlow, runKey } from "./flow/engine.ts";
+import { linearToPr } from "./flows.ts";
 import { sandboxLayer, type SandboxService } from "./sandbox.ts";
 import { sources, type SourceConfig } from "./sources/index.ts";
 import { verifyLinearSignature } from "./sources/linear.ts";
@@ -41,6 +42,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
       AUTH_BLOB_KEY: Config.redacted("AUTH_BLOB_KEY"),
       RUNWAY_API_TOKEN: Config.redacted("RUNWAY_API_TOKEN"),
       LINEAR_WEBHOOK_SECRET: Config.redacted("LINEAR_WEBHOOK_SECRET"),
+      LINEAR_API_KEY: Config.redacted("LINEAR_API_KEY"),
       DEFAULT_AGENT: Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex")),
       DEFAULT_BASE: Config.string("DEFAULT_BASE").pipe(Config.withDefault("main")),
       DEFAULT_REPO: Config.string("DEFAULT_REPO").pipe(Config.withDefault("")),
@@ -58,6 +60,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
     const authBlobKey = Redacted.value(yield* Config.redacted("AUTH_BLOB_KEY"));
     const runwayApiToken = Redacted.value(yield* Config.redacted("RUNWAY_API_TOKEN"));
     const linearWebhookSecret = Redacted.value(yield* Config.redacted("LINEAR_WEBHOOK_SECRET"));
+    const linearApiKey = Redacted.value(yield* Config.redacted("LINEAR_API_KEY"));
     const defaultAgentRaw = yield* Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex"));
     const defaultBase = yield* Config.string("DEFAULT_BASE").pipe(Config.withDefault("main"));
     const defaultRepo = yield* Config.string("DEFAULT_REPO").pipe(Config.withDefault(""));
@@ -74,9 +77,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
       ...(triggerComment ? { triggerComment } : {}),
     };
 
-    // Single D1 Store layer, built from the bound connection's raw handle so it
-    // shares the worker's one D1 binding. Used by source.toJobSpec, runJob's
-    // dispatch, and GET /jobs.
+    // One D1 Store layer, built from the bound connection's raw handle.
     const storeLayer = Layer.unwrap(
       Effect.gen(function* () {
         const rawDb = yield* conn.raw;
@@ -85,9 +86,8 @@ export default class Api extends Cloudflare.Worker<Api>()(
       }),
     );
 
-    const sandboxFor = (spec: JobSpec): SandboxService => {
-      const stub = agentDO.getByName(spec.id);
-      const agent = spec.agent;
+    const sandboxFor = (name: string, agent: AgentName): SandboxService => {
+      const stub = agentDO.getByName(name);
       return {
         exec: (command) =>
           stub.exec(agent, command).pipe(
@@ -106,16 +106,41 @@ export default class Api extends Cloudflare.Worker<Api>()(
       };
     };
 
-    const runJob = (spec: JobSpec) =>
-      dispatchJob(spec, { githubToken, openaiApiKey }).pipe(
-        Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(spec)), storeLayer)),
-      );
+    const sourceCtx = (spec: JobSpec): Record<string, unknown> => ({
+      sourceType: spec.source?.type ?? "markdown",
+      repo: `${spec.repo.owner}/${spec.repo.name}`,
+      plan: spec.plan,
+      agent: spec.agent,
+      ...(spec.source?.ref ? { ref: spec.source.ref } : {}),
+      ...(spec.title ? { title: spec.title } : {}),
+    });
 
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest;
+        const execCtx = yield* Cloudflare.WorkerExecutionContext;
+        const context = yield* Effect.context();
         const url = new URL(request.url, "http://localhost");
         const path = url.pathname;
+
+        // Run the flow detached via waitUntil so the webhook returns 202
+        // immediately (Linear retries any webhook taking >5s). Returns the run key.
+        const launch = (spec: JobSpec): string => {
+          const runId = runKey(linearToPr.id, spec.source?.ref);
+          const program = runFlow(linearToPr, sourceCtx(spec), {
+            githubToken,
+            openaiApiKey,
+            linearApiKey,
+          }).pipe(
+            Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, spec.agent)), storeLayer)),
+            Effect.provide(context),
+          );
+          // `context` carries RuntimeContext (the lazy D1 handle) at runtime; the
+          // cast reflects that the program is fully provided once it is applied.
+          const detached = Effect.ignore(program) as unknown as Effect.Effect<void>;
+          execCtx.waitUntil(Effect.runPromise(detached));
+          return runId;
+        };
 
         if (request.method === "GET" && path === "/health") {
           return yield* HttpServerResponse.json({ ok: true });
@@ -145,8 +170,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
           );
           if (!spec) return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
 
-          yield* runJob(spec);
-          return yield* HttpServerResponse.json({ jobId: spec.id }, { status: 202 });
+          return yield* HttpServerResponse.json({ jobId: launch(spec) }, { status: 202 });
         }
 
         if (request.method === "POST" && path === "/jobs") {
@@ -173,8 +197,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
             return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
           }
 
-          yield* runJob(spec.success);
-          return yield* HttpServerResponse.json({ jobId: spec.success.id }, { status: 202 });
+          return yield* HttpServerResponse.json({ jobId: launch(spec.success) }, { status: 202 });
         }
 
         if (request.method === "GET" && path.startsWith("/jobs/")) {
