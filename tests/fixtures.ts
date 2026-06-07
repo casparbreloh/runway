@@ -1,4 +1,4 @@
-import type { JobSpec, LinearWebhook } from "../src/domain.ts";
+import type { JobSpec } from "../src/domain.ts";
 import type { ExecResult } from "../src/sandbox.ts";
 
 export const piSpec: JobSpec = {
@@ -11,23 +11,6 @@ export const piSpec: JobSpec = {
   validate: ["pnpm test"],
   title: "feat: add hello",
 };
-
-export const issue = (overrides: {
-  identifier?: string;
-  description?: string;
-  state?: string;
-}): LinearWebhook => ({
-  action: "update",
-  type: "Issue",
-  webhookTimestamp: 1,
-  data: {
-    id: "uuid",
-    identifier: overrides.identifier ?? "ENG-123",
-    title: "Add hello",
-    description: overrides.description ?? "Do the thing.",
-    state: { name: overrides.state ?? "Runway" },
-  },
-});
 
 // Sandbox responder: changes staged, the pi JSON stream ends with agent_end, gh prints the PR url.
 export const happyRun = (command: string): Partial<ExecResult> => {

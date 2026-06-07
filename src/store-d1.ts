@@ -1,12 +1,10 @@
 import { Effect, Layer } from "effect";
 
 import { type JobResult, StoreError } from "./domain.ts";
-import { decrypt, encrypt, Store, type WorkspaceConfig } from "./store.ts";
+import { decrypt, encrypt, Store } from "./store.ts";
 
 const D1_SCHEMA = [
   "CREATE TABLE IF NOT EXISTS credentials (provider TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, iv BLOB NOT NULL, key_version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS repo_map (workspace TEXT NOT NULL, key TEXT NOT NULL, owner TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (workspace, key))",
-  "CREATE TABLE IF NOT EXISTS workspace_config (workspace TEXT PRIMARY KEY, default_repo TEXT, default_agent TEXT, default_base TEXT)",
   "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT NOT NULL, agent TEXT NOT NULL, result_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
 ].join("\n");
 
@@ -75,44 +73,6 @@ export const d1Store = (db: D1Database, key: CryptoKey, now: () => string): Laye
           );
         }
       }),
-
-    resolveRepo: (workspace, key2) =>
-      Effect.tryPromise({
-        try: () =>
-          db
-            .prepare("SELECT owner, name FROM repo_map WHERE workspace = ? AND key = ?")
-            .bind(workspace, key2)
-            .first<{ owner: string; name: string }>(),
-        catch: fail("resolveRepo"),
-      }).pipe(Effect.map((row) => (row ? { owner: row.owner, name: row.name } : null))),
-
-    getWorkspaceConfig: (workspace) =>
-      Effect.tryPromise({
-        try: () =>
-          db
-            .prepare(
-              "SELECT workspace, default_repo, default_agent, default_base FROM workspace_config WHERE workspace = ?",
-            )
-            .bind(workspace)
-            .first<{
-              workspace: string;
-              default_repo: string | null;
-              default_agent: string | null;
-              default_base: string | null;
-            }>(),
-        catch: fail("getWorkspaceConfig"),
-      }).pipe(
-        Effect.map((row): WorkspaceConfig | null =>
-          row
-            ? {
-                workspace: row.workspace,
-                ...(row.default_repo ? { defaultRepo: row.default_repo } : {}),
-                ...(row.default_agent ? { defaultAgent: row.default_agent } : {}),
-                ...(row.default_base ? { defaultBase: row.default_base } : {}),
-              }
-            : null,
-        ),
-      ),
 
     getJob: (id) =>
       Effect.tryPromise({

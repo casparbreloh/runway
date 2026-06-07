@@ -1,17 +1,10 @@
 import { Context, Effect, Layer, Ref } from "effect";
 
-import { type JobResult, parseRepo, type Repo, StoreError } from "./domain.ts";
+import { type JobResult, StoreError } from "./domain.ts";
 
 export interface CredentialRecord {
   readonly content: string;
   readonly updatedAt: string;
-}
-
-export interface WorkspaceConfig {
-  readonly workspace: string;
-  readonly defaultRepo?: string;
-  readonly defaultAgent?: string;
-  readonly defaultBase?: string;
 }
 
 export interface StoreService {
@@ -21,10 +14,6 @@ export interface StoreService {
     content: string,
     expectedUpdatedAt?: string,
   ) => Effect.Effect<void, StoreError>;
-  readonly resolveRepo: (workspace: string, key: string) => Effect.Effect<Repo | null, StoreError>;
-  readonly getWorkspaceConfig: (
-    workspace: string,
-  ) => Effect.Effect<WorkspaceConfig | null, StoreError>;
   readonly getJob: (id: string) => Effect.Effect<JobResult | null, StoreError>;
   readonly putJob: (result: JobResult) => Effect.Effect<void, StoreError>;
 }
@@ -88,8 +77,6 @@ export const decrypt = (
 
 export interface InMemorySeed {
   readonly credentials?: Record<string, string>;
-  readonly repoMap?: Record<string, Record<string, string>>;
-  readonly workspaces?: Record<string, WorkspaceConfig>;
 }
 
 export const inMemoryStore = (seed: InMemorySeed = {}): Layer.Layer<Store> =>
@@ -107,8 +94,6 @@ export const inMemoryStore = (seed: InMemorySeed = {}): Layer.Layer<Store> =>
         ),
       );
       const jobs = yield* Ref.make<Record<string, JobResult>>({});
-      const repoMap = seed.repoMap ?? {};
-      const workspaces = seed.workspaces ?? {};
 
       const service: StoreService = {
         getCredential: (provider) => Ref.get(creds).pipe(Effect.map((c) => c[provider] ?? null)),
@@ -127,15 +112,6 @@ export const inMemoryStore = (seed: InMemorySeed = {}): Layer.Layer<Store> =>
             const updatedAt = yield* stamp;
             yield* Ref.update(creds, (c) => ({ ...c, [provider]: { content, updatedAt } }));
           }),
-        resolveRepo: (workspace, key) =>
-          Effect.try({
-            try: () => {
-              const slug = repoMap[workspace]?.[key];
-              return slug ? parseRepo(slug) : null;
-            },
-            catch: (e) => new StoreError({ reason: `resolveRepo: ${String(e)}` }),
-          }),
-        getWorkspaceConfig: (workspace) => Effect.succeed(workspaces[workspace] ?? null),
         getJob: (id) => Ref.get(jobs).pipe(Effect.map((j) => j[id] ?? null)),
         putJob: (result) => Ref.update(jobs, (j) => ({ ...j, [result.jobId]: result })),
       };

@@ -3,19 +3,11 @@ import { Data, Schema } from "effect";
 export const AgentName = Schema.Literals(["codex", "pi"]);
 export type AgentName = typeof AgentName.Type;
 
-export const SourceName = Schema.Literals(["linear", "markdown"]);
-export type SourceName = typeof SourceName.Type;
-
 export const Repo = Schema.Struct({
   owner: Schema.String,
   name: Schema.String,
 });
 export type Repo = typeof Repo.Type;
-
-export const JobSource = Schema.Struct({
-  type: SourceName,
-  ref: Schema.optional(Schema.String),
-});
 
 export const JobSpec = Schema.Struct({
   id: Schema.String,
@@ -26,7 +18,6 @@ export const JobSpec = Schema.Struct({
   base: Schema.String,
   validate: Schema.optional(Schema.Array(Schema.String)),
   title: Schema.optional(Schema.String),
-  source: Schema.optional(JobSource),
 });
 export type JobSpec = typeof JobSpec.Type;
 
@@ -48,44 +39,6 @@ export const JobResult = Schema.Struct({
   logsTail: Schema.optional(Schema.String),
 });
 export type JobResult = typeof JobResult.Type;
-
-export const LinearIssueData = Schema.Struct({
-  id: Schema.String,
-  identifier: Schema.optional(Schema.String),
-  title: Schema.optional(Schema.String),
-  description: Schema.optional(Schema.String),
-  state: Schema.optional(
-    Schema.Struct({ name: Schema.optional(Schema.String), type: Schema.optional(Schema.String) }),
-  ),
-});
-
-export const LinearCommentData = Schema.Struct({
-  id: Schema.String,
-  body: Schema.optional(Schema.String),
-  issueId: Schema.optional(Schema.String),
-  issue: Schema.optional(
-    Schema.Struct({
-      identifier: Schema.optional(Schema.String),
-      title: Schema.optional(Schema.String),
-      description: Schema.optional(Schema.String),
-    }),
-  ),
-});
-
-export const LinearWebhook = Schema.Struct({
-  action: Schema.Literals(["create", "update", "remove"]),
-  type: Schema.String,
-  webhookTimestamp: Schema.Number,
-  data: Schema.Record(Schema.String, Schema.Unknown),
-});
-export type LinearWebhook = typeof LinearWebhook.Type;
-
-export const PullRequest = Schema.Struct({
-  number: Schema.Number,
-  html_url: Schema.String,
-  draft: Schema.optional(Schema.Boolean),
-});
-export type PullRequest = typeof PullRequest.Type;
 
 export class ValidationError extends Data.TaggedError("ValidationError")<{
   readonly reason: string;
