@@ -3,7 +3,7 @@ import { Effect, Layer, Ref } from "effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
-import { withSubscription } from "../src/auth/subscription.ts";
+import { withCodex } from "../src/auth/codex.ts";
 import { Recorder, RecordingSandbox } from "../src/sandbox.ts";
 import { inMemoryStore, Store } from "../src/store.ts";
 
@@ -34,7 +34,7 @@ describe("subscription auth lifecycle", () => {
     () => {
       const hits: string[] = [];
       return Effect.gen(function* () {
-        yield* withSubscription(undefined, Effect.void).pipe(Effect.orDie);
+        yield* withCodex(undefined, Effect.void).pipe(Effect.orDie);
 
         const writes = yield* Ref.get((yield* Recorder).writes);
         const stored = yield* (yield* Store).getCredential("codex");

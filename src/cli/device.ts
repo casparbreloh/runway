@@ -2,7 +2,7 @@ import { Data, Duration, Effect } from "effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import type { SubTokens } from "../auth/subscription.ts";
+import type { SubTokens } from "../auth/codex.ts";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const BASE = "https://auth.openai.com";

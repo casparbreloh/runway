@@ -3,7 +3,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import { agents } from "../agents/index.ts";
-import { withSubscription } from "../auth/index.ts";
+import { withCodex } from "../auth/index.ts";
 import { loadSecrets } from "../auth/secrets.ts";
 import { type AgentName, type JobSpec, parseRepo } from "../domain.ts";
 import { Sandbox } from "../sandbox.ts";
@@ -152,7 +152,7 @@ export const runFlow = (
 
     // Subscription auth wraps the run; the static `github` secret is injected as
     // GITHUB_TOKEN for in-sandbox git. Both halves resolve from the vault.
-    yield* withSubscription(
+    yield* withCodex(
       secrets["openai"],
       Effect.gen(function* () {
         const sandbox = yield* Sandbox;

@@ -115,7 +115,7 @@ const writeBack = (tokens: SubTokens): Effect.Effect<void, never, Store> =>
 // Subscription auth (OAuth): refresh-if-expired (rotating the refresh token), render
 // the codex credential into the sandbox, run `body`, then capture any in-sandbox
 // rotation. `apiKey` is the static-secret fallback. Static secrets: ./secrets.ts.
-export const withSubscription = <A, E, R>(
+export const withCodex = <A, E, R>(
   apiKey: string | undefined,
   body: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | AuthError, R | Sandbox | Store | HttpClient.HttpClient> =>
