@@ -13,7 +13,7 @@ export const linearToPr: FlowManifest = {
     },
   },
   repo: "acme/widgets",
-  agent: "pi",
+  agent: "codex",
   steps: [
     {
       id: "pr",

@@ -2,15 +2,18 @@ import { Effect } from "effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import { type AgentName, AuthError } from "../domain.ts";
+import { AuthError } from "../domain.ts";
 import { Sandbox } from "../sandbox.ts";
 import { Store } from "../store.ts";
 
-// Both agents run on the same Codex subscription, so the canonical tokens are
-// stored ONCE under this key and rendered into each CLI's native auth file.
+// Codex is the only subscription for now. The canonical tokens live in the vault
+// under this key; only codex's auth file is rendered. A pi flow would add a pi
+// renderer behind this same shape — pi reuses the same tokens, just a different file.
 const SUB_KEY = "codex";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const CONFIG_DIR = "/work/.codex";
+const AUTH_PATH = `${CONFIG_DIR}/auth.json`;
 
 export interface SubTokens {
   readonly access: string;
@@ -20,31 +23,7 @@ export interface SubTokens {
   readonly idToken?: string | undefined;
 }
 
-interface SubConfig {
-  readonly env: string;
-  readonly dir: string;
-  readonly path: string;
-  readonly format: "codex" | "pi";
-}
-
-// Adding an agent that shares the sub is a row here, not code.
-export const subs: Record<AgentName, SubConfig> = {
-  codex: {
-    env: "CODEX_HOME",
-    dir: "/work/.codex",
-    path: "/work/.codex/auth.json",
-    format: "codex",
-  },
-  pi: {
-    env: "PI_CODING_AGENT_DIR",
-    dir: "/work/.pi-agent",
-    path: "/work/.pi-agent/auth.json",
-    format: "pi",
-  },
-};
-
 const nowMs = (): number => Date.now();
-
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const obj = (v: unknown): Record<string, unknown> =>
   typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
@@ -60,29 +39,19 @@ const jwtExp = (jwt: string): number => {
   }
 };
 
-// canonical -> the file each CLI reads (codex nested, pi flat).
-const render = (format: "codex" | "pi", t: SubTokens): string =>
-  format === "codex"
-    ? JSON.stringify({
-        auth_mode: "chatgpt",
-        OPENAI_API_KEY: null,
-        tokens: {
-          id_token: t.idToken ?? "",
-          access_token: t.access,
-          refresh_token: t.refresh,
-          account_id: t.accountId ?? "",
-        },
-        last_refresh: new Date(nowMs()).toISOString(),
-      })
-    : JSON.stringify({
-        "openai-codex": {
-          type: "oauth",
-          access: t.access,
-          refresh: t.refresh,
-          expires: t.expires,
-          accountId: t.accountId ?? "",
-        },
-      });
+// canonical -> codex's nested auth.json
+const render = (t: SubTokens): string =>
+  JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      id_token: t.idToken ?? "",
+      access_token: t.access,
+      refresh_token: t.refresh,
+      account_id: t.accountId ?? "",
+    },
+    last_refresh: new Date(nowMs()).toISOString(),
+  });
 
 const parseCanonical = (content: string): SubTokens | null => {
   try {
@@ -99,26 +68,16 @@ const parseCanonical = (content: string): SubTokens | null => {
   }
 };
 
-// the CLI may rotate in-sandbox on a long job; parse its file back to canonical.
-const parseAgent = (format: "codex" | "pi", content: string): SubTokens | null => {
+// codex may rotate in-sandbox on a long job; parse its file back to canonical.
+const parseCodex = (content: string): SubTokens | null => {
   try {
-    const d = obj(JSON.parse(content));
-    if (format === "codex") {
-      const t = obj(d["tokens"]);
-      return {
-        access: str(t["access_token"]),
-        refresh: str(t["refresh_token"]),
-        expires: jwtExp(str(t["access_token"])),
-        accountId: str(t["account_id"]) || undefined,
-        idToken: str(t["id_token"]) || undefined,
-      };
-    }
-    const o = obj(d["openai-codex"]);
+    const t = obj(obj(JSON.parse(content))["tokens"]);
     return {
-      access: str(o["access"]),
-      refresh: str(o["refresh"]),
-      expires: typeof o["expires"] === "number" ? o["expires"] : 0,
-      accountId: str(o["accountId"]) || undefined,
+      access: str(t["access_token"]),
+      refresh: str(t["refresh_token"]),
+      expires: jwtExp(str(t["access_token"])),
+      accountId: str(t["account_id"]) || undefined,
+      idToken: str(t["id_token"]) || undefined,
     };
   } catch {
     return null;
@@ -154,17 +113,15 @@ const writeBack = (tokens: SubTokens): Effect.Effect<void, never, Store> =>
   });
 
 // Subscription auth (OAuth): refresh-if-expired (rotating the refresh token), render
-// the canonical credential into the sandbox, run `body`, then capture any in-sandbox
-// rotation. `apiKey` is the static-secret fallback. Static secrets live in ./secrets.ts.
+// the codex credential into the sandbox, run `body`, then capture any in-sandbox
+// rotation. `apiKey` is the static-secret fallback. Static secrets: ./secrets.ts.
 export const withSubscription = <A, E, R>(
-  agentName: AgentName,
   apiKey: string | undefined,
   body: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | AuthError, R | Sandbox | Store | HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const sandbox = yield* Sandbox;
     const store = yield* Store;
-    const sub = subs[agentName];
 
     const stored = yield* store.getCredential(SUB_KEY).pipe(Effect.orElseSucceed(() => null));
     const canonical = stored ? parseCanonical(stored.content) : null;
@@ -173,9 +130,7 @@ export const withSubscription = <A, E, R>(
         yield* sandbox.setEnvVars({ OPENAI_API_KEY: apiKey });
         return yield* body;
       }
-      return yield* Effect.fail(
-        new AuthError({ reason: `no subscription or api key for agent "${agentName}"` }),
-      );
+      return yield* Effect.fail(new AuthError({ reason: "no codex subscription or api key" }));
     }
 
     let tokens = canonical;
@@ -184,14 +139,13 @@ export const withSubscription = <A, E, R>(
       yield* writeBack(tokens);
     }
 
-    yield* sandbox.setEnvVars({ [sub.env]: sub.dir });
-    yield* sandbox.writeFile(sub.path, render(sub.format, tokens));
+    yield* sandbox.setEnvVars({ CODEX_HOME: CONFIG_DIR });
+    yield* sandbox.writeFile(AUTH_PATH, render(tokens));
 
     const out = yield* body;
 
-    const after = parseAgent(
-      sub.format,
-      yield* sandbox.readFile(sub.path).pipe(Effect.orElseSucceed(() => "")),
+    const after = parseCodex(
+      yield* sandbox.readFile(AUTH_PATH).pipe(Effect.orElseSucceed(() => "")),
     );
     if (after && after.refresh && after.refresh !== tokens.refresh) yield* writeBack(after);
     return out;

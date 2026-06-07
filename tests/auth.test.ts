@@ -34,7 +34,7 @@ describe("subscription auth lifecycle", () => {
     () => {
       const hits: string[] = [];
       return Effect.gen(function* () {
-        yield* withSubscription("codex", undefined, Effect.void).pipe(Effect.orDie);
+        yield* withSubscription(undefined, Effect.void).pipe(Effect.orDie);
 
         const writes = yield* Ref.get((yield* Recorder).writes);
         const stored = yield* (yield* Store).getCredential("codex");

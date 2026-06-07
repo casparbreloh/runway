@@ -153,7 +153,6 @@ export const runFlow = (
     // Subscription auth wraps the run; the static `github` secret is injected as
     // GITHUB_TOKEN for in-sandbox git. Both halves resolve from the vault.
     yield* withSubscription(
-      agentName,
       secrets["openai"],
       Effect.gen(function* () {
         const sandbox = yield* Sandbox;
