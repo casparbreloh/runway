@@ -25,6 +25,17 @@ const login = Effect.gen(function* () {
   log("✓ codex subscription saved");
 }).pipe(Effect.provide(FetchHttpClient.layer), Effect.orDie);
 
+const USAGE = `runway — trigger flows and manage credentials
+
+Usage:
+  runway login                      device-code login for the codex subscription
+  runway secret set <name> <value>  store a static secret (api key, webhook secret)
+  runway run <flow> [json]          trigger a flow with an optional JSON body
+
+Environment:
+  RUNWAY_URL    the deployed worker url
+  RUNWAY_TOKEN  the bearer token (RUNWAY_API_TOKEN)`;
+
 const main = async (): Promise<void> => {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "login") {
@@ -43,7 +54,7 @@ const main = async (): Promise<void> => {
     await post(`/run/${rest[0]}`, body);
     log(`✓ flow ${rest[0]} triggered`);
   } else {
-    log("usage: runway login | secret set <name> <value> | run <flow> [json]");
+    log(USAGE);
   }
 };
 
