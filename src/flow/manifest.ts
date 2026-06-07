@@ -1,35 +1,56 @@
-import type { AgentName } from "../domain.ts";
+import { Schema } from "effect";
 
-export type Trigger = "linear" | { readonly cron: string };
+import { AgentName } from "../domain.ts";
 
-interface StepBase {
-  readonly forEach?: string;
-}
+export const Trigger = Schema.Union([
+  Schema.Literal("linear"),
+  Schema.Struct({ cron: Schema.String }),
+]);
 
-export interface RunStep extends StepBase {
-  readonly run: string;
-  readonly pr?: boolean;
-}
+const base = {
+  id: Schema.optional(Schema.String),
+  when: Schema.optional(Schema.String),
+  forEach: Schema.optional(Schema.String),
+};
 
-export interface ShellStep extends StepBase {
-  readonly shell: string;
-  readonly as?: string;
-}
+export const RunStep = Schema.Struct({
+  ...base,
+  run: Schema.String,
+  pr: Schema.optional(Schema.Boolean),
+  branch: Schema.optional(Schema.String),
+});
+export type RunStep = typeof RunStep.Type;
 
-export interface ReportStep extends StepBase {
-  readonly report: true;
-}
+export const ShellStep = Schema.Struct({ ...base, shell: Schema.String });
+export type ShellStep = typeof ShellStep.Type;
 
-export type Step = RunStep | ShellStep | ReportStep;
+export const HttpStep = Schema.Struct({
+  ...base,
+  http: Schema.Struct({
+    url: Schema.String,
+    method: Schema.optional(Schema.String),
+    headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+    json: Schema.optional(Schema.Unknown),
+    body: Schema.optional(Schema.String),
+  }),
+});
+export type HttpStep = typeof HttpStep.Type;
 
-export interface FlowManifest {
-  readonly id: string;
-  readonly trigger: Trigger;
-  readonly repo?: string;
-  readonly agent?: AgentName;
-  readonly steps: readonly Step[];
-}
+export const Step = Schema.Union([RunStep, ShellStep, HttpStep]);
+export type Step = typeof Step.Type;
 
-export const isRun = (step: Step): step is RunStep => "run" in step;
-export const isShell = (step: Step): step is ShellStep => "shell" in step;
-export const isReport = (step: Step): step is ReportStep => "report" in step;
+export const FlowManifest = Schema.Struct({
+  id: Schema.String,
+  trigger: Trigger,
+  repo: Schema.optional(Schema.String),
+  agent: Schema.optional(AgentName),
+  steps: Schema.Array(Step),
+});
+export type FlowManifest = typeof FlowManifest.Type;
+
+// The validation pipeline: agent-written flows decode through this or are rejected.
+export const decodeFlow = Schema.decodeUnknownEffect(FlowManifest);
+
+export const isRun = (s: Step): s is RunStep => "run" in s;
+export const isShell = (s: Step): s is ShellStep => "shell" in s;
+export const isHttp = (s: Step): s is HttpStep => "http" in s;

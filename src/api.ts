@@ -42,7 +42,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
       AUTH_BLOB_KEY: Config.redacted("AUTH_BLOB_KEY"),
       RUNWAY_API_TOKEN: Config.redacted("RUNWAY_API_TOKEN"),
       LINEAR_WEBHOOK_SECRET: Config.redacted("LINEAR_WEBHOOK_SECRET"),
-      LINEAR_API_KEY: Config.redacted("LINEAR_API_KEY"),
       DEFAULT_AGENT: Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex")),
       DEFAULT_BASE: Config.string("DEFAULT_BASE").pipe(Config.withDefault("main")),
       DEFAULT_REPO: Config.string("DEFAULT_REPO").pipe(Config.withDefault("")),
@@ -60,7 +59,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
     const authBlobKey = Redacted.value(yield* Config.redacted("AUTH_BLOB_KEY"));
     const runwayApiToken = Redacted.value(yield* Config.redacted("RUNWAY_API_TOKEN"));
     const linearWebhookSecret = Redacted.value(yield* Config.redacted("LINEAR_WEBHOOK_SECRET"));
-    const linearApiKey = Redacted.value(yield* Config.redacted("LINEAR_API_KEY"));
     const defaultAgentRaw = yield* Config.string("DEFAULT_AGENT").pipe(Config.withDefault("codex"));
     const defaultBase = yield* Config.string("DEFAULT_BASE").pipe(Config.withDefault("main"));
     const defaultRepo = yield* Config.string("DEFAULT_REPO").pipe(Config.withDefault(""));
@@ -125,13 +123,16 @@ export default class Api extends Cloudflare.Worker<Api>()(
 
         // Run the flow detached via waitUntil so the webhook returns 202
         // immediately (Linear retries any webhook taking >5s). Returns the run key.
-        const launch = (spec: JobSpec): string => {
+        const launch = (spec: JobSpec, body: unknown): string => {
           const runId = runKey(linearToPr.id, spec.source?.ref);
-          const program = runFlow(linearToPr, sourceCtx(spec), {
-            githubToken,
-            openaiApiKey,
-            linearApiKey,
-          }).pipe(
+          const program = runFlow(
+            linearToPr,
+            { ...sourceCtx(spec), body },
+            {
+              githubToken,
+              openaiApiKey,
+            },
+          ).pipe(
             Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, spec.agent)), storeLayer)),
             Effect.provide(context),
           );
@@ -170,7 +171,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
           );
           if (!spec) return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
 
-          return yield* HttpServerResponse.json({ jobId: launch(spec) }, { status: 202 });
+          return yield* HttpServerResponse.json({ jobId: launch(spec, payload) }, { status: 202 });
         }
 
         if (request.method === "POST" && path === "/jobs") {
@@ -197,7 +198,10 @@ export default class Api extends Cloudflare.Worker<Api>()(
             return yield* HttpServerResponse.json({ ignored: true }, { status: 202 });
           }
 
-          return yield* HttpServerResponse.json({ jobId: launch(spec.success) }, { status: 202 });
+          return yield* HttpServerResponse.json(
+            { jobId: launch(spec.success, body) },
+            { status: 202 },
+          );
         }
 
         if (request.method === "GET" && path.startsWith("/jobs/")) {

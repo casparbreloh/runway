@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer, Ref } from "effect";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { runFlow } from "../src/flow/engine.ts";
 import type { FlowManifest } from "../src/flow/manifest.ts";
@@ -8,29 +10,46 @@ import { type ExecResult, Recorder, RecordingSandbox } from "../src/sandbox.ts";
 import { inMemoryStore } from "../src/store.ts";
 import { happyRun } from "./fixtures.ts";
 
-const codexCreds = inMemoryStore({ credentials: { codex: '{"tok":"SEED"}' } });
+const recordingHttp = (calls: string[]): Layer.Layer<HttpClient.HttpClient> =>
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request) => {
+      calls.push(request.url);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, new Response("{}", { status: 200 })),
+      );
+    }),
+  );
+
+const creds = inMemoryStore({ credentials: { codex: '{"tok":"SEED"}', linear: "lin_key" } });
 
 describe("flow engine", () => {
-  it.effect("linear-to-pr: the agent opens a draft PR and the result carries the PR url", () =>
-    Effect.gen(function* () {
-      const result = yield* runFlow(
-        linearToPr,
-        {
-          sourceType: "linear",
-          repo: "acme/widgets",
-          plan: "Do the thing.",
-          title: "Add hello",
-          ref: "ENG-123",
-          agent: "codex",
-        },
-        { githubToken: "GH" },
+  it.effect(
+    "linear-to-pr: opens a draft PR, then POSTs the comment-back to Linear via http",
+    () => {
+      const calls: string[] = [];
+      return Effect.gen(function* () {
+        yield* runFlow(
+          linearToPr,
+          {
+            sourceType: "linear",
+            repo: "acme/widgets",
+            plan: "Do it.",
+            ref: "ENG-1",
+            agent: "codex",
+            body: { data: { id: "uuid-1" } },
+          },
+          { githubToken: "GH" },
+        );
+        const commands = yield* Ref.get((yield* Recorder).commands);
+        expect(commands.some((c) => c.includes("gh pr create --draft"))).toBe(true);
+        expect(calls).toContain("https://api.linear.app/graphql");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(RecordingSandbox({ exec: happyRun }), creds, recordingHttp(calls)),
+        ),
       );
-      const commands = yield* Ref.get((yield* Recorder).commands);
-
-      expect(result?.status).toBe("success");
-      expect(result?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
-      expect(commands.some((c) => c.includes("gh pr create --draft"))).toBe(true);
-    }).pipe(Effect.provide(Layer.mergeAll(RecordingSandbox({ exec: happyRun }), codexCreds))),
+    },
   );
 
   it.effect("forEach + shell: lists items and runs the agent once per item", () =>
@@ -41,13 +60,17 @@ describe("flow engine", () => {
         repo: "acme/widgets",
         agent: "codex",
         steps: [
-          { shell: "gh issue list --json number,title,body", as: "issues" },
-          { forEach: "{{ issues }}", run: "Fix #{{ item.number }} {{ item.title }}", pr: true },
+          { id: "issues", shell: "gh issue list --json number,title,body" },
+          {
+            id: "fix",
+            forEach: "{{ steps.issues.json }}",
+            run: "Fix #{{ item.number }}",
+            pr: true,
+          },
         ],
       };
       yield* runFlow(sweep, {}, { githubToken: "GH" });
       const commands = yield* Ref.get((yield* Recorder).commands);
-
       expect(commands.filter((c) => c.includes("gh pr create")).length).toBe(2);
     }).pipe(
       Effect.provide(
@@ -63,7 +86,8 @@ describe("flow engine", () => {
                   }
                 : happyRun(command),
           }),
-          codexCreds,
+          creds,
+          recordingHttp([]),
         ),
       ),
     ),

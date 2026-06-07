@@ -83,5 +83,4 @@ export const markdownSource: Source = {
       };
       return spec;
     }),
-  report: () => Effect.void,
 };
