@@ -4,5 +4,15 @@
     "typeAware": true,
     "typeCheck": true
   },
-  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import"]
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import"],
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "no-console": "error"
+  },
+  "overrides": [
+    {
+      "files": ["src/auth-handoff.ts"],
+      "rules": { "no-console": "off" }
+    }
+  ]
 }

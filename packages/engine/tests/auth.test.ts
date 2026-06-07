@@ -4,7 +4,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { withCodex } from "../src/auth/codex.ts";
-import { Recorder, RecordingSandbox } from "../src/sandbox.ts";
+import { RecordingSandbox, SandboxLog } from "../src/sandbox.ts";
 import { inMemoryStore, Store } from "../src/store.ts";
 
 const refreshingHttp = (hits: string[]): Layer.Layer<HttpClient.HttpClient> =>
@@ -36,7 +36,7 @@ describe("subscription auth lifecycle", () => {
       return Effect.gen(function* () {
         yield* withCodex(undefined, Effect.void).pipe(Effect.orDie);
 
-        const writes = yield* Ref.get((yield* Recorder).writes);
+        const writes = yield* Ref.get((yield* SandboxLog).writes);
         const stored = yield* (yield* Store).getCredential("codex");
 
         // the refresh endpoint was actually hit (token was expired)
