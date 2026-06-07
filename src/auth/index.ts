@@ -1,2 +1,2 @@
 export { loadSecrets } from "./secrets.ts";
-export { type SubConfig, subs, withSubscription } from "./subscription.ts";
+export { subs, type SubTokens, withSubscription } from "./subscription.ts";

@@ -22,7 +22,15 @@ const recordingHttp = (calls: string[]): Layer.Layer<HttpClient.HttpClient> =>
   );
 
 const creds = inMemoryStore({
-  credentials: { codex: '{"tok":"SEED"}', pi: '{"tok":"SEED"}', linear: "lin_key" },
+  credentials: {
+    "openai-codex": JSON.stringify({
+      access: "A",
+      refresh: "R",
+      expires: 9999999999999,
+      accountId: "acc",
+    }),
+    linear: "lin_key",
+  },
 });
 
 describe("flow engine", () => {
