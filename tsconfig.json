@@ -2,6 +2,7 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "paths": { "runway": ["./src/index.ts"] },
     "target": "ES2022",
     "lib": ["ES2023"],
     "types": ["@cloudflare/workers-types", "node"],
@@ -18,5 +19,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "tests", "packages", "workflows", "alchemy.run.ts"]
+  "include": ["src", "tests", "workflows"]
 }

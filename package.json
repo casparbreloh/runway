@@ -3,33 +3,30 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
-    "dev": "alchemy dev",
-    "deploy": "alchemy deploy",
-    "destroy": "alchemy destroy",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
     "typecheck": "tsgo --noEmit",
-    "test": "vitest run",
-    "probe:auth": "tsx src/auth-handoff.ts"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@runway/engine": "workspace:*",
-    "@runway/git": "workspace:*",
-    "alchemy": "catalog:",
-    "effect": "catalog:"
+    "@cloudflare/sandbox": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
-    "@effect/platform-node": "catalog:",
-    "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "tsx": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"
