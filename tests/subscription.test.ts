@@ -1,20 +1,20 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer, Ref } from "effect";
 
-import { withAgentAuth } from "../src/agent-auth.ts";
 import { agents } from "../src/agents/index.ts";
+import { withSubscription } from "../src/auth/index.ts";
 import { Recorder, RecordingSandbox } from "../src/sandbox.ts";
 import { inMemoryStore, Store } from "../src/store.ts";
 import { happyRun, piSpec } from "./fixtures.ts";
 
-describe("withAgentAuth", () => {
+describe("withSubscription", () => {
   it.effect(
-    "seeds the subscription credential, never leaks it, and writes back the rotated token",
+    "prepares the subscription credential, never leaks it, and writes back the rotated token",
     () =>
       Effect.gen(function* () {
-        yield* withAgentAuth(
+        yield* withSubscription(
           "codex",
-          { githubToken: "GH-SECRET" },
+          undefined,
           agents.codex.run({ ...piSpec, agent: "codex" }),
         ).pipe(Effect.orDie);
 
@@ -28,11 +28,9 @@ describe("withAgentAuth", () => {
           content: '{"tok":"SEED"}',
         });
         expect(env.CODEX_HOME).toBe("/work/.codex");
-        expect(env.GITHUB_TOKEN).toBe("GH-SECRET");
         const joined = commands.join("\n");
         expect(joined).not.toContain("SEED");
         expect(joined).not.toContain("ROTATED");
-        expect(joined).not.toContain("GH-SECRET");
         expect(stored?.content).toBe('{"tok":"ROTATED"}');
       }).pipe(
         Effect.provide(

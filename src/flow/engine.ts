@@ -2,8 +2,9 @@ import { Effect } from "effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import { type AgentSecrets, withAgentAuth } from "../agent-auth.ts";
 import { agents } from "../agents/index.ts";
+import { withSubscription } from "../auth/index.ts";
+import { loadSecrets } from "../auth/secrets.ts";
 import { type AgentName, type JobSpec, parseRepo } from "../domain.ts";
 import { Sandbox } from "../sandbox.ts";
 import { Store } from "../store.ts";
@@ -34,25 +35,12 @@ const tryJson = (text: string): unknown => {
 };
 
 const collectSecretNames = (manifest: FlowManifest): readonly string[] => {
-  const names = new Set<string>(["github"]);
+  const names = new Set<string>(["github", "openai"]);
   for (const match of JSON.stringify(manifest).matchAll(SECRET_REF)) {
     if (match[1]) names.add(match[1]);
   }
   return [...names];
 };
-
-const loadSecrets = (
-  names: readonly string[],
-): Effect.Effect<Record<string, string>, never, Store> =>
-  Effect.gen(function* () {
-    const store = yield* Store;
-    const out: Record<string, string> = {};
-    for (const name of names) {
-      const cred = yield* store.getCredential(name).pipe(Effect.orElseSucceed(() => null));
-      if (cred) out[name] = cred.content;
-    }
-    return out;
-  });
 
 const buildSpec = (ctx: Record<string, unknown>, step: RunStep, index: number): JobSpec | null => {
   const repoSlug = typeof ctx["repo"] === "string" ? interpolate(ctx["repo"], ctx).trim() : "";
@@ -146,10 +134,9 @@ const runSteps = (
 export const runFlow = (
   manifest: FlowManifest,
   trigger: Record<string, unknown>,
-  secrets: AgentSecrets,
 ): Effect.Effect<void, never, Sandbox | Store | HttpClient.HttpClient> =>
   Effect.gen(function* () {
-    const secretMap = yield* loadSecrets(collectSecretNames(manifest));
+    const secrets = yield* loadSecrets(collectSecretNames(manifest));
     const agentName: AgentName =
       (typeof trigger["agent"] === "string" ? (trigger["agent"] as AgentName) : undefined) ??
       manifest.agent ??
@@ -158,12 +145,20 @@ export const runFlow = (
     const ctx: Record<string, unknown> = {
       ...trigger,
       agent: agentName,
-      secrets: secretMap,
+      secrets,
       steps: {},
     };
     if (ctx["repo"] === undefined && manifest.repo !== undefined) ctx["repo"] = manifest.repo;
 
-    yield* withAgentAuth(agentName, secrets, runSteps(manifest, ctx)).pipe(
-      Effect.catchTag("AuthError", () => Effect.void),
-    );
+    // Subscription auth wraps the run; the static `github` secret is injected as
+    // GITHUB_TOKEN for in-sandbox git. Both halves resolve from the vault.
+    yield* withSubscription(
+      agentName,
+      secrets["openai"],
+      Effect.gen(function* () {
+        const sandbox = yield* Sandbox;
+        yield* sandbox.setEnvVars({ GITHUB_TOKEN: secrets["github"] ?? "" });
+        yield* runSteps(manifest, ctx);
+      }),
+    ).pipe(Effect.catchTag("AuthError", () => Effect.void));
   });

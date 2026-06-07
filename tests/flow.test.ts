@@ -29,18 +29,14 @@ describe("flow engine", () => {
     () => {
       const calls: string[] = [];
       return Effect.gen(function* () {
-        yield* runFlow(
-          linearToPr,
-          {
-            sourceType: "linear",
-            repo: "acme/widgets",
-            plan: "Do it.",
-            ref: "ENG-1",
-            agent: "codex",
-            body: { data: { id: "uuid-1" } },
-          },
-          { githubToken: "GH" },
-        );
+        yield* runFlow(linearToPr, {
+          sourceType: "linear",
+          repo: "acme/widgets",
+          plan: "Do it.",
+          ref: "ENG-1",
+          agent: "codex",
+          body: { data: { id: "uuid-1" } },
+        });
         const commands = yield* Ref.get((yield* Recorder).commands);
         expect(commands.some((c) => c.includes("gh pr create --draft"))).toBe(true);
         expect(calls).toContain("https://api.linear.app/graphql");
@@ -69,7 +65,7 @@ describe("flow engine", () => {
           },
         ],
       };
-      yield* runFlow(sweep, {}, { githubToken: "GH" });
+      yield* runFlow(sweep, {});
       const commands = yield* Ref.get((yield* Recorder).commands);
       expect(commands.filter((c) => c.includes("gh pr create")).length).toBe(2);
     }).pipe(

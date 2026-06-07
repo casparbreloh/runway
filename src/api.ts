@@ -37,8 +37,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
     compatibility: { flags: ["nodejs_compat"], date: "2026-03-17" },
     env: {
       DB: Db,
-      GITHUB_TOKEN: Config.redacted("GITHUB_TOKEN"),
-      OPENAI_API_KEY: Config.redacted("OPENAI_API_KEY"),
       AUTH_BLOB_KEY: Config.redacted("AUTH_BLOB_KEY"),
       RUNWAY_API_TOKEN: Config.redacted("RUNWAY_API_TOKEN"),
       LINEAR_WEBHOOK_SECRET: Config.redacted("LINEAR_WEBHOOK_SECRET"),
@@ -54,8 +52,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
     const conn = yield* Cloudflare.D1Connection.bind(Db);
 
     // Secrets and plain config resolved once at init (ConfigError allowed here).
-    const githubToken = Redacted.value(yield* Config.redacted("GITHUB_TOKEN"));
-    const openaiApiKey = Redacted.value(yield* Config.redacted("OPENAI_API_KEY"));
     const authBlobKey = Redacted.value(yield* Config.redacted("AUTH_BLOB_KEY"));
     const runwayApiToken = Redacted.value(yield* Config.redacted("RUNWAY_API_TOKEN"));
     const linearWebhookSecret = Redacted.value(yield* Config.redacted("LINEAR_WEBHOOK_SECRET"));
@@ -125,14 +121,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
         // immediately (Linear retries any webhook taking >5s). Returns the run key.
         const launch = (spec: JobSpec, body: unknown): string => {
           const runId = runKey(linearToPr.id, spec.source?.ref);
-          const program = runFlow(
-            linearToPr,
-            { ...sourceCtx(spec), body },
-            {
-              githubToken,
-              openaiApiKey,
-            },
-          ).pipe(
+          const program = runFlow(linearToPr, { ...sourceCtx(spec), body }).pipe(
             Effect.provide(Layer.mergeAll(sandboxLayer(sandboxFor(runId, spec.agent)), storeLayer)),
             Effect.provide(context),
           );
