@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build:sandbox": "pnpm --filter runway-sandbox build",
+    "dev": "pnpm build:sandbox && wrangler dev",
+    "deploy": "pnpm build:sandbox && wrangler deploy",
     "cf-typegen": "wrangler types",
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsgo --noEmit && pnpm --filter runway-sandbox typecheck"
   },
   "dependencies": {
     "@linear/sdk": "catalog:",

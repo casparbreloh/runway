@@ -2,6 +2,8 @@ import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type { WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 
+import type { RunnerInput, RunnerOutput } from "./agent-protocol.ts";
+
 export interface SandboxArgs {
   readonly id?: string;
 }
@@ -56,12 +58,15 @@ const ONCE = { retries: { limit: 0, delay: "0 seconds" } } as const;
 const AGENT_MODEL = "anthropic/claude-sonnet-4-5";
 const AGENT_INSTRUCTION =
   "Read PLAN.md and implement it. If you change files, write a short PR.md summarizing the change.";
+// The runner is baked into the sandbox image at /app (see packages/sandbox/Dockerfile).
+const RUNNER = "/app/dist/runner.js";
+const AGENT_INPUT = "/tmp/runway-agent-input.json";
+const AGENT_RESULT = "/tmp/runway-agent-result.json";
 
 const sandboxFor = (env: Env, id: string): Sandbox =>
   getSandbox(env.Sandbox, id, { sleepAfter: SLEEP_AFTER });
 const tail = (s: string): string => (s.length > 4000 ? s.slice(-4000) : s);
 const redact = (s: string): string => tail(s).replace(REDACT, "https://***@");
-const quote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
 
 const runSandbox = (args: SandboxArgs, instanceId: string): SandboxHandle => ({
   id: args.id ?? `runway-${instanceId}`,
@@ -81,34 +86,33 @@ const runAgent = async (env: Env, args: AgentArgs): Promise<AgentResult> => {
   if (!SAFE.test(model)) throw new NonRetryableError(`unsafe model: ${model}`);
   const cwd = args.cwd ?? "/workspace";
 
-  const install = await sandbox.exec(
-    "command -v pi >/dev/null 2>&1 || npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
-  );
-  if (install.exitCode !== 0) {
-    throw new NonRetryableError(`agent install failed: ${tail(install.stderr)}`);
-  }
-
   await sandbox.writeFile(`${cwd}/PLAN.md`, args.prompt);
-  const run = await sandbox.exec(`pi --model ${model} --mode json -p ${quote(AGENT_INSTRUCTION)}`, {
+  const input: RunnerInput = { prompt: AGENT_INSTRUCTION, model, cwd };
+  await sandbox.writeFile(AGENT_INPUT, JSON.stringify(input));
+  const run = await sandbox.exec(`node ${RUNNER} ${AGENT_INPUT} ${AGENT_RESULT}`, {
     cwd,
     env: { ANTHROPIC_API_KEY: args.apiKey, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
   });
-  if (run.exitCode !== 0 || !agentEnded(run.stdout)) {
-    throw new NonRetryableError(`agent failed: ${redact(run.stderr || run.stdout)}`);
+
+  const result = await readResult(sandbox, AGENT_RESULT);
+  if (run.exitCode !== 0 || result === null || !result.ok) {
+    const reason = result !== null && !result.ok ? result.error : run.stderr || run.stdout;
+    throw new NonRetryableError(`agent failed: ${redact(reason)}`);
   }
 
   const pr = await sandbox.readFile(`${cwd}/PR.md`).catch(() => null);
   return { summary: pr?.content.trim() || "agent run completed." };
 };
 
-const agentEnded = (stdout: string): boolean =>
-  stdout.split("\n").some((line) => {
-    try {
-      return (JSON.parse(line) as { type?: string }).type === "agent_end";
-    } catch {
-      return false;
-    }
-  });
+const readResult = async (sandbox: Sandbox, path: string): Promise<RunnerOutput | null> => {
+  const file = await sandbox.readFile(path).catch(() => null);
+  if (file === null) return null;
+  try {
+    return JSON.parse(file.content) as RunnerOutput;
+  } catch {
+    return null;
+  }
+};
 
 const runHttp = async (args: HttpArgs): Promise<HttpResult> => {
   const headers: Record<string, string> = { ...args.headers };
