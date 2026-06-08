@@ -1,14 +1,22 @@
 {
   "name": "runway",
   "version": "0.1.0",
+  "bin": {
+    "runway": "./bin/runway.ts"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./worker": "./src/worker.ts"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "catalog:"
+    "@cloudflare/sandbox": "catalog:",
+    "citty": "catalog:",
+    "esbuild": "catalog:",
+    "wrangler": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:"
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:"
   }
 }

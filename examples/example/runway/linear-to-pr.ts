@@ -19,7 +19,8 @@ const PUSH = [
 ].join(" && ");
 
 export default workflow({
-  name: "linear-to-pr",
+  id: "linear-to-pr",
+  secrets: ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "LINEAR_TOKEN", "LINEAR_SIGNING_SECRET"],
   trigger: webhook<EntityWebhookPayloadWithIssueData>({
     path: "/hooks/linear",
     verify: hmac((env) => env.LINEAR_SIGNING_SECRET, { header: "linear-signature" }),

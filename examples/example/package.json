@@ -1,0 +1,20 @@
+{
+  "name": "example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "runway deploy",
+    "check": "runway check"
+  },
+  "dependencies": {
+    "@linear/sdk": "catalog:",
+    "runway": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "typescript": "catalog:"
+  }
+}

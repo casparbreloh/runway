@@ -1,0 +1,2 @@
+# runway deploy generates this — gitignore it in any project that uses runway
+.runway
