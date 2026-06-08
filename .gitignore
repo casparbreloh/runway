@@ -6,15 +6,9 @@ dist
 build
 *.tsbuildinfo
 
-# Alchemy local state
-.alchemy
-
 # Environment variables
 .env*
 !.env*.example
-
-# Local auth bundle (private dev helper)
-.runway-auth
 
 # IDEs and editors
 .vscode/*
