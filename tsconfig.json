@@ -19,5 +19,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["packages/runway/src", "workflows", "worker.ts", "env.d.ts", "tests"]
+  "include": ["packages/runway/src", "workflows", "worker.ts", "env.d.ts"]
 }

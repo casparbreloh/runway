@@ -3,63 +3,37 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import { makeRunwayStep, type RunwayStep } from "./step.ts";
 
-// --- triggers -------------------------------------------------------------
-// A trigger is a typed descriptor read two ways: it carries the payload type into
-// `event.payload`, and the router uses it to route + verify inbound requests. The payload
-// type is YOURS — import it from an SDK (e.g. @linear/sdk/webhooks) or write it inline.
-
-export interface CronEvent {
-  readonly scheduledTime: number;
-  readonly cron: string;
-}
-
-// Verifies an inbound webhook against its already-read raw body (read once, before parse).
 export type Verify = (ctx: {
   readonly raw: string;
   readonly req: Request;
   readonly env: Env;
 }) => boolean | Promise<boolean>;
 
-export interface WebhookTrigger<T> {
-  readonly kind: "webhook";
+export interface Trigger<T> {
   readonly path: string;
   readonly method: "POST" | "GET";
   readonly verify?: Verify;
   readonly __payload?: T;
 }
-export interface CronTrigger<T> {
-  readonly kind: "cron";
-  readonly cron: string;
-  readonly __payload?: T;
-}
-export type Trigger<T> = WebhookTrigger<T> | CronTrigger<T>;
 
 export const webhook = <T>(cfg: {
   path: string;
   method?: "POST" | "GET";
   verify?: Verify;
 }): Trigger<T> => ({
-  kind: "webhook",
   path: cfg.path,
   method: cfg.method ?? "POST",
   ...(cfg.verify ? { verify: cfg.verify } : {}),
 });
 
-export const cron = (expr: string): Trigger<CronEvent> => ({ kind: "cron", cron: expr });
-
-// --- workflow definition --------------------------------------------------
 export interface WorkflowDef<T> {
   readonly name: string;
   readonly trigger: Trigger<T>;
   readonly run: (event: WorkflowEvent<T>, step: RunwayStep, env: Env) => Promise<unknown>;
 }
 
-// Author a workflow. `T` flows from the trigger into `event.payload`. The returned def both
-// compiles to a WorkflowEntrypoint (toEntrypoint) and is read by the router (createRouter).
 export const workflow = <T>(def: WorkflowDef<T>): WorkflowDef<T> => def;
 
-// Compile a def to a Cloudflare WorkflowEntrypoint subclass. Export the result under a name
-// matching the wrangler `class_name` (binding is by export name, not class identity).
 export const toEntrypoint = <T>(def: WorkflowDef<T>): typeof WorkflowEntrypoint<Env, T> =>
   class extends WorkflowEntrypoint<Env, T> {
     override run(event: WorkflowEvent<T>, step: WorkflowStep): Promise<unknown> {
@@ -67,33 +41,26 @@ export const toEntrypoint = <T>(def: WorkflowDef<T>): typeof WorkflowEntrypoint<
     }
   };
 
-// --- front worker ---------------------------------------------------------
 export interface RouterApp {
   fetch(req: Request, env: Env): Promise<Response>;
-  scheduled(controller: ScheduledController, env: Env): Promise<void>;
 }
 
-// Workflow name -> binding name: "linear-to-pr" -> "LINEAR_TO_PR".
-export const bindingName = (name: string): string => name.toUpperCase().replace(/-/g, "_");
+const bindingName = (name: string): string => name.toUpperCase().replace(/-/g, "_");
 
 const workflowBinding = (env: Env, name: string): Workflow | undefined =>
   (env as unknown as Record<string, Workflow | undefined>)[bindingName(name)];
 
-// Cloudflare Workflows can't receive webhooks, so this front Worker matches a request to a
-// trigger, verifies it, and creates a workflow instance with the (untyped) JSON body.
 export const createRouter = (
-  // Heterogeneous registry: each def keeps its own payload type, erased here for the router.
-  // oxlint-disable-next-line typescript/no-explicit-any
-  defs: ReadonlyArray<WorkflowDef<any>>,
+  defs: ReadonlyArray<{ readonly name: string; readonly trigger: Trigger<unknown> }>,
 ): RouterApp => ({
   async fetch(req, env) {
     const url = new URL(req.url);
     for (const def of defs) {
-      const t = def.trigger;
-      if (t.kind !== "webhook" || t.path !== url.pathname || t.method !== req.method) continue;
+      const { trigger } = def;
+      if (trigger.path !== url.pathname || trigger.method !== req.method) continue;
 
       const raw = await req.text();
-      if (t.verify && !(await t.verify({ raw, req, env }))) {
+      if (trigger.verify && !(await trigger.verify({ raw, req, env }))) {
         return new Response("invalid signature", { status: 401 });
       }
       let params: unknown;
@@ -110,21 +77,8 @@ export const createRouter = (
     }
     return new Response("not found", { status: 404 });
   },
-
-  async scheduled(controller, env) {
-    for (const def of defs) {
-      if (def.trigger.kind !== "cron" || def.trigger.cron !== controller.cron) continue;
-      const wf = workflowBinding(env, def.name);
-      if (wf) {
-        await wf.create({
-          params: { scheduledTime: controller.scheduledTime, cron: controller.cron },
-        });
-      }
-    }
-  },
 });
 
-// --- webhook verification helper -----------------------------------------
 export const hmac =
   (secretOf: (env: Env) => string, opts: { header?: string } = {}): Verify =>
   async ({ raw, req, env }) => {

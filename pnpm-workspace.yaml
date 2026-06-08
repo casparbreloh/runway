@@ -15,7 +15,5 @@ catalog:
   oxlint: 1.63.0
   oxlint-tsgolint: 0.22.1
   typescript: 6.0.3
-  vite: 8.0.10
-  vitest: 4.1.8
 
 catalogMode: strict

@@ -1,24 +1,47 @@
+import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type { WorkflowStep } from "cloudflare:workers";
+import { NonRetryableError } from "cloudflare:workflows";
 
-import { runAgent } from "./steps/agent.ts";
-import { runHttp } from "./steps/http.ts";
-import { runSandbox } from "./steps/sandbox.ts";
-import { runShell } from "./steps/shell.ts";
-import type {
-  AgentArgs,
-  AgentResult,
-  HttpArgs,
-  HttpResult,
-  SandboxArgs,
-  SandboxHandle,
-  ShellArgs,
-  ShellResult,
-} from "./steps/types.ts";
+export interface SandboxArgs {
+  readonly id?: string;
+}
+export interface SandboxHandle {
+  readonly id: string;
+}
+export interface ShellArgs {
+  readonly sandbox: SandboxHandle;
+  readonly cmd: string;
+  readonly cwd?: string;
+  readonly env?: Record<string, string>;
+}
+export interface ShellResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+export interface AgentArgs {
+  readonly sandbox: SandboxHandle;
+  readonly prompt: string;
+  readonly apiKey: string;
+  readonly cwd?: string;
+  readonly model?: string;
+}
+export interface AgentResult {
+  readonly summary: string;
+}
+export interface HttpArgs {
+  readonly url: string;
+  readonly method?: string;
+  readonly headers?: Record<string, string>;
+  readonly json?: unknown;
+  readonly body?: string;
+}
+export interface HttpResult {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly text: string;
+}
 
-// The `step` handed to a workflow `run`. It IS the Cloudflare WorkflowStep (so step.do /
-// step.sleep / step.waitForEvent stay available — drop down to them, or to any SDK, for
-// anything the primitives don't cover) plus Runway's typed primitives. Each primitive is a
-// durable step.do; the first arg is its stable step name.
 export interface RunwayStep extends WorkflowStep {
   sandbox(name: string, args?: SandboxArgs): Promise<SandboxHandle>;
   shell(name: string, args: ShellArgs): Promise<ShellResult>;
@@ -26,9 +49,81 @@ export interface RunwayStep extends WorkflowStep {
   http(name: string, args: HttpArgs): Promise<HttpResult>;
 }
 
-// shell + agent mutate the world and are expensive, so they don't auto-retry on application
-// errors (the workflow engine can still replay them on infra eviction — keep them idempotent).
+const SLEEP_AFTER = "1h";
+const REDACT = /https:\/\/[^@\s/]+@/g;
+const SAFE = /^[A-Za-z0-9._/-]+$/;
 const ONCE = { retries: { limit: 0, delay: "0 seconds" } } as const;
+const AGENT_MODEL = "anthropic/claude-sonnet-4-5";
+const AGENT_INSTRUCTION =
+  "Read PLAN.md and implement it. If you change files, write a short PR.md summarizing the change.";
+
+const sandboxFor = (env: Env, id: string): Sandbox =>
+  getSandbox(env.Sandbox, id, { sleepAfter: SLEEP_AFTER });
+const tail = (s: string): string => (s.length > 4000 ? s.slice(-4000) : s);
+const redact = (s: string): string => tail(s).replace(REDACT, "https://***@");
+const quote = (s: string): string => `'${s.replace(/'/g, "'\\''")}'`;
+
+const runSandbox = (args: SandboxArgs, instanceId: string): SandboxHandle => ({
+  id: args.id ?? `runway-${instanceId}`,
+});
+
+const runShell = async (env: Env, args: ShellArgs): Promise<ShellResult> => {
+  const result = await sandboxFor(env, args.sandbox.id).exec(args.cmd, {
+    ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+    ...(args.env !== undefined ? { env: args.env } : {}),
+  });
+  return { exitCode: result.exitCode, stdout: tail(result.stdout), stderr: redact(result.stderr) };
+};
+
+const runAgent = async (env: Env, args: AgentArgs): Promise<AgentResult> => {
+  const sandbox = sandboxFor(env, args.sandbox.id);
+  const model = args.model ?? AGENT_MODEL;
+  if (!SAFE.test(model)) throw new NonRetryableError(`unsafe model: ${model}`);
+  const cwd = args.cwd ?? "/workspace";
+
+  const install = await sandbox.exec(
+    "command -v pi >/dev/null 2>&1 || npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+  );
+  if (install.exitCode !== 0) {
+    throw new NonRetryableError(`agent install failed: ${tail(install.stderr)}`);
+  }
+
+  await sandbox.writeFile(`${cwd}/PLAN.md`, args.prompt);
+  const run = await sandbox.exec(`pi --model ${model} --mode json -p ${quote(AGENT_INSTRUCTION)}`, {
+    cwd,
+    env: { ANTHROPIC_API_KEY: args.apiKey, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
+  });
+  if (run.exitCode !== 0 || !agentEnded(run.stdout)) {
+    throw new NonRetryableError(`agent failed: ${redact(run.stderr || run.stdout)}`);
+  }
+
+  const pr = await sandbox.readFile(`${cwd}/PR.md`).catch(() => null);
+  return { summary: pr?.content.trim() || "agent run completed." };
+};
+
+const agentEnded = (stdout: string): boolean =>
+  stdout.split("\n").some((line) => {
+    try {
+      return (JSON.parse(line) as { type?: string }).type === "agent_end";
+    } catch {
+      return false;
+    }
+  });
+
+const runHttp = async (args: HttpArgs): Promise<HttpResult> => {
+  const headers: Record<string, string> = { ...args.headers };
+  let body = args.body;
+  if (args.json !== undefined) {
+    body = JSON.stringify(args.json);
+    headers["content-type"] ??= "application/json";
+  }
+  const res = await fetch(args.url, {
+    method: args.method ?? (body === undefined ? "GET" : "POST"),
+    headers,
+    ...(body === undefined ? {} : { body }),
+  });
+  return { status: res.status, ok: res.ok, text: await res.text() };
+};
 
 export const makeRunwayStep = (step: WorkflowStep, env: Env, instanceId: string): RunwayStep =>
   Object.assign(step, {

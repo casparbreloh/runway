@@ -3,12 +3,7 @@
   "main": "worker.ts",
   "compatibility_date": "2026-06-06",
   "compatibility_flags": ["nodejs_compat"],
-
-  // Durable execution engine. binding = UPPER_SNAKE(workflow.name); class_name = the export in worker.ts.
   "workflows": [{ "name": "linear-to-pr", "binding": "LINEAR_TO_PR", "class_name": "LinearToPr" }],
-
-  // Coding sandbox: a prebuilt Cloudflare image (no Dockerfile to build) — pinned to the
-  // @cloudflare/sandbox version. The agent (pi) is installed inside it at runtime.
   "containers": [
     {
       "class_name": "Sandbox",
@@ -19,8 +14,5 @@
   ],
   "durable_objects": { "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sandbox"] }],
-
-  // The agent step is mostly I/O (LLM/git), whose wall-clock is unbounded and free on
-  // Workflows; raise the per-step active-CPU ceiling to the max (5 min) for local work.
   "limits": { "cpu_ms": 300000 },
 }

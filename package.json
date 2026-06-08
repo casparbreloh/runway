@@ -10,8 +10,7 @@
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "typecheck": "tsgo --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
     "@linear/sdk": "catalog:",
@@ -24,9 +23,7 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "typescript": "catalog:",
-    "vite": "catalog:",
-    "vitest": "catalog:"
+    "typescript": "catalog:"
   },
   "devEngines": {
     "packageManager": {
