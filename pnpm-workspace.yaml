@@ -1,0 +1,19 @@
+packages:
+  - "packages/runway"
+
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+catalog:
+  "@cloudflare/sandbox": 0.11.0
+  "@cloudflare/workers-types": ^4.20260605.1
+  "@linear/sdk": ^86.0.0
+  "@types/node": 25.6.0
+  "@typescript/native-preview": 7.0.0-dev.20260506.1
+  oxfmt: 0.48.0
+  oxlint: 1.63.0
+  oxlint-tsgolint: 0.22.1
+  typescript: 6.0.3
+
+catalogMode: strict

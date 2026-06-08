@@ -1,0 +1,42 @@
+{
+  "name": "runway-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "format": "oxfmt",
+    "format-check": "oxfmt --check",
+    "lint": "oxlint",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@linear/sdk": "catalog:",
+    "runway": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.0"
+    },
+    "runtime": {
+      "name": "node",
+      "version": "^26"
+    }
+  },
+  "engines": {
+    "node": "^26"
+  },
+  "packageManager": "pnpm@11.5.0"
+}
