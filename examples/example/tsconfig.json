@@ -18,5 +18,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["packages/runway/src", "packages/runway/cli", "packages/runway/bin"]
+  "include": ["runway", ".runway/worker.gen.ts", ".runway/runway-env.d.ts"]
 }

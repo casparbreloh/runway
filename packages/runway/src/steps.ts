@@ -3,53 +3,17 @@ import type { WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 
 import type { RunnerInput, RunnerOutput } from "./agent-protocol.ts";
-
-export interface SandboxArgs {
-  readonly id?: string;
-}
-export interface SandboxHandle {
-  readonly id: string;
-}
-export interface ShellArgs {
-  readonly sandbox: SandboxHandle;
-  readonly cmd: string;
-  readonly cwd?: string;
-  readonly env?: Record<string, string>;
-}
-export interface ShellResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-export interface AgentArgs {
-  readonly sandbox: SandboxHandle;
-  readonly prompt: string;
-  readonly apiKey: string;
-  readonly cwd?: string;
-  readonly model?: string;
-}
-export interface AgentResult {
-  readonly summary: string;
-}
-export interface HttpArgs {
-  readonly url: string;
-  readonly method?: string;
-  readonly headers?: Record<string, string>;
-  readonly json?: unknown;
-  readonly body?: string;
-}
-export interface HttpResult {
-  readonly status: number;
-  readonly ok: boolean;
-  readonly text: string;
-}
-
-export interface RunwayStep extends WorkflowStep {
-  sandbox(name: string, args?: SandboxArgs): Promise<SandboxHandle>;
-  shell(name: string, args: ShellArgs): Promise<ShellResult>;
-  agent(name: string, args: AgentArgs): Promise<AgentResult>;
-  http(name: string, args: HttpArgs): Promise<HttpResult>;
-}
+import type {
+  AgentArgs,
+  AgentResult,
+  HttpArgs,
+  HttpResult,
+  RunwayStep,
+  SandboxArgs,
+  SandboxHandle,
+  ShellArgs,
+  ShellResult,
+} from "./types.ts";
 
 const SLEEP_AFTER = "1h";
 const REDACT = /https:\/\/[^@\s/]+@/g;

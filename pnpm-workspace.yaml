@@ -1,11 +1,13 @@
 packages:
   - "packages/runway"
   - "packages/sandbox"
+  - "examples/*"
 
 allowBuilds:
   "@google/genai": false
   esbuild: true
   protobufjs: false
+  sharp: false
   workerd: true
 
 catalog:
@@ -15,9 +17,12 @@ catalog:
   "@linear/sdk": ^86.0.0
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
+  citty: ^0.2.2
+  esbuild: ^0.28.0
   oxfmt: 0.48.0
   oxlint: 1.63.0
   oxlint-tsgolint: 0.22.1
   typescript: 6.0.3
+  wrangler: ^4.98.0
 
 catalogMode: strict

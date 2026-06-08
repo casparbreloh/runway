@@ -1,21 +1,14 @@
 {
-  "name": "runway-app",
+  "name": "runway-monorepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build:sandbox": "pnpm --filter runway-sandbox build",
-    "dev": "pnpm build:sandbox && wrangler dev",
-    "deploy": "pnpm build:sandbox && wrangler deploy",
-    "cf-typegen": "wrangler types",
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
     "typecheck": "tsgo --noEmit && pnpm --filter runway-sandbox typecheck"
-  },
-  "dependencies": {
-    "@linear/sdk": "catalog:",
-    "runway": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
