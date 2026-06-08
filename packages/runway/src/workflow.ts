@@ -1,14 +1,12 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import type { z } from "zod";
 
-import type { Env } from "./env.ts";
 import { makeRunwayStep, type RunwayStep } from "./step.ts";
 
 // --- triggers -------------------------------------------------------------
-// A trigger is a typed descriptor read three ways: the compiler infers `event.payload`
-// from it, the router uses it to route + verify inbound requests, and the entrypoint
-// ignores it (Cloudflare delivers the payload). One declaration, no duplicated glue.
+// A trigger is a typed descriptor read two ways: it carries the payload type into
+// `event.payload`, and the router uses it to route + verify inbound requests. The payload
+// type is YOURS — import it from an SDK (e.g. @linear/sdk/webhooks) or write it inline.
 
 export interface CronEvent {
   readonly scheduledTime: number;
@@ -26,39 +24,28 @@ export interface WebhookTrigger<T> {
   readonly kind: "webhook";
   readonly path: string;
   readonly method: "POST" | "GET";
-  readonly schema: z.ZodType<T>;
   readonly verify?: Verify;
+  readonly __payload?: T;
 }
 export interface CronTrigger<T> {
   readonly kind: "cron";
   readonly cron: string;
-  readonly __event?: T;
+  readonly __payload?: T;
 }
-export interface ManualTrigger<T> {
-  readonly kind: "manual";
-  readonly schema: z.ZodType<T>;
-}
-export type Trigger<T> = WebhookTrigger<T> | CronTrigger<T> | ManualTrigger<T>;
+export type Trigger<T> = WebhookTrigger<T> | CronTrigger<T>;
 
-export const webhook = <S extends z.ZodType>(cfg: {
+export const webhook = <T>(cfg: {
   path: string;
   method?: "POST" | "GET";
-  schema: S;
   verify?: Verify;
-}): Trigger<z.infer<S>> => ({
+}): Trigger<T> => ({
   kind: "webhook",
   path: cfg.path,
   method: cfg.method ?? "POST",
-  schema: cfg.schema,
   ...(cfg.verify ? { verify: cfg.verify } : {}),
 });
 
 export const cron = (expr: string): Trigger<CronEvent> => ({ kind: "cron", cron: expr });
-
-export const manual = <S extends z.ZodType>(schema: S): Trigger<z.infer<S>> => ({
-  kind: "manual",
-  schema,
-});
 
 // --- workflow definition --------------------------------------------------
 export interface WorkflowDef<T> {
@@ -67,17 +54,16 @@ export interface WorkflowDef<T> {
   readonly run: (event: WorkflowEvent<T>, step: RunwayStep, env: Env) => Promise<unknown>;
 }
 
-// Author a workflow. `T` flows from the trigger's schema into `event.payload` — never
-// restated. The returned def both compiles to a WorkflowEntrypoint (toEntrypoint) and is
-// read by the router (createRouter).
+// Author a workflow. `T` flows from the trigger into `event.payload`. The returned def both
+// compiles to a WorkflowEntrypoint (toEntrypoint) and is read by the router (createRouter).
 export const workflow = <T>(def: WorkflowDef<T>): WorkflowDef<T> => def;
 
-// Compile a def down to a Cloudflare WorkflowEntrypoint subclass. Export the result under a
-// name matching the wrangler `class_name` binding.
+// Compile a def to a Cloudflare WorkflowEntrypoint subclass. Export the result under a name
+// matching the wrangler `class_name` (binding is by export name, not class identity).
 export const toEntrypoint = <T>(def: WorkflowDef<T>): typeof WorkflowEntrypoint<Env, T> =>
   class extends WorkflowEntrypoint<Env, T> {
     override run(event: WorkflowEvent<T>, step: WorkflowStep): Promise<unknown> {
-      return def.run(event, makeRunwayStep(step, this.env), this.env);
+      return def.run(event, makeRunwayStep(step, this.env, event.instanceId), this.env);
     }
   };
 
@@ -93,8 +79,8 @@ export const bindingName = (name: string): string => name.toUpperCase().replace(
 const workflowBinding = (env: Env, name: string): Workflow | undefined =>
   (env as unknown as Record<string, Workflow | undefined>)[bindingName(name)];
 
-// Build the front Worker: Cloudflare Workflows can't receive webhooks, so this Worker
-// matches a request to a trigger, verifies + parses it, then creates a workflow instance.
+// Cloudflare Workflows can't receive webhooks, so this front Worker matches a request to a
+// trigger, verifies it, and creates a workflow instance with the (untyped) JSON body.
 export const createRouter = (
   // Heterogeneous registry: each def keeps its own payload type, erased here for the router.
   // oxlint-disable-next-line typescript/no-explicit-any
@@ -110,19 +96,16 @@ export const createRouter = (
       if (t.verify && !(await t.verify({ raw, req, env }))) {
         return new Response("invalid signature", { status: 401 });
       }
-      let payload: unknown;
+      let params: unknown;
       try {
-        payload = raw.length > 0 ? JSON.parse(raw) : {};
+        params = raw.length > 0 ? JSON.parse(raw) : {};
       } catch {
         return new Response("invalid json", { status: 400 });
       }
-      const parsed = t.schema.safeParse(payload);
-      if (!parsed.success)
-        return new Response(`bad payload: ${parsed.error.message}`, { status: 400 });
 
       const wf = workflowBinding(env, def.name);
       if (!wf) return new Response(`no binding for ${def.name}`, { status: 500 });
-      const instance = await wf.create({ params: parsed.data });
+      const instance = await wf.create({ params });
       return Response.json({ id: instance.id }, { status: 202 });
     }
     return new Response("not found", { status: 404 });

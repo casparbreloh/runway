@@ -1,17 +1,18 @@
 {
   "name": "runway",
-  "main": "src/worker.ts",
+  "main": "worker.ts",
   "compatibility_date": "2026-06-06",
   "compatibility_flags": ["nodejs_compat"],
 
   // Durable execution engine. binding = UPPER_SNAKE(workflow.name); class_name = the export in worker.ts.
   "workflows": [{ "name": "linear-to-pr", "binding": "LINEAR_TO_PR", "class_name": "LinearToPr" }],
 
-  // Coding sandbox (Cloudflare Containers + Durable Object). Image is the pi agent (./Dockerfile).
+  // Coding sandbox: a prebuilt Cloudflare image (no Dockerfile to build) — pinned to the
+  // @cloudflare/sandbox version. The agent (pi) is installed inside it at runtime.
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "./Dockerfile",
+      "image": "docker.io/cloudflare/sandbox:0.11.0",
       "instance_type": "standard",
       "max_instances": 5,
     },
@@ -19,13 +20,7 @@
   "durable_objects": { "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sandbox"] }],
 
-  // R2 bucket the Sandbox SDK uses for createBackup/restoreBackup (resumable sessions).
-  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "runway-backups" }],
-
-  // Raise the per-step active-CPU ceiling to the max (5 min). The agent step is mostly I/O
-  // (LLM/git), whose wall-clock is unbounded and free — only local compute counts here.
+  // The agent step is mostly I/O (LLM/git), whose wall-clock is unbounded and free on
+  // Workflows; raise the per-step active-CPU ceiling to the max (5 min) for local work.
   "limits": { "cpu_ms": 300000 },
-
-  // NOTE: the Cloudflare Artifacts binding (env.ARTIFACTS) is beta and not yet expressible in
-  // wrangler.jsonc — add its binding block here once the config schema supports it.
 }

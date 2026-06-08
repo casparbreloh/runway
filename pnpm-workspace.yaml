@@ -1,4 +1,5 @@
-packages: []
+packages:
+  - "packages/runway"
 
 allowBuilds:
   esbuild: true
@@ -7,6 +8,7 @@ allowBuilds:
 catalog:
   "@cloudflare/sandbox": 0.11.0
   "@cloudflare/workers-types": ^4.20260605.1
+  "@linear/sdk": ^86.0.0
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
   oxfmt: 0.48.0
@@ -15,6 +17,5 @@ catalog:
   typescript: 6.0.3
   vite: 8.0.10
   vitest: 4.1.8
-  zod: ^3.25.0
 
 catalogMode: strict

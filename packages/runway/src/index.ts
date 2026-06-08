@@ -1,10 +1,15 @@
 // Public surface of the `runway` package. Author workflows with `import { workflow, … } from "runway"`.
+import "./env.ts"; // registers the global Env baseline (the Sandbox binding)
+
+// The Sandbox Durable Object — re-export so your worker can bind it without depending on
+// @cloudflare/sandbox directly: `export { Sandbox } from "runway"`.
+export { Sandbox } from "@cloudflare/sandbox";
+
 export {
   bindingName,
   createRouter,
   cron,
   hmac,
-  manual,
   toEntrypoint,
   webhook,
   workflow,
@@ -12,7 +17,6 @@ export {
 export type {
   CronEvent,
   CronTrigger,
-  ManualTrigger,
   RouterApp,
   Trigger,
   Verify,
@@ -20,17 +24,14 @@ export type {
   WorkflowDef,
 } from "./workflow.ts";
 export type { RunwayStep } from "./step.ts";
-export type { Env } from "./env.ts";
-export type { Artifacts, ArtifactsRepo, ArtifactsRepoRef } from "./artifacts.ts";
 export type {
   AgentArgs,
   AgentResult,
-  ArtifactForkArgs,
-  ArtifactHandle,
-  GitPrArgs,
   HttpArgs,
   HttpResult,
-  PrResult,
+  Json,
   SandboxArgs,
   SandboxHandle,
+  ShellArgs,
+  ShellResult,
 } from "./steps/types.ts";

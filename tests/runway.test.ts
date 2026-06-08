@@ -1,12 +1,10 @@
+import { bindingName, createRouter, toEntrypoint, webhook, workflow } from "runway";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 
-import type { Env } from "../src/index.ts";
-import { bindingName, createRouter, toEntrypoint, webhook, workflow } from "../src/index.ts";
 import linearToPr from "../workflows/linear-to-pr.ts";
 
-// Verifies the SDK wiring end-to-end without deploying: the router actually routes,
-// verifies, validates, and creates a workflow instance through a fake binding.
+// Verifies the SDK wiring end-to-end without deploying: the router actually routes, verifies,
+// and creates a workflow instance through a fake binding.
 
 const fakeEnv = (onCreate: (params: unknown) => void): Env => {
   const wf = {
@@ -18,10 +16,9 @@ const fakeEnv = (onCreate: (params: unknown) => void): Env => {
   return { T: wf, LINEAR_TO_PR: wf } as unknown as Env;
 };
 
-const sample = z.object({ a: z.string() });
-const tWorkflow = workflow({
+const tWorkflow = workflow<{ a: string }>({
   name: "t",
-  trigger: webhook({ path: "/hooks/t", schema: sample }),
+  trigger: webhook<{ a: string }>({ path: "/hooks/t" }),
   run: async () => {},
 });
 
@@ -34,7 +31,7 @@ describe("runway sdk", () => {
     expect(typeof toEntrypoint(linearToPr)).toBe("function");
   });
 
-  it("creates a workflow instance from a matching, valid webhook (202)", async () => {
+  it("creates a workflow instance from a matching webhook (202)", async () => {
     const seen: unknown[] = [];
     const app = createRouter([tWorkflow]);
     const res = await app.fetch(
@@ -45,7 +42,7 @@ describe("runway sdk", () => {
     expect(seen).toEqual([{ a: "ok" }]);
   });
 
-  it("404s an unmatched path and 400s an invalid payload", async () => {
+  it("404s an unmatched path and 400s invalid json", async () => {
     const app = createRouter([tWorkflow]);
     const env = fakeEnv(() => {});
 
@@ -53,7 +50,7 @@ describe("runway sdk", () => {
     expect(miss.status).toBe(404);
 
     const bad = await app.fetch(
-      new Request("https://x/hooks/t", { method: "POST", body: JSON.stringify({ a: 1 }) }),
+      new Request("https://x/hooks/t", { method: "POST", body: "{not json" }),
       env,
     );
     expect(bad.status).toBe(400);

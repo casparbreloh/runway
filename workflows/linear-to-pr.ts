@@ -1,46 +1,71 @@
+import { LinearClient } from "@linear/sdk";
+import type { EntityWebhookPayloadWithIssueData } from "@linear/sdk/webhooks";
 import { hmac, webhook, workflow } from "runway";
-import { z } from "zod";
 
-// Linear issue -> coding agent -> draft PR -> comment back. Authored as a real, step-based
-// workflow: the trigger is a first-class typed field, and `event.payload` is inferred from
-// its schema. Typechecking this file IS the validation — a wrong step is a compile error.
+// Linear issue -> coding agent -> PR -> comment back, written as plain code. The trigger is a
+// first-class field; the payload is typed by Linear's own SDK type. The primitives are only
+// the things a Worker can't do itself (sandbox, shell, agent); everything else is just code.
 
 const REPO = "acme/widgets";
-const COMMENT =
-  "mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}";
+const DIR = "/workspace/repo";
+
+// git auth via a credential helper reading $GITHUB_TOKEN from the per-command env (the token
+// never reaches argv). Issue-derived data is passed through env too — $BRANCH, $MSG.
+const CLONE = [
+  `git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f'`,
+  `git clone "https://github.com/$REPO" ${DIR}`,
+  `cd ${DIR} && git checkout -b "$BRANCH"`,
+].join(" && ");
+
+const PUSH = [
+  `cd ${DIR}`,
+  `git add -A`,
+  `git -c user.email=runway@local -c user.name=Runway commit -m "$MSG"`,
+  `git push -u origin "$BRANCH"`,
+].join(" && ");
 
 export default workflow({
   name: "linear-to-pr",
-  trigger: webhook({
+  trigger: webhook<EntityWebhookPayloadWithIssueData>({
     path: "/hooks/linear",
-    schema: z.object({
-      data: z.object({
-        id: z.string(),
-        identifier: z.string(),
-        title: z.string(),
-        description: z.string(),
-      }),
-    }),
     verify: hmac((env) => env.LINEAR_SIGNING_SECRET, { header: "linear-signature" }),
   }),
   run: async (event, step, env) => {
-    const { data } = event.payload; // typed: { id, identifier, title, description }
+    const issue = event.payload.data; // typed Linear Issue webhook payload
+    const branch = `runway/${issue.identifier}`;
+    const sh = { GITHUB_TOKEN: env.GITHUB_TOKEN, REPO, BRANCH: branch, MSG: issue.title };
 
-    // Fork the working repo into an isolated per-issue artifact, clone it into a sandbox,
-    // let the agent do the work, open a PR, and report the link back to Linear.
-    const repo = await step.artifact.fork("repo", { from: REPO, as: data.identifier });
-    const box = await step.sandbox("clone", { from: repo, branch: `runway/${data.identifier}` });
-    await step.agent("code", { sandbox: box, prompt: `${data.title}\n\n${data.description}` });
-    const pr = await step.git.pr("open-pr", { sandbox: box, repo: REPO, title: data.title });
+    const box = await step.sandbox("box");
+    await step.shell("clone", { sandbox: box, env: sh, cmd: CLONE });
+    await step.agent("code", {
+      sandbox: box,
+      cwd: DIR,
+      apiKey: env.ANTHROPIC_API_KEY,
+      prompt: `${issue.title}\n\n${issue.description ?? ""}`,
+    });
+    await step.shell("push", { sandbox: box, env: sh, cmd: PUSH });
 
-    await step.http("comment", {
-      url: "https://api.linear.app/graphql",
+    // Open the PR with a plain GitHub REST call (the http primitive — no gh, no SDK needed).
+    const pr = await step.http("pr", {
+      url: `https://api.github.com/repos/${REPO}/pulls`,
       method: "POST",
-      headers: { authorization: env.LINEAR_TOKEN },
-      json: {
-        query: COMMENT,
-        variables: { id: data.id, body: `Runway → ${pr.url ?? "(no PR opened)"}` },
+      headers: {
+        authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        "user-agent": "runway",
+        accept: "application/vnd.github+json",
       },
+      json: { title: issue.title, head: branch, base: "main", body: "Opened by Runway 🛫" },
+    });
+    const prUrl = (pr.json as { html_url?: string }).html_url ?? "(PR pending)";
+
+    // Comment back to Linear — just import the SDK and call it inside a durable step.
+    await step.do("comment", async () => {
+      const linear = new LinearClient({ apiKey: env.LINEAR_TOKEN });
+      const res = await linear.createComment({
+        issueId: issue.id,
+        body: `Runway opened a PR → ${prUrl}`,
+      });
+      return { success: res.success };
     });
   },
 });

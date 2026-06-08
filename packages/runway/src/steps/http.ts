@@ -1,7 +1,7 @@
 import type { HttpArgs, HttpResult, Json } from "./types.ts";
 
-// A plain authenticated HTTP call — the generic escape hatch for talking to any API
-// (Linear, Slack, GitHub REST, …) from inside a workflow.
+// A plain authenticated HTTP call — the general escape hatch for any API. (Often you can just
+// import that API's SDK and call it inside a step.do instead; this is the no-dependency path.)
 export const runHttp = async (args: HttpArgs): Promise<HttpResult> => {
   const headers: Record<string, string> = { ...args.headers };
   let body = args.body;
