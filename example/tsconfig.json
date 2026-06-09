@@ -10,13 +10,12 @@
     "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["packages/core/src", "packages/core/cli", "packages/core/bin"]
+  "include": ["src", "runway.config.ts"]
 }

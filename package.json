@@ -4,14 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:sandbox": "pnpm --filter runway-sandbox build",
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "typecheck": "tsgo --noEmit && pnpm --filter runway-sandbox typecheck"
+    "typecheck": "tsgo --noEmit && pnpm --filter @runway/cloudflare typecheck"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "oxfmt": "catalog:",

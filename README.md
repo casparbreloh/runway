@@ -1,69 +1,84 @@
 # Runway
 
-Launch coding-agent jobs from Linear issues or markdown plans, run them in a Cloudflare Sandbox,
-and report back a GitHub draft PR (`pi`) or a Codex Cloud task URL (`codex-cloud`).
+A code-first TypeScript library for durable workflows. The core (`@runway/core`) is a portable,
+Web-Standards-only authoring SDK with zero Cloudflare deps that owns the durable-execution contract;
+the durable runtime is a **pluggable backend**. Today there is one — `@runway/cloudflare`, backed by
+native Cloudflare Workflows, which owns replay, persistence, and durable sleep. The `Backend` seam
+keeps your workflows portable, so other backends (Vercel, self-hosted Postgres) can be added later
+without touching authoring code.
 
-V1 is narrow: one Cloudflare Worker control plane, Cloudflare Sandbox as the only runtime,
-two executors, Linear as the first source, a direct `POST /jobs` as the dev/markdown path.
+You author with `@runway/core` but run the `runway` CLI, which `@runway/core` ships as its `bin`.
 
-## Layout
+## A workflow
 
-```
-src/
-  index.ts            Worker entry: routes, dispatch, job state
-  types.ts            JobSpec / JobResult / Env
-  sandbox.ts          SandboxRunner interface + Cloudflare impl + RecordingRunner fake
-  linear.ts           Linear webhook -> JobSpec (verify + map)
-  github.ts           draft PR create/update + comment
-  executors/
-    codex-cloud.ts     submit `codex cloud exec`, return task URL/ID
-    pi.ts              clone -> plan -> pi -> validate -> push
-  auth-handoff.ts     local auth probe / packager (dev helper)
-scripts/              dry-run harnesses (codex-cloud-dry, pi-dry)
-tests/                vitest unit tests
-```
+```ts
+// src/hello.ts
+import { createWorkflow } from "@runway/core";
 
-## Develop
-
-```
-npm install
-npm run typecheck      # tsc --noEmit
-npm test               # vitest
-npm run probe:auth     # report which credentials are present (no secrets printed)
-npm run codex-cloud:dry
-npm run pi:dry
-npm run dev            # wrangler dev (needs Docker for the container)
+export default createWorkflow({ id: "hello" }).handler(async (ctx) => {
+  const greeting = await ctx.step("greet", () => "hello");
+  await ctx.sleep(5000);
+  await ctx.step("finish", () => `${greeting} world (run ${ctx.runId})`);
+});
 ```
 
-## Configure
+`createWorkflow({ id }).handler(fn)` defines a workflow. Each workflow is the default export of its
+own file; you list those files by path in the config (see Wiring). Handlers are fire-and-forget — they
+return nothing. The only durable primitives are `ctx.step` (a memoized durable step, named by its
+idempotency key) and `ctx.sleep` (durable sleep, just a number of ms). Anything else — an HTTP call,
+for example — is plain TypeScript wrapped inside a `ctx.step`.
 
-Non-secret config lives in `wrangler.jsonc` → `vars` (`DEFAULT_EXECUTOR`, `DEFAULT_REPO`,
-`GITHUB_OWNER`, `CODEX_CLOUD_ENV_ID`, `LINEAR_TRIGGER_STATE`, `LINEAR_TRIGGER_COMMENT`).
+## `ctx`
 
-Secrets (copy `.dev.vars.example` → `.dev.vars` for dev, or `wrangler secret put <NAME>`):
-`LINEAR_WEBHOOK_SECRET`, `RUNWAY_API_TOKEN` (gates `POST /jobs`), `GITHUB_TOKEN`,
-`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN`.
+The single handler argument is just `{ runId, step, sleep }`:
 
-Auth is bring-your-own: nothing is hosted for you. `npm run probe:auth` checks each credential;
-`npm run probe:auth -- --package` writes a local, gitignored bundle for seeding a sandbox by hand.
+- `ctx.runId` — the run instance id.
+- `ctx.step(id, fn)` — a durable, memoized step; `id` is the idempotency key and `fn` receives
+  `{ id }`. Returns a JSON-serializable value. Steps re-run on replay, so keep them idempotent.
+- `ctx.sleep(ms)` — durable sleep. `ms` is a plain number of milliseconds; there is no id and no
+  duration string.
 
-## Endpoints
+## Wiring
 
-- `POST /webhooks/linear` — verified Linear webhook (HMAC signature + fresh timestamp required) → job.
-- `POST /jobs` — submit a JobSpec directly (markdown/dev path). Requires `Authorization: Bearer $RUNWAY_API_TOKEN`; disabled if that secret is unset.
-- `GET /jobs/:id` — job state.
-- `GET /health` — liveness.
+Each workflow lives in its own file as the default export. Point `runway.config.ts` at a backend and
+list those files by path:
 
-## Deploy
+```ts
+// runway.config.ts
+import { cloudflare } from "@runway/cloudflare";
+import { defineConfig } from "@runway/core";
 
+export default defineConfig({ backend: cloudflare(), workflows: ["src/hello.ts"] });
 ```
-wrangler kv namespace create JOBS      # optional job-state store; paste id into wrangler.jsonc
-wrangler secret put GITHUB_TOKEN       # ...and the other secrets
-wrangler deploy
+
+`workflows` is an explicit array of path strings — it holds paths, not imported workflow values, so
+the config can import the Node backend without coupling it into the Worker. The CLI imports each
+listed path, takes its `.default`, and validates it's tagged `__kind: "workflow"` (a clear build-time
+error if a listed file forgot `export default createWorkflow(...)`), producing `{ path, def }` pairs.
+The backend codegens a Worker that emits one default import per path plus one Cloudflare
+`WorkflowEntrypoint` per workflow, bound by that import —
+`import __w0 from "../src/hello.ts";` … `export class Hello extends toEntrypoint(__w0) {}`. The `id`
+stays the deploy-time identity (the `workflow_name`, the binding, the `/runs/:id` route); the class
+name is derived from it. No glob, no autodiscovery magic — just an explicit path list.
+
+## CLI
+
+- `runway build` — import each listed workflow path to collect the workflows, codegen the Worker (one
+  `WorkflowEntrypoint` per workflow + a generic `POST /runs/:id` router) and esbuild-bundle it. No
+  upload — the offline shape proof.
+- `runway deploy` — build, then upload via the typed `cloudflare` SDK (`cf.workers.scripts.update`
+  with a `type: "workflow"` binding + `cf.workflows.update` per workflow). No wrangler, no Docker.
+
+Deploying needs Cloudflare credentials in the environment:
+
+```sh
+export CLOUDFLARE_API_TOKEN=...
+export CLOUDFLARE_ACCOUNT_ID=...
+runway deploy
 ```
 
-### Deploy-time checks (need a Cloudflare account + Docker + real creds)
+Once deployed, start a run by POSTing to the Worker (the body is passed through as the run params):
 
-- Sandbox runs the Codex Cloud submit command and stops.
-- Sandbox runs a Pi job and stops.
-  These can't run in CI without credentials; verify after `wrangler deploy` with a real repo.
+```sh
+curl -X POST https://<your-worker>/runs/hello -d '{}'
+```

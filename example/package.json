@@ -4,17 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "runway deploy",
-    "check": "runway check"
+    "build": "runway build",
+    "deploy": "runway deploy"
   },
   "dependencies": {
-    "@linear/sdk": "catalog:",
-    "runway": "workspace:*"
+    "@runway/cloudflare": "workspace:*",
+    "@runway/core": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
     "typescript": "catalog:"
   }
 }

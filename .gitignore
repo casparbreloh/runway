@@ -27,3 +27,6 @@ logs
 
 # OS
 .DS_Store
+
+# Agent scratch (Conductor)
+.context
