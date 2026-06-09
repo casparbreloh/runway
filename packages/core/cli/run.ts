@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import type { Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
+import type { ProgressEvent, Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
 
 const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
   const mod = (await import(pathToFileURL(resolve(cwd, "runway.config.ts")).href)) as {
@@ -30,14 +30,22 @@ const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Prom
   return registry;
 };
 
-const exec = async (cwd: string, action: "build" | "deploy"): Promise<number> => {
+const exec = async (
+  cwd: string,
+  action: "build" | "deploy",
+  onProgress?: (event: ProgressEvent) => void,
+): Promise<number> => {
   const config = await loadConfig(cwd);
   const registry = await loadRegistry(cwd, config.workflows);
-  const opts = { cwd, outDir: join(cwd, ".runway") };
+  const opts = onProgress
+    ? { cwd, outDir: join(cwd, ".runway"), onProgress }
+    : { cwd, outDir: join(cwd, ".runway") };
   if (action === "deploy") await config.backend.deploy(registry, { ...opts, env: process.env });
   else await config.backend.build(registry, opts);
   return registry.length;
 };
 
-export const build = (cwd: string): Promise<number> => exec(cwd, "build");
-export const deploy = (cwd: string): Promise<number> => exec(cwd, "deploy");
+export const build = (cwd: string, onProgress?: (event: ProgressEvent) => void): Promise<number> =>
+  exec(cwd, "build", onProgress);
+export const deploy = (cwd: string, onProgress?: (event: ProgressEvent) => void): Promise<number> =>
+  exec(cwd, "deploy", onProgress);

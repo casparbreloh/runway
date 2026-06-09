@@ -4,13 +4,49 @@ export interface StepContext {
 
 export interface Ctx {
   readonly runId: string;
+  readonly params: unknown;
   step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
   sleep(ms: number): Promise<void>;
 }
 
+export type WebhookAuth = {
+  readonly type: "raw-hmac-sha256";
+  readonly header: string;
+  readonly secret: string;
+  readonly prefix?: string;
+  readonly timestamp?: {
+    readonly source: "body" | "header";
+    readonly field: string;
+    readonly toleranceMs: number;
+  };
+};
+
+export interface RawHmacSha256WebhookAuthConfig {
+  readonly header: string;
+  readonly secret: string;
+  readonly prefix?: string;
+  readonly timestamp?: {
+    readonly source?: "body" | "header";
+    readonly field: string;
+    readonly toleranceMs: number;
+  };
+}
+
+export type WorkflowTrigger =
+  | {
+      readonly type: "webhook";
+      readonly path: string;
+      readonly auth: WebhookAuth;
+    }
+  | {
+      readonly type: "cron";
+      readonly cron: string;
+    };
+
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
+  readonly trigger: WorkflowTrigger;
   readonly handler: (ctx: Ctx) => void | Promise<void>;
 }
 
@@ -30,9 +66,15 @@ export interface RegisteredWorkflow {
 
 export type Registry = ReadonlyArray<RegisteredWorkflow>;
 
+export interface ProgressEvent {
+  readonly step: "build" | "deploy";
+  readonly status: "start" | "done";
+}
+
 export interface BuildOptions {
   readonly cwd: string;
   readonly outDir: string;
+  onProgress?(event: ProgressEvent): void;
 }
 
 export interface BuildResult {
