@@ -1,8 +1,9 @@
 import { makeCtx } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
-import { bindingOf } from "./ids.ts";
 import { createRouter, hmacSha256 } from "./router.ts";
+
+const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 
 export interface TestRun {
   readonly id: string;

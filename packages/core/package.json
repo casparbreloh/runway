@@ -8,14 +8,10 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "scripts": {
-    "test": "vitest run bin"
-  },
   "dependencies": {
     "citty": "catalog:"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "vitest": "catalog:"
+    "@types/node": "catalog:"
   }
 }

@@ -7,10 +7,11 @@
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "test": "pnpm --filter @runway/core test && pnpm --filter @runway/cloudflare test",
-    "typecheck": "tsgo --noEmit && pnpm --filter @runway/cloudflare typecheck"
+    "test": "vitest run",
+    "typecheck": "tsgo -b"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "oxfmt": "catalog:",

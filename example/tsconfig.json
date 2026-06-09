@@ -15,7 +15,12 @@
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".runway-types",
+    "tsBuildInfoFile": ".runway-types/tsconfig.tsbuildinfo"
   },
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/cloudflare" }],
   "include": ["src", "runway.config.ts"]
 }

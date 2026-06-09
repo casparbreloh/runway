@@ -13,8 +13,7 @@ import type {
 import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
 
-import { generateWorker, generateWranglerConfig } from "./codegen.ts";
-import { bindingOf, classOf } from "./ids.ts";
+import { bindingOf, classOf, generateWorker, generateWranglerConfig } from "./codegen.ts";
 
 type AsyncMethod<T extends (...args: never[]) => unknown> = (
   ...args: Parameters<T>

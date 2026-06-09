@@ -1,22 +1,8 @@
 {
-  "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "target": "ES2022",
-    "lib": ["ES2023"],
-    "types": ["node"],
-    "strict": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "verbatimModuleSyntax": true,
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "noEmit": true
-  },
-  "include": ["packages/core/src", "packages/core/cli", "packages/core/bin"]
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/cloudflare" },
+    { "path": "example" }
+  ]
 }

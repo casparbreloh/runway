@@ -7,19 +7,13 @@
     "./worker": "./src/worker.ts",
     "./testing": "./src/testing.ts"
   },
-  "scripts": {
-    "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsgo --noEmit"
-  },
   "dependencies": {
     "@runway/core": "workspace:*",
     "cloudflare": "catalog:",
     "esbuild": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
-    "@types/node": "catalog:",
-    "vitest": "catalog:"
+    "@types/node": "catalog:"
   }
 }

@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { Registry } from "@runway/core";
 import { expect, test } from "vitest";
 
-import { cloudflare } from "./deploy.ts";
-import type { CloudflareApi } from "./deploy.ts";
+import { cloudflare } from "../packages/cloudflare/src/deploy.ts";
+import type { CloudflareApi } from "../packages/cloudflare/src/deploy.ts";
+import type { Registry } from "../packages/core/src/index.ts";
 
 const writeProject = async (): Promise<{
   cwd: string;
@@ -13,7 +13,7 @@ const writeProject = async (): Promise<{
   cleanup(): Promise<void>;
 }> => {
   const cwd = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-deploy-test-"),
+    path.join(path.resolve(import.meta.dirname, "../example"), ".tmp-deploy-test-"),
   );
   await mkdir(path.join(cwd, "src"));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
@@ -137,6 +137,10 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
       "runway-ship-it",
       { account_id: "account", body: [{ cron: "0 9 * * *" }] },
     ]);
+    const wrangler = JSON.parse(
+      await readFile(path.join(project.cwd, ".runway/wrangler.jsonc"), "utf8"),
+    ) as { triggers?: { crons: ReadonlyArray<string> } };
+    expect(wrangler.triggers).toEqual({ crons: ["0 9 * * *"] });
   } finally {
     await project.cleanup();
   }

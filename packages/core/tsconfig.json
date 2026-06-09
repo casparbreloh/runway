@@ -4,7 +4,7 @@
     "moduleResolution": "bundler",
     "target": "ES2022",
     "lib": ["ES2023"],
-    "types": ["node", "@cloudflare/workers-types"],
+    "types": ["node"],
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
@@ -13,15 +13,14 @@
     "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
+    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
     "composite": true,
     "declaration": true,
     "emitDeclarationOnly": true,
     "outDir": ".runway-types",
     "tsBuildInfoFile": ".runway-types/tsconfig.tsbuildinfo"
   },
-  "references": [{ "path": "../core" }],
-  "include": ["src"]
+  "include": ["src", "cli", "bin"]
 }

@@ -52,7 +52,7 @@ pnpm workspace, three packages:
     `import __w0 from "../src/hello.ts";` — then one `WorkflowEntrypoint` class per workflow bound by
     that default import, class name derived from the id —
     `export class Hello extends toEntrypoint(__w0) {}` — + the trigger router), `.runway/wrangler.jsonc`,
-    plus the `bindingOf`/`classOf` id helpers.
+    and local naming helpers for generated bindings/classes.
   - `src/index.ts` — barrel (`cloudflare`); `./worker` is a separate export for the runtime half.
 - `example/` — one dogfood app: `src/hello.ts` (default-exports a workflow with a required trigger:
   `export default createWorkflow({ id: "hello", trigger: webhook(...) }).handler(...)`), `runway.config.ts`
@@ -62,14 +62,11 @@ pnpm workspace, three packages:
 ## Commands
 
 - Verify a change: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm test` — the full gate.
-  - individually: `pnpm typecheck` (tsgo + `@runway/cloudflare` `tsgo --noEmit`) · `pnpm lint` (oxlint) ·
-    `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (Vitest tests for core CLI output,
-    Cloudflare router/codegen/deploy/testing contracts; Cloudflare runtime-facing tests use
-    `@cloudflare/vitest-pool-workers`)
-- The gate does NOT typecheck `example/`. The offline SDK-shape proof is `cd example && runway build`
-  — imports each `config.workflows` path to collect the registry, codegens `.runway/worker.gen.ts`,
-  writes `.runway/wrangler.jsonc`, and esbuild-bundles it, proving the generated Worker compiles and
-  the codegen→bundle pipeline works end-to-end.
+  - individually: `pnpm typecheck` (`tsgo -b`, including `example/`) · `pnpm lint` (oxlint) ·
+    `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (root Vitest config; Node
+    tests for CLI/deploy, Workers test via `@cloudflare/vitest-pool-workers`)
+- The offline SDK-shape proof is `cd example && runway build` — imports each `config.workflows` path,
+  codegens `.runway/worker.gen.ts` and `.runway/wrangler.jsonc`, and esbuild-bundles the Worker.
 - The `runway` CLI (shipped by `@runway/core`): `runway build` (codegen + bundle, no upload) and
   `runway deploy` (build, then upload via the typed `cloudflare` SDK). A live `runway deploy` needs
   `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` plus any webhook secret env vars named by triggers.
