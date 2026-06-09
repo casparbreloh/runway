@@ -1,7 +1,11 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "outDir": "../.tsbuild/example",
+    "declarationDir": "../.tsbuild/example",
+    "tsBuildInfoFile": "../.tsbuild/example.tsbuildinfo"
   },
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/cloudflare" }],
   "include": ["src", "runway.config.ts"]
 }

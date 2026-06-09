@@ -1,7 +1,10 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "outDir": "../../.tsbuild/core",
+    "declarationDir": "../../.tsbuild/core",
+    "tsBuildInfoFile": "../../.tsbuild/core.tsbuildinfo"
   },
-  "include": ["src", "cli", "bin", "tests", "vitest.config.ts"]
+  "include": ["src", "bin", "tests", "vitest.config.ts"]
 }

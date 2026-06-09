@@ -28,17 +28,6 @@ const run = async (
   return { code, output: Buffer.concat(chunks).toString("utf8") };
 };
 
-test("build prints concise progress", async () => {
-  const result = await run(["build"]);
-
-  expect(result.code).toBe(0);
-  expect(result.output).toMatch(/Loading\.\.\./);
-  expect(result.output).toMatch(/Loaded\./);
-  expect(result.output).toMatch(/Building\.\.\./);
-  expect(result.output).toMatch(/Built\./);
-  expect(result.output).toMatch(/Built 1 workflow\(s\)/);
-});
-
 test("deploy reports missing webhook secrets before upload", async () => {
   const result = await run(["deploy"], {
     CLOUDFLARE_API_TOKEN: "test-token",
@@ -58,4 +47,11 @@ test("deploy reports all missing env vars clearly", async () => {
   expect(result.output).toMatch(
     /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET/,
   );
+});
+
+test("build is not a public command", async () => {
+  const result = await run(["build"]);
+
+  expect(result.code).toBe(1);
+  expect(result.output).toMatch(/Unknown command/);
 });

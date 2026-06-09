@@ -7,8 +7,8 @@
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "test": "pnpm -r --filter './packages/*' --if-present test",
-    "typecheck": "pnpm -r --filter './packages/*' --if-present typecheck && pnpm --filter example typecheck"
+    "test": "vitest run",
+    "typecheck": "tsgo --build"
   },
   "devDependencies": {
     "@types/node": "catalog:",

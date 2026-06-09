@@ -2,7 +2,7 @@ import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
 import { expect, test } from "vitest";
 
 import { createRouter } from "../src/router.ts";
-import { createTestWorker } from "../src/testing.ts";
+import { createTestWorker } from "./worker.ts";
 
 test("starts webhook and cron workflows in the Workers runtime", async () => {
   const seen: unknown[] = [];

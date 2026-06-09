@@ -2,14 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-import type {
-  Backend,
-  BuildOptions,
-  BuildResult,
-  DeployOptions,
-  DeployResult,
-  Registry,
-} from "@runway/core";
+import type { Backend, DeployOptions, DeployResult, Registry } from "@runway/core";
 import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
 
@@ -77,7 +70,7 @@ const validateBindings = (registry: Registry): void => {
   }
 };
 
-const build = async (registry: Registry, opts: BuildOptions): Promise<BuildResult> => {
+const build = async (registry: Registry, opts: DeployOptions): Promise<void> => {
   validateBindings(registry);
   opts.onProgress?.({ step: "build", status: "start" });
   await mkdir(opts.outDir, { recursive: true });
@@ -100,7 +93,6 @@ const build = async (registry: Registry, opts: BuildOptions): Promise<BuildResul
   });
   await writeFile(path.join(opts.outDir, "worker.js"), result.outputFiles[0]!.contents);
   opts.onProgress?.({ step: "build", status: "done" });
-  return { entry };
 };
 
 const deploy =
@@ -169,6 +161,5 @@ const deploy =
 
 export const cloudflare = (opts: CloudflareBackendOptions = {}): Backend => ({
   name: "cloudflare",
-  build,
   deploy: deploy(opts),
 });

@@ -4,12 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./worker": "./src/worker.ts",
-    "./testing": "./src/testing.ts"
-  },
-  "scripts": {
-    "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsgo --noEmit"
+    "./worker": "./src/worker.ts"
   },
   "dependencies": {
     "@runway/core": "workspace:*",
@@ -18,9 +13,6 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
-    "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
-    "vitest": "catalog:"
+    "@cloudflare/workers-types": "catalog:"
   }
 }

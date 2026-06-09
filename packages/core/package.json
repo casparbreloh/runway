@@ -8,16 +8,7 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "scripts": {
-    "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsgo --noEmit"
-  },
   "dependencies": {
     "citty": "catalog:"
-  },
-  "devDependencies": {
-    "@types/node": "catalog:",
-    "@typescript/native-preview": "catalog:",
-    "vitest": "catalog:"
   }
 }

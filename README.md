@@ -111,47 +111,16 @@ webhook route. No glob, no autodiscovery magic — just an explicit path list.
 
 ## CLI
 
-- `runway build` — import each listed workflow path to collect the workflows, codegen the Worker (one
-  `WorkflowEntrypoint` per workflow + trigger routing) and esbuild-bundle it. No
-  upload — the offline shape proof.
-- `runway deploy` — build, then upload via the typed `cloudflare` SDK (`cf.workers.scripts.update`
-  with a `type: "workflow"` binding + `cf.workflows.update` per workflow). No wrangler, no Docker.
+- `runway deploy` — import each listed workflow path, codegen and bundle the Worker, then upload via
+  the typed `cloudflare` SDK (`cf.workers.scripts.update` with a `type: "workflow"` binding +
+  `cf.workflows.update` per workflow). No wrangler, no Docker.
 
 ## Testing
 
 - `pnpm test` — runs package-owned Vitest tests. Core owns the CLI test; Cloudflare owns deploy and
   Workers-runtime trigger tests, with the runtime test running under `@cloudflare/vitest-pool-workers`.
-- `cd example && runway build` — writes `.runway/worker.gen.ts`, `.runway/worker.js`, and
-  `.runway/wrangler.jsonc`.
-
-Use `@runway/cloudflare/testing` in app tests when you want to prove trigger auth and handler
-execution without Cloudflare:
-
-```ts
-import { createTestWorker } from "@runway/cloudflare/testing";
-import hello from "./src/hello.ts";
-
-const worker = createTestWorker([hello], {
-  secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
-});
-
-const res = await worker.webhook("hello", { webhookTimestamp: Date.now() });
-await worker.executions[0];
-console.log(res.status); // 202
-console.log(worker.runs[0]?.params);
-```
-
-You can run the generated Worker locally with Wrangler without a Cloudflare account:
-
-```sh
-cd example
-runway build
-wrangler dev --config .runway/wrangler.jsonc --local --var LINEAR_WEBHOOK_SECRET:test-secret
-```
-
-Then POST to the local trigger path with a matching signature. Local secret bindings must be passed
-with `--var` or a Wrangler-supported local vars file; shell env vars are not automatically available
-inside the Worker.
+- `pnpm typecheck` includes the example workflow; deploy tests cover the codegen/bundle/upload path
+  with a mocked Cloudflare SDK.
 
 Deploying needs Cloudflare credentials in the environment:
 

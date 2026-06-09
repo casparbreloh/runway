@@ -71,18 +71,11 @@ export interface ProgressEvent {
   readonly status: "start" | "done";
 }
 
-export interface BuildOptions {
+export interface DeployOptions {
   readonly cwd: string;
   readonly outDir: string;
-  onProgress?(event: ProgressEvent): void;
-}
-
-export interface BuildResult {
-  readonly entry: string;
-}
-
-export interface DeployOptions extends BuildOptions {
   readonly env?: Record<string, string | undefined>;
+  onProgress?(event: ProgressEvent): void;
 }
 
 export interface DeployResult {
@@ -92,7 +85,6 @@ export interface DeployResult {
 
 export interface Backend {
   readonly name: string;
-  build(registry: Registry, opts: BuildOptions): Promise<BuildResult>;
   deploy(registry: Registry, opts: DeployOptions): Promise<DeployResult>;
 }
 

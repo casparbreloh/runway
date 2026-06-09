@@ -1,7 +1,7 @@
 import { makeCtx } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
-import { createRouter, hmacSha256 } from "./router.ts";
+import { createRouter, hmacSha256 } from "../src/router.ts";
 
 const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
 

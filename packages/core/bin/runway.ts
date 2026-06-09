@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { join, resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 import { defineCommand, runMain } from "citty";
 
-import { build, deploy } from "../cli/run.ts";
-import type { ProgressEvent } from "../src/types.ts";
+import { validateTrigger } from "../src/trigger.ts";
+import type { ProgressEvent, Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
 
 const cwd = (): string => process.cwd();
 
@@ -53,17 +55,56 @@ const spinner = () => {
   };
 };
 
-const run = async (
-  action: "build" | "deploy",
-  fn: (onProgress: (event: ProgressEvent) => void) => Promise<number>,
-): Promise<void> => {
+const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
+  const mod = (await import(pathToFileURL(resolve(cwd, "runway.config.ts")).href)) as {
+    default: RunwayConfig;
+  };
+  return mod.default;
+};
+
+const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Promise<Registry> => {
+  const registry = await Promise.all(
+    workflows.map(async (path) => {
+      const mod = (await import(pathToFileURL(resolve(cwd, path)).href)) as { default?: unknown };
+      const def = mod.default;
+      if ((def as { __kind?: string } | undefined)?.__kind !== "workflow") {
+        throw new Error(`${path}: expected "export default createWorkflow(...)"`);
+      }
+      validateTrigger((def as WorkflowDefinition).trigger);
+      return { path, def: def as WorkflowDefinition };
+    }),
+  );
+  const ids = new Set<string>();
+  for (const { def, path } of registry) {
+    if (ids.has(def.id)) throw new Error(`duplicate workflow id "${def.id}" (${path})`);
+    ids.add(def.id);
+  }
+  return registry;
+};
+
+const deploy = async (onProgress: (event: ProgressEvent) => void): Promise<number> => {
+  const root = cwd();
+  onProgress({ step: "load", status: "start" });
+  const config = await loadConfig(root);
+  const registry = await loadRegistry(root, config.workflows);
+  onProgress({ step: "load", status: "done" });
+  await config.backend.deploy(registry, {
+    cwd: root,
+    outDir: join(root, ".runway"),
+    env: process.env,
+    onProgress,
+  });
+  return registry.length;
+};
+
+const run = async (): Promise<void> => {
   const out = spinner();
   try {
-    const n = await fn((event) => out.event(event));
-    console.log(`${action === "deploy" ? "Deployed" : "Built"} ${n} workflow(s)`);
+    const n = await deploy((event) => out.event(event));
+    console.log(`Deployed ${n} workflow(s)`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    out.fail(action, message);
+    out.fail("deploy", message);
     process.exitCode = 1;
   }
 };
@@ -74,13 +115,7 @@ const main = defineCommand({
     deploy: defineCommand({
       meta: { name: "deploy", description: "Build and deploy all registered workflows" },
       async run() {
-        await run("deploy", (onProgress) => deploy(cwd(), onProgress));
-      },
-    }),
-    build: defineCommand({
-      meta: { name: "build", description: "Generate and bundle the Worker without deploying" },
-      async run() {
-        await run("build", (onProgress) => build(cwd(), onProgress));
+        await run();
       },
     }),
   },

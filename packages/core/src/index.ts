@@ -4,8 +4,6 @@ export { createWorkflow, defineConfig } from "./workflow.ts";
 
 export type {
   Backend,
-  BuildOptions,
-  BuildResult,
   Ctx,
   DeployOptions,
   DeployResult,
