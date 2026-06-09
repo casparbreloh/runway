@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { expect, test } from "vitest";
 
-const repo = path.resolve(import.meta.dirname, "..");
+const repo = path.resolve(import.meta.dirname, "../../..");
 const example = path.join(repo, "example");
 const bin = path.join(repo, "packages/core/bin/runway.ts");
 

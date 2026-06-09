@@ -119,9 +119,8 @@ webhook route. No glob, no autodiscovery magic — just an explicit path list.
 
 ## Testing
 
-- `pnpm test` — runs root Vitest tests from `tests/`. Node tests cover the real CLI and deploy
-  pipeline with a mocked Cloudflare SDK; the Workers test runs under
-  `@cloudflare/vitest-pool-workers` and covers webhook/cron trigger execution.
+- `pnpm test` — runs package-owned Vitest tests. Core owns the CLI test; Cloudflare owns deploy and
+  Workers-runtime trigger tests, with the runtime test running under `@cloudflare/vitest-pool-workers`.
 - `cd example && runway build` — writes `.runway/worker.gen.ts`, `.runway/worker.js`, and
   `.runway/wrangler.jsonc`.
 

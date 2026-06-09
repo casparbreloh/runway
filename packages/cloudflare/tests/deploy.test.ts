@@ -1,11 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { Registry } from "@runway/core";
 import { expect, test } from "vitest";
 
-import { cloudflare } from "../packages/cloudflare/src/deploy.ts";
-import type { CloudflareApi } from "../packages/cloudflare/src/deploy.ts";
-import type { Registry } from "../packages/core/src/index.ts";
+import { cloudflare } from "../src/deploy.ts";
+import type { CloudflareApi } from "../src/deploy.ts";
 
 const writeProject = async (): Promise<{
   cwd: string;
@@ -13,7 +13,7 @@ const writeProject = async (): Promise<{
   cleanup(): Promise<void>;
 }> => {
   const cwd = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, "../example"), ".tmp-deploy-test-"),
+    path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-deploy-test-"),
   );
   await mkdir(path.join(cwd, "src"));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));

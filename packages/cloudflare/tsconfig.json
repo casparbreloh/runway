@@ -1,27 +1,7 @@
 {
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "target": "ES2022",
-    "lib": ["ES2023"],
-    "types": ["node", "@cloudflare/workers-types"],
-    "strict": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "verbatimModuleSyntax": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
-    "composite": true,
-    "declaration": true,
-    "emitDeclarationOnly": true,
-    "outDir": ".runway-types",
-    "tsBuildInfoFile": ".runway-types/tsconfig.tsbuildinfo"
+    "types": ["node", "@cloudflare/workers-types"]
   },
-  "references": [{ "path": "../core" }],
-  "include": ["src"]
+  "include": ["src", "tests", "vitest.config.ts"]
 }

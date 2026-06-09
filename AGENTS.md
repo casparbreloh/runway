@@ -62,9 +62,9 @@ pnpm workspace, three packages:
 ## Commands
 
 - Verify a change: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm test` — the full gate.
-  - individually: `pnpm typecheck` (`tsgo -b`, including `example/`) · `pnpm lint` (oxlint) ·
-    `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (root Vitest config; Node
-    tests for CLI/deploy, Workers test via `@cloudflare/vitest-pool-workers`)
+  - individually: `pnpm typecheck` (runs package-owned `tsgo --noEmit`, including `example/`) ·
+    `pnpm lint` (oxlint) · `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test`
+    (package-owned Vitest tests; Cloudflare runtime tests use `@cloudflare/vitest-pool-workers`)
 - The offline SDK-shape proof is `cd example && runway build` — imports each `config.workflows` path,
   codegens `.runway/worker.gen.ts` and `.runway/wrangler.jsonc`, and esbuild-bundles the Worker.
 - The `runway` CLI (shipped by `@runway/core`): `runway build` (codegen + bundle, no upload) and

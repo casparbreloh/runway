@@ -1,8 +1,26 @@
 {
-  "files": [],
-  "references": [
-    { "path": "packages/core" },
-    { "path": "packages/cloudflare" },
-    { "path": "example" }
-  ]
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "@runway/core": ["./packages/core/src/index.ts"],
+      "@runway/cloudflare": ["./packages/cloudflare/src/index.ts"],
+      "@runway/cloudflare/testing": ["./packages/cloudflare/src/testing.ts"],
+      "@runway/cloudflare/worker": ["./packages/cloudflare/src/worker.ts"]
+    }
+  }
 }

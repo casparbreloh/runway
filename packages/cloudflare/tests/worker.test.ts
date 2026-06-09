@@ -1,8 +1,8 @@
+import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
 import { expect, test } from "vitest";
 
-import { createRouter } from "../packages/cloudflare/src/router.ts";
-import { createTestWorker } from "../packages/cloudflare/src/testing.ts";
-import { createWorkflow, cron, hmacSha256, webhook } from "../packages/core/src/index.ts";
+import { createRouter } from "../src/router.ts";
+import { createTestWorker } from "../src/testing.ts";
 
 test("starts webhook and cron workflows in the Workers runtime", async () => {
   const seen: unknown[] = [];

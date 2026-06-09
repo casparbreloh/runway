@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "runway build",
-    "deploy": "runway deploy"
+    "deploy": "runway deploy",
+    "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
     "@runway/cloudflare": "workspace:*",
@@ -13,6 +14,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@typescript/native-preview": "catalog:",
     "typescript": "catalog:"
   }
 }
