@@ -22,24 +22,6 @@ export const generateWorker = (
   registry: Registry,
   opts: { cwd: string; outDir: string },
 ): string => {
-  const byClass = new Map<string, string>();
-  const byBinding = new Map<string, string>();
-  for (const { def } of registry) {
-    const cls = classOf(def.id);
-    const bnd = bindingOf(def.id);
-    if (byClass.has(cls)) {
-      throw new Error(
-        `workflow ids "${byClass.get(cls)}" and "${def.id}" collide on class "${cls}"`,
-      );
-    }
-    if (byBinding.has(bnd)) {
-      throw new Error(
-        `workflow ids "${byBinding.get(bnd)}" and "${def.id}" collide on binding "${bnd}"`,
-      );
-    }
-    byClass.set(cls, def.id);
-    byBinding.set(bnd, def.id);
-  }
   const imports = registry
     .map(
       (w, i) =>

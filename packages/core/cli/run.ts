@@ -11,8 +11,8 @@ const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
   return mod.default;
 };
 
-const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Promise<Registry> =>
-  Promise.all(
+const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Promise<Registry> => {
+  const registry = await Promise.all(
     workflows.map(async (path) => {
       const mod = (await import(pathToFileURL(resolve(cwd, path)).href)) as { default?: unknown };
       const def = mod.default;
@@ -22,6 +22,13 @@ const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Prom
       return { path, def: def as WorkflowDefinition };
     }),
   );
+  const ids = new Set<string>();
+  for (const { def, path } of registry) {
+    if (ids.has(def.id)) throw new Error(`duplicate workflow id "${def.id}" (${path})`);
+    ids.add(def.id);
+  }
+  return registry;
+};
 
 const exec = async (cwd: string, action: "build" | "deploy"): Promise<number> => {
   const config = await loadConfig(cwd);
