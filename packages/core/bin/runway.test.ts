@@ -47,3 +47,14 @@ void test("deploy reports missing webhook secrets before upload", async () => {
   assert.match(result.output, /runway: deploy failed/);
   assert.match(result.output, /missing webhook secret env var\(s\): LINEAR_WEBHOOK_SECRET/);
 });
+
+void test("deploy reports missing Cloudflare credentials clearly", async () => {
+  const result = await run(["deploy"]);
+
+  assert.equal(result.code, 1);
+  assert.match(result.output, /runway: deploy failed/);
+  assert.match(
+    result.output,
+    /missing Cloudflare env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
+  );
+});

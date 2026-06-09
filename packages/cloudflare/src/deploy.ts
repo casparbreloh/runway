@@ -108,8 +108,15 @@ const deploy =
     const env = opts.env ?? {};
     const apiToken = env.CLOUDFLARE_API_TOKEN;
     const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-    if (!apiToken) throw new Error("CLOUDFLARE_API_TOKEN is required");
-    if (!accountId) throw new Error("CLOUDFLARE_ACCOUNT_ID is required");
+    const missingCloudflareEnv = [
+      ["CLOUDFLARE_API_TOKEN", apiToken],
+      ["CLOUDFLARE_ACCOUNT_ID", accountId],
+    ]
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    if (missingCloudflareEnv.length > 0 || !apiToken || !accountId) {
+      throw new Error(`missing Cloudflare env var(s): ${missingCloudflareEnv.join(", ")}`);
+    }
     const secrets = secretNamesOf(registry);
     const missingSecrets = secrets.filter((name) => !env[name]);
     if (missingSecrets.length > 0) {
