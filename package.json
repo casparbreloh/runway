@@ -7,7 +7,7 @@
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "test": "pnpm --filter @runway/core test && pnpm --filter @runway/cloudflare test",
+    "test": "pnpm --filter @runway/core test && pnpm --filter @runway/cloudflare test && pnpm --filter example test",
     "typecheck": "tsgo --noEmit && pnpm --filter @runway/cloudflare typecheck"
   },
   "devDependencies": {

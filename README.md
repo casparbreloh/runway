@@ -120,7 +120,7 @@ webhook route. No glob, no autodiscovery magic — just an explicit path list.
 ## Testing
 
 - `pnpm test` — runs local no-account tests for CLI output, webhook auth, fake Workflow bindings,
-  deploy upload bindings, public testing helpers, and cron dispatch.
+  deploy upload bindings, public testing helpers, cron dispatch, and the example workflow.
 - `cd example && runway build` — writes `.runway/worker.gen.ts`, `.runway/worker.js`, and
   `.runway/wrangler.jsonc`.
 

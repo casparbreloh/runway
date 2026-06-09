@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "runway build",
-    "deploy": "runway deploy"
+    "deploy": "runway deploy",
+    "test": "node --test src/*.test.ts"
   },
   "dependencies": {
     "@runway/cloudflare": "workspace:*",
