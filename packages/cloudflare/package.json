@@ -1,0 +1,21 @@
+{
+  "name": "@runway/cloudflare",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./worker": "./src/worker.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@runway/core": "workspace:*",
+    "cloudflare": "catalog:",
+    "esbuild": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:"
+  }
+}

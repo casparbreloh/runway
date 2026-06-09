@@ -4,7 +4,7 @@
     "moduleResolution": "bundler",
     "target": "ES2022",
     "lib": ["ES2023"],
-    "types": ["@cloudflare/workers-types", "node"],
+    "types": ["node", "@cloudflare/workers-types"],
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
@@ -13,10 +13,10 @@
     "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["runway", ".runway/worker.gen.ts", ".runway/runway-env.d.ts"]
+  "include": ["src"]
 }
