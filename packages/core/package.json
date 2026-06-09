@@ -10,8 +10,5 @@
   },
   "dependencies": {
     "citty": "catalog:"
-  },
-  "devDependencies": {
-    "@types/node": "catalog:"
   }
 }

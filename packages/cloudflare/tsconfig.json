@@ -1,22 +1,11 @@
 {
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "target": "ES2022",
-    "lib": ["ES2023"],
     "types": ["node", "@cloudflare/workers-types"],
-    "strict": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "verbatimModuleSyntax": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
-    "noEmit": true
+    "outDir": "../../.tsbuild/cloudflare",
+    "declarationDir": "../../.tsbuild/cloudflare",
+    "tsBuildInfoFile": "../../.tsbuild/cloudflare.tsbuildinfo"
   },
-  "include": ["src"]
+  "references": [{ "path": "../core" }],
+  "include": ["src", "tests", "vitest.config.ts"]
 }

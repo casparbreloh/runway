@@ -1,21 +1,11 @@
 {
+  "extends": "../tsconfig.json",
   "compilerOptions": {
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "target": "ES2022",
-    "lib": ["ES2023"],
     "types": ["node"],
-    "strict": true,
-    "exactOptionalPropertyTypes": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "verbatimModuleSyntax": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true,
-    "noEmit": true
+    "outDir": "../.tsbuild/example",
+    "declarationDir": "../.tsbuild/example",
+    "tsBuildInfoFile": "../.tsbuild/example.tsbuildinfo"
   },
+  "references": [{ "path": "../packages/core" }, { "path": "../packages/cloudflare" }],
   "include": ["src", "runway.config.ts"]
 }

@@ -6,16 +6,13 @@
     ".": "./src/index.ts",
     "./worker": "./src/worker.ts"
   },
-  "scripts": {
-    "typecheck": "tsgo --noEmit"
-  },
   "dependencies": {
     "@runway/core": "workspace:*",
     "cloudflare": "catalog:",
     "esbuild": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:",
-    "@types/node": "catalog:"
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:"
   }
 }

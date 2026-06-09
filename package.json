@@ -7,7 +7,8 @@
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
-    "typecheck": "tsgo --noEmit && pnpm --filter @runway/cloudflare typecheck"
+    "test": "vitest run",
+    "typecheck": "tsgo --build"
   },
   "devDependencies": {
     "@types/node": "catalog:",
@@ -15,7 +16,8 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "devEngines": {
     "packageManager": {
