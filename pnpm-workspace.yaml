@@ -4,10 +4,12 @@ packages:
 
 allowBuilds:
   esbuild: true
+  sharp: true
   workerd: true
 
 catalog:
   "@cloudflare/workers-types": ^4.20260605.1
+  "@cloudflare/vitest-pool-workers": ^0.16.14
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
   citty: ^0.2.2
@@ -20,3 +22,14 @@ catalog:
   vitest: ^4.0.15
 
 catalogMode: strict
+
+minimumReleaseAgeExclude:
+  - "@cloudflare/vitest-pool-workers@0.16.14"
+  - "@cloudflare/workerd-darwin-64@1.20260609.1"
+  - "@cloudflare/workerd-darwin-arm64@1.20260609.1"
+  - "@cloudflare/workerd-linux-64@1.20260609.1"
+  - "@cloudflare/workerd-linux-arm64@1.20260609.1"
+  - "@cloudflare/workerd-windows-64@1.20260609.1"
+  - miniflare@4.20260609.0
+  - workerd@1.20260609.1
+  - wrangler@4.99.0

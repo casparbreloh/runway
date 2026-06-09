@@ -8,7 +8,7 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "test": "vitest run src",
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
@@ -17,6 +17,7 @@
     "esbuild": "catalog:"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
     "vitest": "catalog:"

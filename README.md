@@ -119,8 +119,10 @@ webhook route. No glob, no autodiscovery magic — just an explicit path list.
 
 ## Testing
 
-- `pnpm test` — runs local no-account Vitest tests for CLI output, webhook auth, fake Workflow bindings,
-  deploy upload bindings, public testing helpers, cron dispatch, and the example workflow.
+- `pnpm test` — runs local no-account Vitest tests for CLI output, deploy upload bindings, public
+  testing helpers, cron dispatch, and the example workflow. Cloudflare runtime-facing package tests
+  run inside `@cloudflare/vitest-pool-workers`; Node-only codegen/deploy tests stay in Vitest's Node
+  pool.
 - `cd example && runway build` — writes `.runway/worker.gen.ts`, `.runway/worker.js`, and
   `.runway/wrangler.jsonc`.
 

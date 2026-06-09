@@ -1,7 +1,7 @@
 import { makeCtx } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
-import { bindingOf } from "./codegen.ts";
+import { bindingOf } from "./ids.ts";
 import { createRouter, hmacSha256 } from "./router.ts";
 
 export interface TestRun {

@@ -1,3 +1,4 @@
+import { env as workerEnv } from "cloudflare:workers";
 import { expect, test } from "vitest";
 
 import { createRouter, hmacSha256 } from "./router.ts";
@@ -50,6 +51,10 @@ const env = (calls: unknown[]): Record<string, unknown> => ({
       return { id: "run-2" };
     },
   },
+});
+
+test("runs inside the Workers Vitest pool", () => {
+  expect(workerEnv).toBeDefined();
 });
 
 test("starts a workflow from a signed webhook", async () => {

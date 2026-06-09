@@ -2,14 +2,9 @@ import path from "node:path";
 
 import type { Registry } from "@runway/core";
 
-export const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+import { bindingOf, classOf } from "./ids.ts";
 
-export const classOf = (id: string): string =>
-  id
-    .split(/[^A-Za-z0-9]+/)
-    .filter(Boolean)
-    .map((s) => s[0]!.toUpperCase() + s.slice(1))
-    .join("");
+export { bindingOf, classOf } from "./ids.ts";
 
 const toPosix = (p: string): string => p.split(path.sep).join(path.posix.sep);
 
