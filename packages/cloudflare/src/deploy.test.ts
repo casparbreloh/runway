@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { test } from "node:test";
 
 import type { Registry } from "@runway/core";
+import { expect, test } from "vitest";
 
 import { cloudflare } from "./deploy.ts";
 import type { CloudflareApi } from "./deploy.ts";
@@ -81,7 +80,7 @@ const writeProject = async (): Promise<{
   };
 };
 
-void test("deploy uploads workflow bindings, webhook secrets, and cron schedules", async () => {
+test("deploy uploads workflow bindings, webhook secrets, and cron schedules", async () => {
   const project = await writeProject();
   const calls: {
     script?: Parameters<CloudflareApi["workers"]["scripts"]["update"]>;
@@ -124,17 +123,17 @@ void test("deploy uploads workflow bindings, webhook secrets, and cron schedules
       },
     });
 
-    assert.equal(calls.script?.[0], "runway-ship-it");
-    assert.deepEqual(calls.script?.[1].metadata.bindings, [
+    expect(calls.script?.[0]).toBe("runway-ship-it");
+    expect(calls.script?.[1].metadata.bindings).toEqual([
       { type: "workflow", name: "HELLO", workflow_name: "hello", class_name: "Hello" },
       { type: "workflow", name: "DAILY", workflow_name: "daily", class_name: "Daily" },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
     ]);
-    assert.deepEqual(calls.workflows, [
+    expect(calls.workflows).toEqual([
       ["hello", { account_id: "account", class_name: "Hello", script_name: "runway-ship-it" }],
       ["daily", { account_id: "account", class_name: "Daily", script_name: "runway-ship-it" }],
     ]);
-    assert.deepEqual(calls.schedules, [
+    expect(calls.schedules).toEqual([
       "runway-ship-it",
       { account_id: "account", body: [{ cron: "0 9 * * *" }] },
     ]);

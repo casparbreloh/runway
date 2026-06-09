@@ -1,11 +1,9 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
-
 import { createTestWorker } from "@runway/cloudflare/testing";
+import { expect, test } from "vitest";
 
 import hello from "./hello.ts";
 
-void test("hello starts from a signed webhook locally", async () => {
+test("hello starts from a signed webhook locally", async () => {
   const worker = createTestWorker([hello], {
     secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
   });
@@ -13,9 +11,9 @@ void test("hello starts from a signed webhook locally", async () => {
 
   const res = await worker.webhook("hello", payload);
 
-  assert.equal(res.status, 202);
+  expect(res.status).toBe(202);
   await worker.executions[0];
-  assert.deepEqual(worker.runs, [
+  expect(worker.runs).toEqual([
     {
       id: "hello-1",
       workflowId: "hello",

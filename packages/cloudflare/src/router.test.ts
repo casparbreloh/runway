@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "vitest";
 
 import { createRouter, hmacSha256 } from "./router.ts";
 
@@ -53,43 +52,43 @@ const env = (calls: unknown[]): Record<string, unknown> => ({
   },
 });
 
-void test("starts a workflow from a signed webhook", async () => {
+test("starts a workflow from a signed webhook", async () => {
   const calls: unknown[] = [];
   const body = JSON.stringify({ webhookTimestamp: Date.now(), ok: true });
   const res = await router.fetch(await signed(body), env(calls));
-  assert.equal(res.status, 202);
-  assert.deepEqual(await res.json(), { id: "run-1" });
-  assert.deepEqual(calls, [{ webhookTimestamp: JSON.parse(body).webhookTimestamp, ok: true }]);
+  expect(res.status).toBe(202);
+  expect(await res.json()).toEqual({ id: "run-1" });
+  expect(calls).toEqual([{ webhookTimestamp: JSON.parse(body).webhookTimestamp, ok: true }]);
 });
 
-void test("rejects unsigned webhooks before parsing JSON", async () => {
+test("rejects unsigned webhooks before parsing JSON", async () => {
   const calls: unknown[] = [];
   const res = await router.fetch(
     new Request("https://runway.test/hello", { method: "POST", body: "{" }),
     env(calls),
   );
-  assert.equal(res.status, 401);
-  assert.deepEqual(calls, []);
+  expect(res.status).toBe(401);
+  expect(calls).toEqual([]);
 });
 
-void test("returns a clear error when a required secret is not bound", async () => {
+test("returns a clear error when a required secret is not bound", async () => {
   const calls: unknown[] = [];
   const body = JSON.stringify({ webhookTimestamp: Date.now() });
   const res = await router.fetch(await signed(body), { HELLO: env(calls).HELLO });
-  assert.equal(res.status, 500);
-  assert.equal(await res.text(), "no secret: LINEAR_WEBHOOK_SECRET");
+  expect(res.status).toBe(500);
+  expect(await res.text()).toBe("no secret: LINEAR_WEBHOOK_SECRET");
 });
 
-void test("rejects stale signed webhooks", async () => {
+test("rejects stale signed webhooks", async () => {
   const calls: unknown[] = [];
   const body = JSON.stringify({ webhookTimestamp: Date.now() - 120_000 });
   const res = await router.fetch(await signed(body), env(calls));
-  assert.equal(res.status, 401);
-  assert.deepEqual(calls, []);
+  expect(res.status).toBe(401);
+  expect(calls).toEqual([]);
 });
 
-void test("starts workflows from cron events", async () => {
+test("starts workflows from cron events", async () => {
   const calls: unknown[] = [];
   await router.scheduled({ cron: "0 9 * * *", scheduledTime: 42 }, env(calls));
-  assert.deepEqual(calls, [{ cron: "0 9 * * *", scheduledTime: 42 }]);
+  expect(calls).toEqual([{ cron: "0 9 * * *", scheduledTime: 42 }]);
 });

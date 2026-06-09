@@ -1,7 +1,7 @@
-import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { test } from "node:test";
+
+import { expect, test } from "vitest";
 
 const repo = path.resolve(import.meta.dirname, "../../..");
 const example = path.join(repo, "example");
@@ -28,33 +28,32 @@ const run = async (
   return { code, output: Buffer.concat(chunks).toString("utf8") };
 };
 
-void test("build prints concise progress", async () => {
+test("build prints concise progress", async () => {
   const result = await run(["build"]);
 
-  assert.equal(result.code, 0);
-  assert.match(result.output, /Build \.\.\./);
-  assert.match(result.output, /Build done/);
-  assert.match(result.output, /Built 1 workflow\(s\)/);
+  expect(result.code).toBe(0);
+  expect(result.output).toMatch(/Build \.\.\./);
+  expect(result.output).toMatch(/Build done/);
+  expect(result.output).toMatch(/Built 1 workflow\(s\)/);
 });
 
-void test("deploy reports missing webhook secrets before upload", async () => {
+test("deploy reports missing webhook secrets before upload", async () => {
   const result = await run(["deploy"], {
     CLOUDFLARE_API_TOKEN: "test-token",
     CLOUDFLARE_ACCOUNT_ID: "test-account",
   });
 
-  assert.equal(result.code, 1);
-  assert.match(result.output, /runway: deploy failed/);
-  assert.match(result.output, /missing webhook secret env var\(s\): LINEAR_WEBHOOK_SECRET/);
+  expect(result.code).toBe(1);
+  expect(result.output).toMatch(/runway: deploy failed/);
+  expect(result.output).toMatch(/missing webhook secret env var\(s\): LINEAR_WEBHOOK_SECRET/);
 });
 
-void test("deploy reports missing Cloudflare credentials clearly", async () => {
+test("deploy reports missing Cloudflare credentials clearly", async () => {
   const result = await run(["deploy"]);
 
-  assert.equal(result.code, 1);
-  assert.match(result.output, /runway: deploy failed/);
-  assert.match(
-    result.output,
+  expect(result.code).toBe(1);
+  expect(result.output).toMatch(/runway: deploy failed/);
+  expect(result.output).toMatch(
     /missing Cloudflare env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
   );
 });

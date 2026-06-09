@@ -63,7 +63,7 @@ pnpm workspace, three packages:
 
 - Verify a change: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm test` — the full gate.
   - individually: `pnpm typecheck` (tsgo + `@runway/cloudflare` `tsgo --noEmit`) · `pnpm lint` (oxlint) ·
-    `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (Node tests for core CLI output,
+    `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (Vitest tests for core CLI output,
     Cloudflare router/codegen/deploy/testing contracts, and the example workflow)
 - The gate does NOT typecheck `example/`. The offline SDK-shape proof is `cd example && runway build`
   — imports each `config.workflows` path to collect the registry, codegens `.runway/worker.gen.ts`,

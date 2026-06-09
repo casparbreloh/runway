@@ -1,10 +1,8 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
-
 import { createTestWorker } from "@runway/cloudflare/testing";
 import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
+import { expect, test } from "vitest";
 
-void test("test worker starts a signed webhook workflow and runs its handler", async () => {
+test("test worker starts a signed webhook workflow and runs its handler", async () => {
   const seen: unknown[] = [];
   const workflow = createWorkflow({
     id: "hello",
@@ -25,14 +23,14 @@ void test("test worker starts a signed webhook workflow and runs its handler", a
 
   const res = await worker.webhook("hello", { ok: true });
 
-  assert.equal(res.status, 202);
-  assert.deepEqual(await res.json(), { id: "hello-1" });
+  expect(res.status).toBe(202);
+  expect(await res.json()).toEqual({ id: "hello-1" });
   await worker.executions[0];
-  assert.deepEqual(worker.runs, [{ id: "hello-1", workflowId: "hello", params: { ok: true } }]);
-  assert.deepEqual(seen, [{ ok: true }]);
+  expect(worker.runs).toEqual([{ id: "hello-1", workflowId: "hello", params: { ok: true } }]);
+  expect(seen).toEqual([{ ok: true }]);
 });
 
-void test("test worker returns 202 before handler execution settles", async () => {
+test("test worker returns 202 before handler execution settles", async () => {
   let release!: () => void;
   const finished = new Promise<void>((resolve) => {
     release = resolve;
@@ -50,12 +48,12 @@ void test("test worker returns 202 before handler execution settles", async () =
 
   const res = await worker.webhook("hello", {});
 
-  assert.equal(res.status, 202);
+  expect(res.status).toBe(202);
   release();
   await worker.executions[0];
 });
 
-void test("test worker supports header timestamp webhooks", async () => {
+test("test worker supports header timestamp webhooks", async () => {
   const workflow = createWorkflow({
     id: "hello",
     trigger: webhook({
@@ -73,10 +71,10 @@ void test("test worker supports header timestamp webhooks", async () => {
 
   const res = await worker.webhook("hello", {});
 
-  assert.equal(res.status, 202);
+  expect(res.status).toBe(202);
 });
 
-void test("test worker starts cron workflows", async () => {
+test("test worker starts cron workflows", async () => {
   const seen: unknown[] = [];
   const workflow = createWorkflow({
     id: "daily",
@@ -89,8 +87,8 @@ void test("test worker starts cron workflows", async () => {
   await worker.scheduled("0 9 * * *", 42);
   await worker.executions[0];
 
-  assert.deepEqual(worker.runs, [
+  expect(worker.runs).toEqual([
     { id: "daily-1", workflowId: "daily", params: { cron: "0 9 * * *", scheduledTime: 42 } },
   ]);
-  assert.deepEqual(seen, [{ cron: "0 9 * * *", scheduledTime: 42 }]);
+  expect(seen).toEqual([{ cron: "0 9 * * *", scheduledTime: 42 }]);
 });

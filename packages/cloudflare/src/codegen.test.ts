@@ -1,7 +1,5 @@
-import assert from "node:assert/strict";
-import { test } from "node:test";
-
 import type { Registry } from "@runway/core";
+import { expect, test } from "vitest";
 
 import { generateWorker, generateWranglerConfig } from "./codegen.ts";
 
@@ -34,15 +32,15 @@ const registry: Registry = [
   },
 ];
 
-void test("generates Worker routes from explicit triggers", () => {
+test("generates Worker routes from explicit triggers", () => {
   const worker = generateWorker(registry, { cwd: "/app", outDir: "/app/.runway" });
 
-  assert.match(worker, /path: "\/hello"/);
-  assert.match(worker, /secret":"LINEAR_WEBHOOK_SECRET"/);
-  assert.match(worker, /cron: "0 9 \* \* \*"/);
+  expect(worker).toMatch(/path: "\/hello"/);
+  expect(worker).toMatch(/secret":"LINEAR_WEBHOOK_SECRET"/);
+  expect(worker).toMatch(/cron: "0 9 \* \* \*"/);
 });
 
-void test("generates Wrangler worker cron triggers", () => {
+test("generates Wrangler worker cron triggers", () => {
   const config = JSON.parse(
     generateWranglerConfig(registry, { name: "runway", main: "worker.gen.ts" }),
   ) as {
@@ -50,49 +48,45 @@ void test("generates Wrangler worker cron triggers", () => {
     triggers?: { crons: ReadonlyArray<string> };
   };
 
-  assert.deepEqual(config.triggers, { crons: ["0 9 * * *"] });
-  assert.deepEqual(config.workflows, [
+  expect(config.triggers).toEqual({ crons: ["0 9 * * *"] });
+  expect(config.workflows).toEqual([
     { name: "hello", binding: "HELLO", class_name: "Hello" },
     { name: "daily", binding: "DAILY", class_name: "Daily" },
   ]);
-  assert.equal("schedules" in config.workflows[1]!, false);
+  expect("schedules" in config.workflows[1]!).toBe(false);
 });
 
-void test("rejects duplicate webhook paths", () => {
-  assert.throws(
-    () =>
-      generateWorker(
-        [
-          registry[0]!,
-          {
-            ...registry[0]!,
-            path: "src/other.ts",
-            def: { ...registry[0]!.def, id: "other" },
-          },
-        ],
-        { cwd: "/app", outDir: "/app/.runway" },
-      ),
-    /duplicate webhook trigger path "\/hello"/,
-  );
+test("rejects duplicate webhook paths", () => {
+  expect(() =>
+    generateWorker(
+      [
+        registry[0]!,
+        {
+          ...registry[0]!,
+          path: "src/other.ts",
+          def: { ...registry[0]!.def, id: "other" },
+        },
+      ],
+      { cwd: "/app", outDir: "/app/.runway" },
+    ),
+  ).toThrow(/duplicate webhook trigger path "\/hello"/);
 });
 
-void test("rejects generated class name collisions", () => {
-  assert.throws(
-    () =>
-      generateWorker(
-        [
-          {
-            ...registry[1]!,
-            def: { ...registry[1]!.def, id: "daily-alt" },
-          },
-          {
-            ...registry[1]!,
-            path: "src/daily-alt.ts",
-            def: { ...registry[1]!.def, id: "daily_alt" },
-          },
-        ],
-        { cwd: "/app", outDir: "/app/.runway" },
-      ),
-    /generated class name DailyAlt already used by src\/daily.ts/,
-  );
+test("rejects generated class name collisions", () => {
+  expect(() =>
+    generateWorker(
+      [
+        {
+          ...registry[1]!,
+          def: { ...registry[1]!.def, id: "daily-alt" },
+        },
+        {
+          ...registry[1]!,
+          path: "src/daily-alt.ts",
+          def: { ...registry[1]!.def, id: "daily_alt" },
+        },
+      ],
+      { cwd: "/app", outDir: "/app/.runway" },
+    ),
+  ).toThrow(/generated class name DailyAlt already used by src\/daily.ts/);
 });
