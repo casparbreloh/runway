@@ -7,7 +7,7 @@
     "./worker": "./src/worker.ts"
   },
   "scripts": {
-    "test": "node --test src/router.test.ts",
+    "test": "node --test src/*.test.ts",
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {

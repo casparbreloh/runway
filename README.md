@@ -106,8 +106,8 @@ error if a listed file forgot `export default createWorkflow(...)`), producing `
 The backend codegens a Worker that emits one default import per path plus one Cloudflare
 `WorkflowEntrypoint` per workflow, bound by that import —
 `import __w0 from "../src/hello.ts";` … `export class Hello extends toEntrypoint(__w0) {}`. The `id`
-stays the deploy-time identity (the `workflow_name`, the binding, the `/runs/:id` route); the class
-name is derived from it. No glob, no autodiscovery magic — just an explicit path list.
+stays the deploy-time identity (the `workflow_name` and binding); the trigger path is the public
+webhook route. No glob, no autodiscovery magic — just an explicit path list.
 
 ## CLI
 
