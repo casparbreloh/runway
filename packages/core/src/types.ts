@@ -67,7 +67,7 @@ export interface RegisteredWorkflow {
 export type Registry = ReadonlyArray<RegisteredWorkflow>;
 
 export interface ProgressEvent {
-  readonly step: "build" | "deploy";
+  readonly step: "load" | "build" | "deploy";
   readonly status: "start" | "done";
 }
 

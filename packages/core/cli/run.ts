@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+import { validateTrigger } from "../src/trigger.ts";
 import type { ProgressEvent, Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
 
 const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
@@ -19,6 +20,7 @@ const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Prom
       if ((def as { __kind?: string } | undefined)?.__kind !== "workflow") {
         throw new Error(`${path}: expected "export default createWorkflow(...)"`);
       }
+      validateTrigger((def as WorkflowDefinition).trigger);
       return { path, def: def as WorkflowDefinition };
     }),
   );
@@ -35,8 +37,10 @@ const exec = async (
   action: "build" | "deploy",
   onProgress?: (event: ProgressEvent) => void,
 ): Promise<number> => {
+  onProgress?.({ step: "load", status: "start" });
   const config = await loadConfig(cwd);
   const registry = await loadRegistry(cwd, config.workflows);
+  onProgress?.({ step: "load", status: "done" });
   const opts = onProgress
     ? { cwd, outDir: join(cwd, ".runway"), onProgress }
     : { cwd, outDir: join(cwd, ".runway") };

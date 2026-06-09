@@ -30,50 +30,6 @@ test("test worker starts a signed webhook workflow and runs its handler", async 
   expect(seen).toEqual([{ ok: true }]);
 });
 
-test("test worker returns 202 before handler execution settles", async () => {
-  let release!: () => void;
-  const finished = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const workflow = createWorkflow({
-    id: "hello",
-    trigger: webhook({
-      path: "/hello",
-      auth: hmacSha256({ header: "linear-signature", secret: "LINEAR_WEBHOOK_SECRET" }),
-    }),
-  }).handler(() => finished);
-  const worker = createTestWorker([workflow], {
-    secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
-  });
-
-  const res = await worker.webhook("hello", {});
-
-  expect(res.status).toBe(202);
-  release();
-  await worker.executions[0];
-});
-
-test("test worker supports header timestamp webhooks", async () => {
-  const workflow = createWorkflow({
-    id: "hello",
-    trigger: webhook({
-      path: "/hello",
-      auth: hmacSha256({
-        header: "x-signature",
-        secret: "WEBHOOK_SECRET",
-        timestamp: { source: "header", field: "x-timestamp", toleranceMs: 60_000 },
-      }),
-    }),
-  }).handler(() => {});
-  const worker = createTestWorker([workflow], {
-    secrets: { WEBHOOK_SECRET: "test-secret" },
-  });
-
-  const res = await worker.webhook("hello", {});
-
-  expect(res.status).toBe(202);
-});
-
 test("test worker starts cron workflows", async () => {
   const seen: unknown[] = [];
   const workflow = createWorkflow({

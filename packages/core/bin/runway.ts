@@ -8,10 +8,14 @@ import type { ProgressEvent } from "../src/types.ts";
 
 const cwd = (): string => process.cwd();
 
-const labelOf = (step: ProgressEvent["step"]): string => (step === "build" ? "Build" : "Deploy");
+const labelOf = (step: ProgressEvent["step"], status: ProgressEvent["status"]): string => {
+  if (step === "load") return status === "start" ? "Loading" : "Loaded";
+  if (step === "build") return status === "start" ? "Building" : "Built";
+  return status === "start" ? "Deploying" : "Deployed";
+};
 
 const spinner = () => {
-  const frames = ["-", "\\", "|", "/"];
+  const frames = [".  ", ".. ", "..."];
   let timer: NodeJS.Timeout | undefined;
   let i = 0;
   let label: string | undefined;
@@ -23,21 +27,22 @@ const spinner = () => {
   };
   return {
     event(event: ProgressEvent) {
+      const current = labelOf(event.step, event.status);
       if (!process.stderr.isTTY) {
-        console.error(`${labelOf(event.step)} ${event.status === "start" ? "..." : "done"}`);
+        console.error(event.status === "start" ? `${current}...` : `${current}.`);
         return;
       }
       if (event.status === "start") {
         clear();
-        label = labelOf(event.step);
-        process.stderr.write(`${frames[0]} ${label}\r`);
+        label = current;
+        process.stderr.write(`${label}${frames[0]}\r`);
         timer = setInterval(() => {
           i = (i + 1) % frames.length;
-          process.stderr.write(`${frames[i]} ${label}\r`);
+          process.stderr.write(`${label}${frames[i]}\r`);
         }, 80);
       } else {
         clear();
-        console.error(`ok ${labelOf(event.step)}`);
+        console.error(`${current}.`);
       }
     },
     fail(action: string, message: string) {

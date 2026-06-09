@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "runway build",
-    "deploy": "runway deploy",
-    "test": "vitest run src"
+    "deploy": "runway deploy"
   },
   "dependencies": {
     "@runway/cloudflare": "workspace:*",
@@ -14,7 +13,6 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "typescript": "catalog:",
-    "vitest": "catalog:"
+    "typescript": "catalog:"
   }
 }

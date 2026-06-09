@@ -141,3 +141,41 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
     await project.cleanup();
   }
 });
+
+test("deploy requires webhook secrets before upload", async () => {
+  const project = await writeProject();
+  let uploaded = false;
+  const client: CloudflareApi = {
+    workers: {
+      scripts: {
+        update: async () => {
+          uploaded = true;
+          return {} as Awaited<ReturnType<CloudflareApi["workers"]["scripts"]["update"]>>;
+        },
+        schedules: {
+          update: async () =>
+            ({}) as Awaited<ReturnType<CloudflareApi["workers"]["scripts"]["schedules"]["update"]>>,
+        },
+      },
+    },
+    workflows: {
+      update: async () => ({}) as Awaited<ReturnType<CloudflareApi["workflows"]["update"]>>,
+    },
+  };
+
+  try {
+    await expect(
+      cloudflare({ client: () => client }).deploy(project.registry, {
+        cwd: project.cwd,
+        outDir: path.join(project.cwd, ".runway"),
+        env: {
+          CLOUDFLARE_API_TOKEN: "token",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+        },
+      }),
+    ).rejects.toThrow(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET/);
+    expect(uploaded).toBe(false);
+  } finally {
+    await project.cleanup();
+  }
+});

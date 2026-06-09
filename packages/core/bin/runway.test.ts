@@ -32,8 +32,10 @@ test("build prints concise progress", async () => {
   const result = await run(["build"]);
 
   expect(result.code).toBe(0);
-  expect(result.output).toMatch(/Build \.\.\./);
-  expect(result.output).toMatch(/Build done/);
+  expect(result.output).toMatch(/Loading\.\.\./);
+  expect(result.output).toMatch(/Loaded\./);
+  expect(result.output).toMatch(/Building\.\.\./);
+  expect(result.output).toMatch(/Built\./);
   expect(result.output).toMatch(/Built 1 workflow\(s\)/);
 });
 
@@ -45,15 +47,15 @@ test("deploy reports missing webhook secrets before upload", async () => {
 
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
-  expect(result.output).toMatch(/missing webhook secret env var\(s\): LINEAR_WEBHOOK_SECRET/);
+  expect(result.output).toMatch(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET/);
 });
 
-test("deploy reports missing Cloudflare credentials clearly", async () => {
+test("deploy reports all missing env vars clearly", async () => {
   const result = await run(["deploy"]);
 
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
   expect(result.output).toMatch(
-    /missing Cloudflare env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
+    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET/,
   );
 });

@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import process from "node:process";
 
 import type {
   Backend,
@@ -106,23 +107,16 @@ const build = async (registry: Registry, opts: BuildOptions): Promise<BuildResul
 const deploy =
   (backendOpts: CloudflareBackendOptions = {}) =>
   async (registry: Registry, opts: DeployOptions): Promise<DeployResult> => {
-    const env = opts.env ?? {};
-    const apiToken = env.CLOUDFLARE_API_TOKEN;
-    const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-    const missingCloudflareEnv = [
-      ["CLOUDFLARE_API_TOKEN", apiToken],
-      ["CLOUDFLARE_ACCOUNT_ID", accountId],
-    ]
-      .filter(([, value]) => !value)
-      .map(([name]) => name);
-    if (missingCloudflareEnv.length > 0 || !apiToken || !accountId) {
-      throw new Error(`missing Cloudflare env var(s): ${missingCloudflareEnv.join(", ")}`);
-    }
+    const env = opts.env ?? process.env;
     const secrets = secretNamesOf(registry);
-    const missingSecrets = secrets.filter((name) => !env[name]);
-    if (missingSecrets.length > 0) {
-      throw new Error(`missing webhook secret env var(s): ${missingSecrets.join(", ")}`);
+    const missingEnv = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", ...secrets].filter(
+      (name) => !env[name],
+    );
+    if (missingEnv.length > 0) {
+      throw new Error(`missing required env var(s): ${missingEnv.join(", ")}`);
     }
+    const apiToken = env.CLOUDFLARE_API_TOKEN!;
+    const accountId = env.CLOUDFLARE_ACCOUNT_ID!;
 
     await build(registry, opts);
 
