@@ -120,9 +120,26 @@ webhook route. No glob, no autodiscovery magic — just an explicit path list.
 ## Testing
 
 - `pnpm test` — runs local no-account tests for CLI output, webhook auth, fake Workflow bindings,
-  deploy upload bindings, and cron dispatch.
+  deploy upload bindings, public testing helpers, and cron dispatch.
 - `cd example && runway build` — writes `.runway/worker.gen.ts`, `.runway/worker.js`, and
   `.runway/wrangler.jsonc`.
+
+Use `@runway/cloudflare/testing` in app tests when you want to prove trigger auth and handler
+execution without Cloudflare:
+
+```ts
+import { createTestWorker } from "@runway/cloudflare/testing";
+import hello from "./src/hello.ts";
+
+const worker = createTestWorker([hello], {
+  secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
+});
+
+const res = await worker.webhook("hello", { webhookTimestamp: Date.now() });
+await worker.executions[0];
+console.log(res.status); // 202
+console.log(worker.runs[0]?.params);
+```
 
 You can run the generated Worker locally with Wrangler without a Cloudflare account:
 

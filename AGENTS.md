@@ -42,6 +42,9 @@ pnpm workspace, three packages:
   - `src/router.ts` — trigger routing and local-testable runtime code with no `cloudflare:workers`
     import: POST webhook paths verify HMAC auth before JSON parsing, cron events dispatch by cron
     expression, and both call `env[binding].create({ params })`.
+  - `src/testing.ts` — public no-account test helper exported as `@runway/cloudflare/testing`;
+    `createTestWorker([workflow], { secrets })` signs webhook requests, dispatches cron events, runs
+    handlers with in-memory `step`/`sleep`, and records started runs/executions.
   - `src/deploy.ts` — the **deploy half** (`cloudflare(): Backend`, runs on Node): `build` codegens
     the Worker + `.runway/wrangler.jsonc` + esbuild-bundles it; `deploy` additionally validates
     required webhook secret env vars and uploads via the typed `cloudflare` SDK.
@@ -61,7 +64,7 @@ pnpm workspace, three packages:
 - Verify a change: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm test` — the full gate.
   - individually: `pnpm typecheck` (tsgo + `@runway/cloudflare` `tsgo --noEmit`) · `pnpm lint` (oxlint) ·
     `pnpm format` writes / `format-check` checks (oxfmt) · `pnpm test` (Node tests for core CLI output
-    and Cloudflare router/codegen/deploy contracts)
+    and Cloudflare router/codegen/deploy/testing contracts)
 - The gate does NOT typecheck `example/`. The offline SDK-shape proof is `cd example && runway build`
   — imports each `config.workflows` path to collect the registry, codegens `.runway/worker.gen.ts`,
   writes `.runway/wrangler.jsonc`, and esbuild-bundles it, proving the generated Worker compiles and
