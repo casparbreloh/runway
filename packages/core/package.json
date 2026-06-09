@@ -8,6 +8,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "test": "node --test bin/*.test.ts"
+  },
   "dependencies": {
     "citty": "catalog:"
   },
