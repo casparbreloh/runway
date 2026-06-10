@@ -82,6 +82,7 @@ export interface Primitives {
 
 export interface RegisteredWorkflow {
   readonly path: string;
+  readonly exportName: string;
   readonly def: WorkflowDefinition;
 }
 
@@ -94,7 +95,6 @@ export interface ProgressEvent {
 
 export interface DeployOptions {
   readonly cwd: string;
-  readonly outDir: string;
   readonly env?: Record<string, string | undefined>;
   readonly onProgress?: (event: ProgressEvent) => void;
 }
@@ -110,5 +110,6 @@ export interface Backend {
 
 export interface RunwayConfig {
   readonly backend: Backend;
-  readonly workflows: ReadonlyArray<string>;
+  readonly include?: ReadonlyArray<string>;
+  readonly exclude?: ReadonlyArray<string>;
 }

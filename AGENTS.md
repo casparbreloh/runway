@@ -2,8 +2,8 @@
 
 A code-first TypeScript library for durable workflows, split into a **portable core** and a
 **pluggable backend**. You author a workflow as plain TS —
-`export default createWorkflow({ id, secrets? }).trigger(...).handler(async (ctx) => { ... })`, one per file — list
-those files by path in the config, and a backend codegens + deploys the durable runtime. The core (`@runway/core`) is Web-Standards
+`export default createWorkflow({ id, secrets? }).trigger(...).handler(async (ctx) => { ... })` — export
+workflows from `.runway/workflows/**/*.ts` by default, and a backend codegens + deploys the durable runtime. The core (`@runway/core`) is Web-Standards
 only with zero Cloudflare deps and owns the durable-execution _contract_; `@runway/cloudflare` is the
 one backend today (native Cloudflare Workflows owns replay, persistence, and durable sleep). The
 `Backend` seam keeps authoring code portable, so other backends (Vercel, self-hosted Postgres) can
@@ -18,10 +18,11 @@ pnpm workspace, three packages:
   only, no CF deps.
   - `src/types.ts` — the type home: `Ctx` (`runId`/`params`/`secrets`/`env`/`step`/`sleep`), `StepContext`,
     `WorkflowDefinition`/`TriggerBuilder`/`WorkflowBuilder`, the `Primitives` per-backend contract
-    (`step<T>(id, fn)` + `sleep(id, ms)`), `RegisteredWorkflow { path, def }` + the `Registry` type
-    (`ReadonlyArray<RegisteredWorkflow>`), `WorkflowTrigger` (`WebhookTrigger | CronTrigger`), the
-    `Backend` interface (just `deploy`, returning `DeployResult { script, urls }`) + deploy option
-    types, and `RunwayConfig` (`{ backend, workflows: ReadonlyArray<string> }`).
+    (`step<T>(id, fn)` + `sleep(id, ms)`), `RegisteredWorkflow { path, exportName, def }` + the
+    `Registry` type (`ReadonlyArray<RegisteredWorkflow>`), `WorkflowTrigger`
+    (`WebhookTrigger | CronTrigger`), the `Backend` interface (just `deploy`, returning
+    `DeployResult { script, urls }`) + deploy option types, and `RunwayConfig`
+    (`{ backend, include?, exclude? }`).
   - `src/workflow.ts` — `createWorkflow({ id, secrets? })` (the builder chain; tags the def with
     `__kind: "workflow"`, validates secret names, and rejects a webhook trigger whose `secret` is
     not declared in `secrets`) and `defineConfig`.
@@ -38,11 +39,11 @@ pnpm workspace, three packages:
     `missing secret: NAME` on a miss) — `secrets` and `env` are required on `makeCtx` so a backend
     can't forget to wire them.
   - `src/index.ts` — public barrel.
-  - `bin/runway.ts` — the citty CLI: load `runway.config.ts`, map over `config.workflows` (the path
-    array) importing each path and taking its `.default`, validate each is a `__kind === "workflow"`
-    (else throw `"<path>: expected \"export default createWorkflow(...)\""`) into `{ path, def }`
-    pairs (that array IS the `Registry`), then dispatch it to `backend.deploy` and print the
-    returned script name + webhook URLs.
+  - `bin/runway.ts` — the citty CLI: load `runway.config.ts` (fallback `.runway/runway.config.ts`),
+    discover files from `include`/`exclude` globs (default `.runway/workflows/**/*.ts`, excluding
+    tests/specs/types), import each matched module, collect default and named exports tagged
+    `__kind === "workflow"` into `{ path, exportName, def }` pairs (the `Registry`), then dispatch
+    it to `backend.deploy` and print the returned script name + webhook URLs.
 - `packages/cloudflare/` — `@runway/cloudflare`, the one backend, in two halves:
   - `src/worker.ts` — the **runtime half** (`@runway/cloudflare/worker`, runs on workerd):
     `toEntrypoint` (→ a CF `WorkflowEntrypoint` class) implements `Primitives` over CF's
@@ -58,8 +59,8 @@ pnpm workspace, three packages:
     records started runs/executions.
   - `src/deploy.ts` — the **deploy half** (`cloudflare(): Backend`, runs on Node): validates
     required secret env vars (the workflow-declared `secrets`, which include webhook secrets),
-    codegens the Worker + `.runway/wrangler.jsonc`, esbuild-bundles it, and uploads via the typed
-    `cloudflare` SDK. Deploy OWNS the `runway-<project>` script (project = sanitized package name):
+    codegens the Worker in memory, esbuild-bundles it, and uploads via the typed `cloudflare` SDK.
+    Deploy OWNS the `runway-<project>` script (project = sanitized package name):
     after upload it deletes CF Workflows that belong to the script but are no longer in the
     registry, enables the script on workers.dev (`workers.scripts.subdomain.create`), resolves the
     account subdomain, and returns `DeployResult { script, urls }` with one URL per webhook
@@ -72,23 +73,21 @@ pnpm workspace, three packages:
     pointing at the prebuilt `docker.io/cloudflare/sandbox:<version>` image — the image tag MUST
     match the `@cloudflare/sandbox` npm version (both pinned: `SANDBOX_VERSION` in codegen.ts and
     the exact catalog entry).
-  - `src/codegen.ts` — emits the Worker entry (one default import per workflow path —
-    `import __w0 from "../src/hello.ts";` — then one `WorkflowEntrypoint` class per workflow bound by
-    that default import, class name derived from the id —
-    `export class Hello extends toEntrypoint(__w0) {}` — + the trigger router; in sandbox mode also
-    `export { Sandbox } from "@cloudflare/sandbox";`), `.runway/wrangler.jsonc` (`nodejs_compat`
-    always; sandbox mode adds `containers`/`durable_objects`/`migrations`), and the shared
+  - `src/codegen.ts` — emits the Worker entry (one namespace import per workflow module, then one
+    `WorkflowEntrypoint` class per workflow export, class name derived from the id —
+    `export class Hello extends toEntrypoint(__m0.default) {}` — + the trigger router; in sandbox
+    mode also `export { Sandbox } from "@cloudflare/sandbox";`), and the shared
     `COMPATIBILITY_DATE` + `SANDBOX_VERSION`/`SANDBOX_IMAGE`/`SANDBOX_CLASS`.
   - `src/naming.ts` — `bindingOf`/`classOf`, the binding/class naming for generated code; runtime-safe
     (no Node imports) so the test worker can share it.
   - `src/index.ts` — barrel (`cloudflare`); `./worker` is a separate export for the runtime half.
-- `example/` — one dogfood app: `src/issue-review.ts` (the sandbox dogfood: a Linear issue-created
-  webhook whose trigger `handle` filters to created issues and returns the SDK-typed issue payload
-  as `ctx.params`, runs the pi coding agent in a Cloudflare Sandbox against the issue text, and
-  posts the review back with `@linear/sdk`'s `createComment`; the `@cloudflare/sandbox` value
-  import is dynamic inside the step because the Node CLI imports every workflow file to read its
-  def, and that package only loads on workerd), `runway.config.ts`
-  (`defineConfig({ backend: cloudflare({ sandbox: true }), workflows: ["src/issue-review.ts"] })`).
+- `example/` — one dogfood app: `.runway/workflows/issue-review.ts` (the sandbox dogfood: a Linear
+  issue-created webhook whose trigger `handle` filters to created issues and returns the SDK-typed
+  issue payload as `ctx.params`, runs the pi coding agent in a Cloudflare Sandbox against the issue
+  text, and posts the review back with `@linear/sdk`'s `createComment`; the `@cloudflare/sandbox`
+  value import is dynamic inside the step because the Node CLI imports every workflow file to read
+  its def, and that package only loads on workerd), `runway.config.ts`
+  (`defineConfig({ backend: cloudflare({ sandbox: true }) })`).
 - `pnpm-workspace.yaml` — workspace globs + the pinned dependency `catalog:`.
 
 ## Commands
@@ -139,23 +138,16 @@ pnpm workspace, three packages:
   core's `secretsOf(def.secrets, bindings)`, and inherits `ctx` for free — the CF backend's
   `worker.ts` is a few lines binding `step → step.do` and `sleep(ms) → step.sleep`. New backends
   (Vercel/Postgres) implement `Primitives` and get the rest.
-- Registration is an explicit array of workflow file paths in the config — no glob, no per-file scan,
-  no registration call. A workflow is one file that default-exports it:
-  `export default createWorkflow({ id: "hello", ... }).trigger(...).handler(...)`, one workflow per
-  file (no named `export const`, no barrel/re-export). The config names the backend + lists those files by path:
-  `runway.config.ts` = `defineConfig({ backend: cloudflare(), workflows: ["src/hello.ts"] })` — an
-  array of path STRINGS, so the config holds paths (not imported workflow values) and still imports
-  the Node backend without coupling it into the Worker. The CLI imports each listed path, takes its
-  `.default`, and validates it's a `__kind === "workflow"` (a clear build-time error if a listed file
-  forgot `export default createWorkflow(...)`) into `{ path, def }` pairs (the `Registry`); the CF
-  backend then codegens a Worker that emits one default import per path plus one named
-  `WorkflowEntrypoint` class per workflow bound by that import —
-  `import __w0 from "../src/hello.ts";` … `export class Hello extends toEntrypoint(__w0) {}` (each
-  `__wN` its own binding tied to a path; no `import * as`, no array indexing, no `__kind` filter at
-  codegen, no `!`). The router gets each trigger by reference (`trigger: __w0.trigger`), never a
-  JSON-serialized copy, so function-valued trigger options (`handle`) survive codegen. The `id` stays
-  the deploy-time identity (CF `workflow_name` and binding); the webhook trigger path is the public
-  route; the class name is derived from the id.
+- Registration is convention-based. The config names the backend and can optionally customize
+  repo-root-relative `include`/`exclude` globs; by default the CLI discovers `.runway/workflows/**/*.ts`
+  and excludes tests/specs/types. It imports each matched module, collects every default or named
+  export tagged `__kind === "workflow"`, dedupes the same workflow object through barrel re-exports,
+  validates duplicate ids, and passes `{ path, exportName, def }` pairs as the `Registry`; the CF
+  backend then codegens a Worker that namespace-imports modules and emits one named
+  `WorkflowEntrypoint` class per workflow export. The router gets each trigger by reference
+  (`trigger: __m0.default.trigger`), never a JSON-serialized copy, so function-valued trigger
+  options (`handle`) survive codegen. The `id` stays the deploy-time identity (CF `workflow_name`
+  and binding); the webhook trigger path is the public route; the class name is derived from the id.
 - Deploy = the typed `cloudflare` SDK + esbuild, no subprocess: `deploy` esbuild-bundles to one ESM
   module (`cloudflare:*`, `node:*`, and bare Node builtins external — workerd resolves them under
   `nodejs_compat` v2, which is always on (the Linear SDK needs bare `crypto` + `process.env` at

@@ -1,16 +1,18 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createWorkflow, cron, webhook } from "@runway/core";
 import type { Registry, WorkflowDefinition } from "@runway/core";
 import { expect, test } from "vitest";
 
+import { generateWorker } from "../src/codegen.ts";
 import { cloudflare } from "../src/deploy.ts";
 import type { CloudflareApi } from "../src/deploy.ts";
 
 const registry: Registry = [
   {
     path: "src/hello.ts",
+    exportName: "default",
     def: createWorkflow({ id: "hello", secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"] })
       .trigger(
         webhook({ path: "/hello", secret: "LINEAR_WEBHOOK_SECRET", header: "linear-signature" }),
@@ -19,15 +21,16 @@ const registry: Registry = [
   },
   {
     path: "src/daily.ts",
+    exportName: "daily",
     def: createWorkflow({ id: "daily" })
       .trigger(cron("0 9 * * *"))
       .handler(async () => {}),
   },
 ];
 
-const moduleOf = (def: WorkflowDefinition): string =>
+const moduleOf = (name: string, def: WorkflowDefinition): string =>
   `import { LinearClient } from "@linear/sdk";
-export default { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {
+export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {
   void LinearClient;
   await import("@cloudflare/sandbox");
 } };
@@ -40,7 +43,7 @@ const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }
   await mkdir(path.join(cwd, "src"));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
   for (const w of registry) {
-    await writeFile(path.join(cwd, w.path), moduleOf(w.def));
+    await writeFile(path.join(cwd, w.path), moduleOf(w.exportName, w.def));
   }
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
@@ -135,7 +138,6 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
   try {
     const result = await cloudflare({ client: () => client }).deploy(registry, {
       cwd: project.cwd,
-      outDir: path.join(project.cwd, ".runway"),
       env: deployEnv,
     });
 
@@ -163,10 +165,6 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       ["runway-ship-it", { account_id: "account", enabled: true }],
     ]);
     expect(calls.schedules).toEqual([{ cron: "0 9 * * *" }]);
-    const wrangler = JSON.parse(
-      await readFile(path.join(project.cwd, ".runway/wrangler.jsonc"), "utf8"),
-    ) as { triggers?: { crons: ReadonlyArray<string> } };
-    expect(wrangler.triggers).toEqual({ crons: ["0 9 * * *"] });
   } finally {
     await project.cleanup();
   }
@@ -181,7 +179,6 @@ test("deploy requires declared secrets before upload", async () => {
     await expect(
       cloudflare({ client: () => client }).deploy(registry, {
         cwd: project.cwd,
-        outDir: path.join(project.cwd, ".runway"),
         env: {
           CLOUDFLARE_API_TOKEN: "token",
           CLOUDFLARE_ACCOUNT_ID: "account",
@@ -211,7 +208,6 @@ test("deploy with sandbox provisions the container application", async () => {
   try {
     await cloudflare({ client: () => client, sandbox: true }).deploy(registry, {
       cwd: project.cwd,
-      outDir: path.join(project.cwd, ".runway"),
       env: deployEnv,
     });
 
@@ -240,24 +236,12 @@ test("deploy with sandbox provisions the container application", async () => {
         },
       },
     ]);
-    const worker = await readFile(path.join(project.cwd, ".runway/worker.gen.ts"), "utf8");
-    expect(worker).toContain('export { Sandbox } from "@cloudflare/sandbox";');
-    const wrangler = JSON.parse(
-      await readFile(path.join(project.cwd, ".runway/wrangler.jsonc"), "utf8"),
-    ) as Record<string, unknown>;
-    expect(wrangler.compatibility_flags).toEqual(["nodejs_compat"]);
-    expect(wrangler.containers).toEqual([
-      {
-        class_name: "Sandbox",
-        image: "docker.io/cloudflare/sandbox:0.12.1",
-        instance_type: "basic",
-        max_instances: 5,
-      },
-    ]);
-    expect(wrangler.durable_objects).toEqual({
-      bindings: [{ class_name: "Sandbox", name: "Sandbox" }],
+    const worker = generateWorker(registry, {
+      cwd: project.cwd,
+      outDir: project.cwd,
+      sandbox: true,
     });
-    expect(wrangler.migrations).toEqual([{ tag: "v1", new_sqlite_classes: ["Sandbox"] }]);
+    expect(worker).toContain('export { Sandbox } from "@cloudflare/sandbox";');
   } finally {
     await project.cleanup();
   }

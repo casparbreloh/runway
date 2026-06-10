@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -11,7 +11,6 @@ import {
   COMPATIBILITY_DATE,
   cronsOf,
   generateWorker,
-  generateWranglerConfig,
   SANDBOX_CLASS,
   SANDBOX_IMAGE,
 } from "./codegen.ts";
@@ -173,28 +172,36 @@ const validateBindings = (registry: Registry): void => {
 const build = async (
   registry: Registry,
   opts: DeployOptions,
-  scriptName: string,
   sandbox: boolean,
 ): Promise<Uint8Array> => {
   validateBindings(registry);
   opts.onProgress?.({ step: "build", status: "start" });
-  await mkdir(opts.outDir, { recursive: true });
-  const entry = path.join(opts.outDir, "worker.gen.ts");
-  await writeFile(entry, generateWorker(registry, { cwd: opts.cwd, outDir: opts.outDir, sandbox }));
-  await writeFile(
-    path.join(opts.outDir, "wrangler.jsonc"),
-    generateWranglerConfig(registry, { name: scriptName, main: path.basename(entry), sandbox }),
-  );
+  const entry = path.join(opts.cwd, "worker.gen.ts");
+  const worker = generateWorker(registry, { cwd: opts.cwd, outDir: opts.cwd, sandbox });
   const result = await esbuild({
-    entryPoints: [entry],
+    entryPoints: ["runway:worker"],
     bundle: true,
     format: "esm",
     platform: "browser",
     external: ["cloudflare:*", "node:*", ...builtinModules],
     write: false,
+    plugins: [
+      {
+        name: "runway-worker",
+        setup(build) {
+          build.onResolve({ filter: /^runway:worker$/ }, () => ({
+            path: entry,
+          }));
+          build.onLoad({ filter: /^.*\/worker\.gen\.ts$/ }, () => ({
+            contents: worker,
+            loader: "ts",
+            resolveDir: opts.cwd,
+          }));
+        },
+      },
+    ],
   });
   const contents = result.outputFiles[0]!.contents;
-  await writeFile(path.join(opts.outDir, "worker.js"), contents);
   opts.onProgress?.({ step: "build", status: "done" });
   return contents;
 };
@@ -217,7 +224,7 @@ const deploy = async (
 
   const sandbox = backendOpts.sandbox === true;
   const scriptName = await scriptNameOf(opts.cwd);
-  const contents = await build(registry, opts, scriptName, sandbox);
+  const contents = await build(registry, opts, sandbox);
   const cf: CloudflareApi = backendOpts.client?.({ apiToken }) ?? defaultClient(apiToken);
 
   opts.onProgress?.({ step: "deploy", status: "start" });
