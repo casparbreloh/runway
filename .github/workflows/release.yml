@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Read tool versions
+        id: tools
+        run: |
+          echo "node=$(node -p \"require('./package.json').engines.node.replace(/^[^0-9]*/, '')\")" >> "$GITHUB_OUTPUT"
+          echo "pnpm=$(node -p \"require('./package.json').devEngines.packageManager.version.replace(/^[^0-9]*/, '')\")" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.tools.outputs.pnpm }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.tools.outputs.node }}
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Create Release Pull Request or Publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset:version
+          publish: pnpm changeset:publish --provenance
+          title: "ci: version packages"
+          commit: "ci: changeset release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

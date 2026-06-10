@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "pnpm --filter \"./packages/**\" build",
+    "changeset": "changeset",
+    "changeset:version": "changeset version && pnpm install --no-frozen-lockfile && pnpm format",
+    "changeset:publish": "changeset publish",
     "format": "oxfmt",
     "format-check": "oxfmt --check",
     "lint": "oxlint",
@@ -11,26 +15,25 @@
     "typecheck": "tsgo --build"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "catalog:",
+    "@changesets/cli": "catalog:",
     "@types/node": "catalog:",
     "@typescript/native-preview": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.5.0"
-    },
-    "runtime": {
-      "name": "node",
-      "version": "^26"
+      "version": "^11",
+      "onFail": "download"
     }
   },
   "engines": {
     "node": "^26"
-  },
-  "packageManager": "pnpm@11.5.0"
+  }
 }

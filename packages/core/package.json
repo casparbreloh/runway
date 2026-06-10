@@ -1,12 +1,33 @@
 {
   "name": "@runway/core",
   "version": "0.1.0",
-  "bin": {
-    "runway": "./bin/runway.ts"
+  "description": "Workflow SDK for building coding automations and feedback loops",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/casparbreloh/runway.git",
+    "directory": "packages/core"
   },
+  "bin": {
+    "runway": "./dist/bin/runway.mjs"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
+  "sideEffects": false,
+  "types": "./dist/src/index.d.mts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "import": {
+        "types": "./dist/src/index.d.mts",
+        "default": "./dist/src/index.mjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts bin/runway.ts --dts --clean --tsconfig tsconfig.build.json"
   },
   "dependencies": {
     "citty": "catalog:"
