@@ -1,4 +1,4 @@
-export { makeCtx } from "./ctx.ts";
+export { makeCtx, secretsOf } from "./ctx.ts";
 export { cron, hmacSha256, webhook } from "./trigger.ts";
 export { createWorkflow, defineConfig } from "./workflow.ts";
 

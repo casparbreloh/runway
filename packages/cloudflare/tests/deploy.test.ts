@@ -17,6 +17,7 @@ const registry: Registry = [
         path: "/hello",
         auth: hmacSha256({ header: "linear-signature", secret: "LINEAR_WEBHOOK_SECRET" }),
       }),
+      secrets: ["LINEAR_API_KEY"],
     }).handler(async () => {}),
   },
   {
@@ -75,6 +76,7 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
         CLOUDFLARE_API_TOKEN: "token",
         CLOUDFLARE_ACCOUNT_ID: "account",
         LINEAR_WEBHOOK_SECRET: "secret-value",
+        LINEAR_API_KEY: "key-value",
       },
     });
 
@@ -83,6 +85,7 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
       { type: "workflow", name: "HELLO", workflow_name: "hello", class_name: "Hello" },
       { type: "workflow", name: "DAILY", workflow_name: "daily", class_name: "Daily" },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
+      { type: "secret_text", name: "LINEAR_API_KEY", text: "key-value" },
     ]);
     expect(calls.workflows).toEqual([
       ["hello", { account_id: "account", class_name: "Hello", script_name: "runway-ship-it" }],
@@ -101,7 +104,7 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
   }
 });
 
-test("deploy requires webhook secrets before upload", async () => {
+test("deploy requires webhook secrets and workflow secrets before upload", async () => {
   const project = await writeProject();
   let uploaded = false;
   const client: CloudflareApi = {
@@ -130,7 +133,7 @@ test("deploy requires webhook secrets before upload", async () => {
           CLOUDFLARE_ACCOUNT_ID: "account",
         },
       }),
-    ).rejects.toThrow(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET/);
+    ).rejects.toThrow(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/);
     expect(uploaded).toBe(false);
   } finally {
     await project.cleanup();

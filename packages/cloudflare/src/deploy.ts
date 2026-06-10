@@ -50,7 +50,10 @@ const scriptNameOf = async (cwd: string): Promise<string> => {
 
 const secretNamesOf = (registry: Registry): ReadonlyArray<string> => [
   ...new Set(
-    registry.flatMap((w) => (w.def.trigger.type === "webhook" ? [w.def.trigger.auth.secret] : [])),
+    registry.flatMap((w) => [
+      ...(w.def.trigger.type === "webhook" ? [w.def.trigger.auth.secret] : []),
+      ...w.def.secrets,
+    ]),
   ),
 ];
 
@@ -62,9 +65,8 @@ const validateBindings = (registry: Registry): void => {
   for (const secret of secretNamesOf(registry)) {
     const owner = names.get(secret);
     if (owner) {
-      throw new Error(`binding ${JSON.stringify(secret)} is used by ${owner} and a webhook secret`);
+      throw new Error(`binding ${JSON.stringify(secret)} is used by ${owner} and a secret`);
     }
-    names.set(secret, "webhook secret");
   }
 };
 
@@ -104,7 +106,7 @@ const deploy = async (
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
   const missingEnv = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", ...secrets].filter(
-    (name) => !env[name],
+    (name) => !Object.hasOwn(env, name) || !env[name],
   );
   if (missingEnv.length > 0) {
     throw new Error(`missing required env var(s): ${missingEnv.join(", ")}`);

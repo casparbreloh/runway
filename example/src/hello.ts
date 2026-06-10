@@ -10,8 +10,17 @@ export default createWorkflow({
       timestamp: { field: "webhookTimestamp", toleranceMs: 60_000 },
     }),
   }),
+  secrets: ["LINEAR_API_KEY"],
 }).handler(async (ctx) => {
-  const greeting = await ctx.step("greet", () => "hello");
+  const viewer = await ctx.step("viewer", async () => {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: ctx.secrets.LINEAR_API_KEY },
+      body: JSON.stringify({ query: "{ viewer { displayName } }" }),
+    });
+    const body = (await res.json()) as { data?: { viewer?: { displayName?: string } } };
+    return body.data?.viewer?.displayName ?? "anonymous";
+  });
   await ctx.sleep(5000);
-  await ctx.step("finish", () => `${greeting} world (run ${ctx.runId})`);
+  await ctx.step("finish", () => `hello ${viewer} (run ${ctx.runId})`);
 });

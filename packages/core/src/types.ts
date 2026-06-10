@@ -2,9 +2,10 @@ export interface StepContext {
   readonly id: string;
 }
 
-export interface Ctx {
+export interface Ctx<SecretName extends string = never> {
   readonly runId: string;
   readonly params: unknown;
+  readonly secrets: Readonly<Record<SecretName, string>>;
   step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
   sleep(ms: number): Promise<void>;
 }
@@ -52,20 +53,22 @@ export interface WebhookOptions {
   readonly auth: WebhookAuth;
 }
 
-export interface WorkflowOptions {
+export interface WorkflowOptions<SecretName extends string = never> {
   readonly id: string;
   readonly trigger: WorkflowTrigger;
+  readonly secrets?: ReadonlyArray<SecretName>;
 }
 
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
   readonly trigger: WorkflowTrigger;
-  readonly handler: (ctx: Ctx) => void | Promise<void>;
+  readonly secrets: ReadonlyArray<string>;
+  readonly handler: (ctx: Ctx<string>) => void | Promise<void>;
 }
 
-export interface WorkflowBuilder {
-  handler(fn: (ctx: Ctx) => void | Promise<void>): WorkflowDefinition;
+export interface WorkflowBuilder<SecretName extends string = never> {
+  handler(fn: (ctx: Ctx<SecretName>) => void | Promise<void>): WorkflowDefinition;
 }
 
 export interface Primitives {

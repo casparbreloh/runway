@@ -8,6 +8,7 @@ import { defineCommand, runMain } from "citty";
 import pkg from "../package.json" with { type: "json" };
 import { validateTrigger } from "../src/trigger.ts";
 import type { ProgressEvent, Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
+import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
   load: { start: "Loading", done: "Loaded" },
@@ -54,7 +55,8 @@ const spinner = () => {
 const isWorkflow = (value: unknown): value is WorkflowDefinition =>
   typeof value === "object" &&
   value !== null &&
-  (value as { __kind?: unknown }).__kind === "workflow";
+  (value as { __kind?: unknown }).__kind === "workflow" &&
+  Array.isArray((value as { secrets?: unknown }).secrets);
 
 const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
   const mod = (await import(pathToFileURL(resolve(cwd, "runway.config.ts")).href)) as {
@@ -71,6 +73,7 @@ const loadRegistry = async (cwd: string, workflows: ReadonlyArray<string>): Prom
         throw new Error(`${path}: expected "export default createWorkflow(...)"`);
       }
       validateTrigger(mod.default.trigger);
+      validateSecrets(mod.default.secrets);
       return { path, def: mod.default };
     }),
   );
