@@ -6,5 +6,5 @@
     "declarationDir": "../../.tsbuild/core",
     "tsBuildInfoFile": "../../.tsbuild/core.tsbuildinfo"
   },
-  "include": ["src", "bin", "tests", "vitest.config.ts"]
+  "include": ["src", "bin", "tests", "vitest.config.ts", "package.json"]
 }

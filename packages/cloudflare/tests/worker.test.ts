@@ -41,11 +41,35 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
   expect(seen).toEqual([{ ok: true }, { cron: "0 9 * * *", scheduledTime: 42 }]);
 });
 
+test("verifies prefixed signatures and rejects stale timestamps", async () => {
+  const stamped = createWorkflow({
+    id: "stamped",
+    trigger: webhook({
+      path: "/stamped",
+      auth: hmacSha256({
+        header: "x-hub-signature-256",
+        secret: "GITHUB_WEBHOOK_SECRET",
+        prefix: "sha256=",
+        timestamp: { field: "webhookTimestamp", toleranceMs: 60_000 },
+      }),
+    }),
+  }).handler(async () => {});
+  const worker = createTestWorker([stamped], {
+    secrets: { GITHUB_WEBHOOK_SECRET: "test-secret" },
+  });
+
+  const fresh = await worker.webhook("stamped", { webhookTimestamp: Date.now() });
+  const stale = await worker.webhook("stamped", { webhookTimestamp: Date.now() - 120_000 });
+
+  expect(fresh.status).toBe(202);
+  expect(stale.status).toBe(401);
+  expect(worker.runs).toHaveLength(1);
+});
+
 test("rejects unsigned webhooks before parsing the body", async () => {
   const calls: unknown[] = [];
   const router = createRouter([
     {
-      id: "hello",
       binding: "HELLO",
       trigger: {
         type: "webhook",

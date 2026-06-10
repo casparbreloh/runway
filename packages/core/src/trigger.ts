@@ -1,6 +1,5 @@
-import type { RawHmacSha256WebhookAuthConfig, WebhookAuth, WorkflowTrigger } from "./types.ts";
+import type { HmacSha256Options, WebhookAuth, WebhookOptions, WorkflowTrigger } from "./types.ts";
 
-const PATH = /^\//;
 const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const validateTrigger = (trigger: WorkflowTrigger): void => {
@@ -8,7 +7,7 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
     throw new Error("invalid workflow cron trigger: expression is required");
   }
   if (trigger.type === "webhook") {
-    if (!PATH.test(trigger.path)) {
+    if (!trigger.path.startsWith("/")) {
       throw new Error(
         `invalid workflow trigger path ${JSON.stringify(trigger.path)}: must start with "/"`,
       );
@@ -35,10 +34,9 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
   }
 };
 
-export const webhook = (config: { path: string; auth: WebhookAuth }): WorkflowTrigger => ({
+export const webhook = (options: WebhookOptions): WorkflowTrigger => ({
   type: "webhook",
-  path: config.path,
-  auth: config.auth,
+  ...options,
 });
 
 export const cron = (expression: string): WorkflowTrigger => ({
@@ -46,21 +44,12 @@ export const cron = (expression: string): WorkflowTrigger => ({
   cron: expression,
 });
 
-export const hmacSha256 = (config: RawHmacSha256WebhookAuthConfig): WebhookAuth => {
-  const base = {
-    type: "raw-hmac-sha256" as const,
-    header: config.header,
-    secret: config.secret,
-  };
-  const prefixed = config.prefix ? { ...base, prefix: config.prefix } : base;
-  return config.timestamp
-    ? {
-        ...prefixed,
-        timestamp: {
-          source: config.timestamp.source ?? "body",
-          field: config.timestamp.field,
-          toleranceMs: config.timestamp.toleranceMs,
-        },
-      }
-    : prefixed;
-};
+export const hmacSha256 = (options: HmacSha256Options): WebhookAuth => ({
+  type: "raw-hmac-sha256",
+  header: options.header,
+  secret: options.secret,
+  ...(options.prefix ? { prefix: options.prefix } : {}),
+  ...(options.timestamp
+    ? { timestamp: { ...options.timestamp, source: options.timestamp.source ?? "body" } }
+    : {}),
+});

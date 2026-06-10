@@ -1,9 +1,8 @@
 import { makeCtx } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
-import { createRouter, hmacSha256 } from "../src/router.ts";
-
-const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+import { bindingOf } from "../src/naming.ts";
+import { createRouter, hmacSha256Hex } from "../src/router.ts";
 
 export interface TestRun {
   readonly id: string;
@@ -40,7 +39,6 @@ export const createTestWorker = (
   const runs: TestRun[] = [];
   const executions: Promise<void>[] = [];
   const entries = workflows.map((def) => ({
-    id: def.id,
     binding: bindingOf(def.id),
     trigger: def.trigger,
   }));
@@ -80,7 +78,7 @@ export const createTestWorker = (
       const secret = opts.secrets?.[def.trigger.auth.secret];
       if (!secret) throw new Error(`missing test secret: ${def.trigger.auth.secret}`);
       const body = JSON.stringify(params);
-      const signature = await hmacSha256(secret, body);
+      const signature = await hmacSha256Hex(secret, body);
       const headers = new Headers(webhookOpts.headers);
       headers.set("content-type", headers.get("content-type") ?? "application/json");
       headers.set(def.trigger.auth.header, `${def.trigger.auth.prefix ?? ""}${signature}`);

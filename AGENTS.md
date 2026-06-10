@@ -14,13 +14,13 @@ land later without touching a workflow.
 pnpm workspace, three packages:
 
 - `packages/core/` — `@runway/core`, the portable SDK (`import { createWorkflow, defineConfig } from
-"@runway/core"`) plus the CLI (the `runway` bin lives here: `bin/runway.ts` + `cli/`). Web-Standards
+"@runway/core"`) plus the CLI (the `runway` bin lives here: `bin/runway.ts`). Web-Standards
   only, no CF deps.
   - `src/types.ts` — the type home: `Ctx` (`runId`/`params`/`step`/`sleep`), `StepContext`,
     `WorkflowDefinition`/`WorkflowBuilder`, the `Primitives` per-backend contract (`step<T>(id, fn)` +
     `sleep(id, ms)`), `RegisteredWorkflow { path, def }` + the `Registry` type
-    (`ReadonlyArray<RegisteredWorkflow>`), `WorkflowTrigger` (`webhook`/`cron`), the `Backend`
-    interface + build/deploy option types, and `RunwayConfig`
+    (`ReadonlyArray<RegisteredWorkflow>`), `WorkflowTrigger` (`WebhookTrigger | CronTrigger`), the
+    `Backend` interface (just `deploy`) + deploy option types, and `RunwayConfig`
     (`{ backend, workflows: ReadonlyArray<string> }`).
   - `src/workflow.ts` — `createWorkflow` (the builder; tags the def with `__kind: "workflow"`) and
     `defineConfig`.
@@ -51,7 +51,9 @@ pnpm workspace, three packages:
     `import __w0 from "../src/hello.ts";` — then one `WorkflowEntrypoint` class per workflow bound by
     that default import, class name derived from the id —
     `export class Hello extends toEntrypoint(__w0) {}` — + the trigger router), `.runway/wrangler.jsonc`,
-    and local naming helpers for generated bindings/classes.
+    and the shared `COMPATIBILITY_DATE`.
+  - `src/naming.ts` — `bindingOf`/`classOf`, the binding/class naming for generated code; runtime-safe
+    (no Node imports) so the test worker can share it.
   - `src/index.ts` — barrel (`cloudflare`); `./worker` is a separate export for the runtime half.
 - `example/` — one dogfood app: `src/hello.ts` (default-exports a workflow with a required trigger:
   `export default createWorkflow({ id: "hello", trigger: webhook(...) }).handler(...)`), `runway.config.ts`
