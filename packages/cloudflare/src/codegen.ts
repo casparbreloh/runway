@@ -2,27 +2,18 @@ import path from "node:path";
 
 import type { Registry } from "@runway/core";
 
-export const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+import { bindingOf, classOf } from "./naming.ts";
 
-export const classOf = (id: string): string =>
-  id
-    .split(/[^A-Za-z0-9]+/)
-    .filter(Boolean)
-    .map((s) => s[0]!.toUpperCase() + s.slice(1))
-    .join("");
+export const COMPATIBILITY_DATE = "2026-06-06";
+
+export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
+  registry.flatMap((w) => (w.def.trigger.type === "cron" ? [w.def.trigger.cron] : []));
 
 const toPosix = (p: string): string => p.split(path.sep).join(path.posix.sep);
 
 const relImport = (outDir: string, module: string): string => {
   const rel = path.posix.relative(toPosix(outDir), toPosix(module));
   return rel.startsWith(".") ? rel : `./${rel}`;
-};
-
-const triggerOf = (trigger: Registry[number]["def"]["trigger"]): string => {
-  if (trigger.type === "cron") {
-    return `{ type: "cron", cron: ${JSON.stringify(trigger.cron)} }`;
-  }
-  return `{ type: "webhook", path: ${JSON.stringify(trigger.path)}, auth: ${JSON.stringify(trigger.auth)} }`;
 };
 
 const validateRegistry = (registry: Registry): void => {
@@ -64,7 +55,7 @@ export const generateWorker = (
   const routes = registry
     .map(
       (w) =>
-        `  { id: ${JSON.stringify(w.def.id)}, binding: ${JSON.stringify(bindingOf(w.def.id))}, trigger: ${triggerOf(w.def.trigger)} },`,
+        `  { binding: ${JSON.stringify(bindingOf(w.def.id))}, trigger: ${JSON.stringify(w.def.trigger)} },`,
     )
     .join("\n");
   return `${imports}
@@ -82,22 +73,17 @@ export const generateWranglerConfig = (
   registry: Registry,
   opts: { name: string; main: string },
 ): string => {
-  const workflows = registry.map((w) => {
-    return {
-      name: w.def.id,
-      binding: bindingOf(w.def.id),
-      class_name: classOf(w.def.id),
-    };
-  });
-  const crons = registry
-    .map((w) => w.def.trigger)
-    .filter((trigger) => trigger.type === "cron")
-    .map((trigger) => trigger.cron);
+  const workflows = registry.map((w) => ({
+    name: w.def.id,
+    binding: bindingOf(w.def.id),
+    class_name: classOf(w.def.id),
+  }));
+  const crons = cronsOf(registry);
   return `${JSON.stringify(
     {
       name: opts.name,
       main: opts.main,
-      compatibility_date: "2026-06-06",
+      compatibility_date: COMPATIBILITY_DATE,
       workflows,
       ...(crons.length > 0 ? { triggers: { crons } } : {}),
     },

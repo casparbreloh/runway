@@ -1,83 +1,43 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { Registry } from "@runway/core";
+import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
+import type { Registry, WorkflowDefinition } from "@runway/core";
 import { expect, test } from "vitest";
 
 import { cloudflare } from "../src/deploy.ts";
 import type { CloudflareApi } from "../src/deploy.ts";
 
-const writeProject = async (): Promise<{
-  cwd: string;
-  registry: Registry;
-  cleanup(): Promise<void>;
-}> => {
+const registry: Registry = [
+  {
+    path: "src/hello.ts",
+    def: createWorkflow({
+      id: "hello",
+      trigger: webhook({
+        path: "/hello",
+        auth: hmacSha256({ header: "linear-signature", secret: "LINEAR_WEBHOOK_SECRET" }),
+      }),
+    }).handler(async () => {}),
+  },
+  {
+    path: "src/daily.ts",
+    def: createWorkflow({ id: "daily", trigger: cron("0 9 * * *") }).handler(async () => {}),
+  },
+];
+
+const moduleOf = (def: WorkflowDefinition): string =>
+  `export default { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
+
+const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
   const cwd = await mkdtemp(
     path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-deploy-test-"),
   );
   await mkdir(path.join(cwd, "src"));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
-  await writeFile(
-    path.join(cwd, "src/hello.ts"),
-    `export default {
-  __kind: "workflow",
-  id: "hello",
-  trigger: {
-    type: "webhook",
-    path: "/hello",
-    auth: {
-      type: "raw-hmac-sha256",
-      header: "linear-signature",
-      secret: "LINEAR_WEBHOOK_SECRET"
-    }
-  },
-  handler: async () => {}
-};
-`,
-  );
-  await writeFile(
-    path.join(cwd, "src/daily.ts"),
-    `export default {
-  __kind: "workflow",
-  id: "daily",
-  trigger: { type: "cron", cron: "0 9 * * *" },
-  handler: async () => {}
-};
-`,
-  );
-
-  return {
-    cwd,
-    registry: [
-      {
-        path: "src/hello.ts",
-        def: {
-          __kind: "workflow",
-          id: "hello",
-          trigger: {
-            type: "webhook",
-            path: "/hello",
-            auth: {
-              type: "raw-hmac-sha256",
-              header: "linear-signature",
-              secret: "LINEAR_WEBHOOK_SECRET",
-            },
-          },
-          handler: async () => {},
-        },
-      },
-      {
-        path: "src/daily.ts",
-        def: {
-          __kind: "workflow",
-          id: "daily",
-          trigger: { type: "cron", cron: "0 9 * * *" },
-          handler: async () => {},
-        },
-      },
-    ],
-    cleanup: () => rm(cwd, { recursive: true, force: true }),
-  };
+  for (const w of registry) {
+    await writeFile(path.join(cwd, w.path), moduleOf(w.def));
+  }
+  return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
 test("deploy uploads workflow bindings, webhook secrets, and cron schedules", async () => {
@@ -92,14 +52,10 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
       scripts: {
         update: async (...args) => {
           calls.script = args;
-          return {} as Awaited<ReturnType<CloudflareApi["workers"]["scripts"]["update"]>>;
         },
         schedules: {
           update: async (...args) => {
             calls.schedules = args;
-            return {} as Awaited<
-              ReturnType<CloudflareApi["workers"]["scripts"]["schedules"]["update"]>
-            >;
           },
         },
       },
@@ -107,13 +63,12 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
     workflows: {
       update: async (...args) => {
         calls.workflows.push(args);
-        return {} as Awaited<ReturnType<CloudflareApi["workflows"]["update"]>>;
       },
     },
   };
 
   try {
-    await cloudflare({ client: () => client }).deploy(project.registry, {
+    await cloudflare({ client: () => client }).deploy(registry, {
       cwd: project.cwd,
       outDir: path.join(project.cwd, ".runway"),
       env: {
@@ -154,22 +109,20 @@ test("deploy requires webhook secrets before upload", async () => {
       scripts: {
         update: async () => {
           uploaded = true;
-          return {} as Awaited<ReturnType<CloudflareApi["workers"]["scripts"]["update"]>>;
         },
         schedules: {
-          update: async () =>
-            ({}) as Awaited<ReturnType<CloudflareApi["workers"]["scripts"]["schedules"]["update"]>>,
+          update: async () => {},
         },
       },
     },
     workflows: {
-      update: async () => ({}) as Awaited<ReturnType<CloudflareApi["workflows"]["update"]>>,
+      update: async () => {},
     },
   };
 
   try {
     await expect(
-      cloudflare({ client: () => client }).deploy(project.registry, {
+      cloudflare({ client: () => client }).deploy(registry, {
         cwd: project.cwd,
         outDir: path.join(project.cwd, ".runway"),
         env: {

@@ -9,19 +9,21 @@ export interface Ctx {
   sleep(ms: number): Promise<void>;
 }
 
-export type WebhookAuth = {
+export interface WebhookTimestamp {
+  readonly source: "body" | "header";
+  readonly field: string;
+  readonly toleranceMs: number;
+}
+
+export interface WebhookAuth {
   readonly type: "raw-hmac-sha256";
   readonly header: string;
   readonly secret: string;
   readonly prefix?: string;
-  readonly timestamp?: {
-    readonly source: "body" | "header";
-    readonly field: string;
-    readonly toleranceMs: number;
-  };
-};
+  readonly timestamp?: WebhookTimestamp;
+}
 
-export interface RawHmacSha256WebhookAuthConfig {
+export interface HmacSha256Options {
   readonly header: string;
   readonly secret: string;
   readonly prefix?: string;
@@ -32,16 +34,28 @@ export interface RawHmacSha256WebhookAuthConfig {
   };
 }
 
-export type WorkflowTrigger =
-  | {
-      readonly type: "webhook";
-      readonly path: string;
-      readonly auth: WebhookAuth;
-    }
-  | {
-      readonly type: "cron";
-      readonly cron: string;
-    };
+export interface WebhookTrigger {
+  readonly type: "webhook";
+  readonly path: string;
+  readonly auth: WebhookAuth;
+}
+
+export interface CronTrigger {
+  readonly type: "cron";
+  readonly cron: string;
+}
+
+export type WorkflowTrigger = WebhookTrigger | CronTrigger;
+
+export interface WebhookOptions {
+  readonly path: string;
+  readonly auth: WebhookAuth;
+}
+
+export interface WorkflowOptions {
+  readonly id: string;
+  readonly trigger: WorkflowTrigger;
+}
 
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
@@ -75,17 +89,11 @@ export interface DeployOptions {
   readonly cwd: string;
   readonly outDir: string;
   readonly env?: Record<string, string | undefined>;
-  onProgress?(event: ProgressEvent): void;
-}
-
-export interface DeployResult {
-  readonly ok: boolean;
-  readonly url?: string;
+  readonly onProgress?: (event: ProgressEvent) => void;
 }
 
 export interface Backend {
-  readonly name: string;
-  deploy(registry: Registry, opts: DeployOptions): Promise<DeployResult>;
+  deploy(registry: Registry, opts: DeployOptions): Promise<void>;
 }
 
 export interface RunwayConfig {
