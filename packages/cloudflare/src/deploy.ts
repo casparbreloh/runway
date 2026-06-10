@@ -177,7 +177,7 @@ const build = async (
   validateBindings(registry);
   opts.onProgress?.({ step: "build", status: "start" });
   const entry = path.join(opts.cwd, "worker.gen.ts");
-  const worker = generateWorker(registry, { cwd: opts.cwd, outDir: opts.cwd, sandbox });
+  const worker = generateWorker(registry, { cwd: opts.cwd, sandbox });
   const result = await esbuild({
     entryPoints: ["runway:worker"],
     bundle: true,

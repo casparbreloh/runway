@@ -15,8 +15,8 @@ export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
 
 const toPosix = (p: string): string => p.split(path.sep).join(path.posix.sep);
 
-const relImport = (outDir: string, module: string): string => {
-  const rel = path.posix.relative(toPosix(outDir), toPosix(module));
+const relImport = (cwd: string, module: string): string => {
+  const rel = path.posix.relative(toPosix(cwd), toPosix(module));
   return rel.startsWith(".") ? rel : `./${rel}`;
 };
 
@@ -47,13 +47,13 @@ const workflowRef = (index: number, exportName: string): string =>
 
 export const generateWorker = (
   registry: Registry,
-  opts: { cwd: string; outDir: string; sandbox?: boolean },
+  opts: { cwd: string; sandbox?: boolean },
 ): string => {
   validateRegistry(registry);
   const imports = registry
     .map(
       (w, i) =>
-        `import * as __m${i} from ${JSON.stringify(relImport(opts.outDir, path.resolve(opts.cwd, w.path)))};`,
+        `import * as __m${i} from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, w.path)))};`,
     )
     .join("\n");
   const classes = registry

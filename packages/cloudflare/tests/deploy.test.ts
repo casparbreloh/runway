@@ -236,11 +236,7 @@ test("deploy with sandbox provisions the container application", async () => {
         },
       },
     ]);
-    const worker = generateWorker(registry, {
-      cwd: project.cwd,
-      outDir: project.cwd,
-      sandbox: true,
-    });
+    const worker = generateWorker(registry, { cwd: project.cwd, sandbox: true });
     expect(worker).toContain('export { Sandbox } from "@cloudflare/sandbox";');
   } finally {
     await project.cleanup();
