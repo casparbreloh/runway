@@ -1,4 +1,4 @@
-import { makeCtx } from "@runway/core";
+import { makeCtx, secretsOf } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
@@ -17,7 +17,13 @@ export const toEntrypoint = (
   class extends WorkflowEntrypoint<unknown, unknown> {
     override run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       return Promise.resolve(
-        def.handler(makeCtx(primitives(step), { runId: event.instanceId, params: event.payload })),
+        def.handler(
+          makeCtx(primitives(step), {
+            runId: event.instanceId,
+            params: event.payload,
+            secrets: secretsOf(def.secrets, this.env),
+          }),
+        ),
       );
     }
   };

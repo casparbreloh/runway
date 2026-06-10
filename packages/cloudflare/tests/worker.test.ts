@@ -15,18 +15,23 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
         secret: "LINEAR_WEBHOOK_SECRET",
       }),
     }),
+    secrets: ["LINEAR_API_KEY"],
   }).handler(async (ctx) => {
-    seen.push(await ctx.step("record", () => ctx.params));
+    seen.push(
+      await ctx.step("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: ctx.params })),
+    );
     await ctx.sleep(10);
   });
   const daily = createWorkflow({
     id: "daily",
     trigger: cron("0 9 * * *"),
   }).handler((ctx) => {
+    // @ts-expect-error secrets must be declared on the workflow
+    void ctx.secrets.LINEAR_API_KEY;
     seen.push(ctx.params);
   });
   const worker = createTestWorker([hello, daily], {
-    secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
+    secrets: { LINEAR_WEBHOOK_SECRET: "test-secret", LINEAR_API_KEY: "lin_api_test" },
   });
 
   const res = await worker.webhook("hello", { ok: true });
@@ -38,7 +43,10 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
     { id: "hello-1", workflowId: "hello", params: { ok: true } },
     { id: "daily-2", workflowId: "daily", params: { cron: "0 9 * * *", scheduledTime: 42 } },
   ]);
-  expect(seen).toEqual([{ ok: true }, { cron: "0 9 * * *", scheduledTime: 42 }]);
+  expect(seen).toEqual([
+    { key: "lin_api_test", params: { ok: true } },
+    { cron: "0 9 * * *", scheduledTime: 42 },
+  ]);
 });
 
 test("verifies prefixed signatures and rejects stale timestamps", async () => {
@@ -64,6 +72,27 @@ test("verifies prefixed signatures and rejects stale timestamps", async () => {
   expect(fresh.status).toBe(202);
   expect(stale.status).toBe(401);
   expect(worker.runs).toHaveLength(1);
+});
+
+test("accepts the webhook but fails the run when a declared secret is missing", async () => {
+  const needy = createWorkflow({
+    id: "needy",
+    trigger: webhook({
+      path: "/needy",
+      auth: hmacSha256({ header: "x-signature", secret: "NEEDY_WEBHOOK_SECRET" }),
+    }),
+    secrets: ["NEEDY_API_KEY"],
+  }).handler(async (ctx) => {
+    void ctx.secrets.NEEDY_API_KEY;
+  });
+  const worker = createTestWorker([needy], {
+    secrets: { NEEDY_WEBHOOK_SECRET: "test-secret" },
+  });
+
+  const res = await worker.webhook("needy");
+
+  expect(res.status).toBe(202);
+  await expect(worker.executions[0]).rejects.toThrow("missing secret: NEEDY_API_KEY");
 });
 
 test("rejects unsigned webhooks before parsing the body", async () => {

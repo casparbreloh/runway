@@ -1,4 +1,4 @@
-import { makeCtx } from "@runway/core";
+import { makeCtx, secretsOf } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
 import { bindingOf } from "../src/naming.ts";
@@ -55,9 +55,13 @@ export const createTestWorker = (
       create: async ({ params }) => {
         const id = `${def.id}-${runs.length + 1}`;
         runs.push({ id, workflowId: def.id, params });
-        const execution = Promise.resolve(
-          def.handler(makeCtx(primitives, { runId: id, params })),
-        ).then(() => undefined);
+        const execution = Promise.resolve()
+          .then(() =>
+            def.handler(
+              makeCtx(primitives, { runId: id, params, secrets: secretsOf(def.secrets, env) }),
+            ),
+          )
+          .then(() => undefined);
         execution.catch(() => undefined);
         executions.push(execution);
         return { id };

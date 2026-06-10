@@ -1,4 +1,4 @@
-import { validateTrigger } from "./trigger.ts";
+import { BINDING, validateTrigger } from "./trigger.ts";
 import type {
   RunwayConfig,
   WorkflowBuilder,
@@ -8,17 +8,36 @@ import type {
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
-export const createWorkflow = (options: WorkflowOptions): WorkflowBuilder => {
+export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): void => {
+  const seen = new Set<string>();
+  for (const name of secrets ?? []) {
+    if (!BINDING.test(name)) {
+      throw new Error(
+        `invalid workflow secret ${JSON.stringify(name)}: must be a valid binding name`,
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`duplicate workflow secret ${JSON.stringify(name)}`);
+    }
+    seen.add(name);
+  }
+};
+
+export const createWorkflow = <SecretName extends string = never>(
+  options: WorkflowOptions<SecretName>,
+): WorkflowBuilder<SecretName> => {
   if (!ID.test(options.id)) {
     throw new Error(`invalid workflow id ${JSON.stringify(options.id)}: must be kebab-case`);
   }
   validateTrigger(options.trigger);
+  validateSecrets(options.secrets);
   return {
     handler: (fn): WorkflowDefinition => ({
       __kind: "workflow",
       id: options.id,
       trigger: options.trigger,
-      handler: fn,
+      secrets: options.secrets ?? [],
+      handler: fn as WorkflowDefinition["handler"],
     }),
   };
 };

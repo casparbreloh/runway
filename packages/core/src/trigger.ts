@@ -1,6 +1,6 @@
 import type { HmacSha256Options, WebhookAuth, WebhookOptions, WorkflowTrigger } from "./types.ts";
 
-const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const validateTrigger = (trigger: WorkflowTrigger): void => {
   if (trigger.type === "cron" && trigger.cron.trim().length === 0) {

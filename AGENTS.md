@@ -16,18 +16,21 @@ pnpm workspace, three packages:
 - `packages/core/` — `@runway/core`, the portable SDK (`import { createWorkflow, defineConfig } from
 "@runway/core"`) plus the CLI (the `runway` bin lives here: `bin/runway.ts`). Web-Standards
   only, no CF deps.
-  - `src/types.ts` — the type home: `Ctx` (`runId`/`params`/`step`/`sleep`), `StepContext`,
+  - `src/types.ts` — the type home: `Ctx` (`runId`/`params`/`secrets`/`step`/`sleep`), `StepContext`,
     `WorkflowDefinition`/`WorkflowBuilder`, the `Primitives` per-backend contract (`step<T>(id, fn)` +
     `sleep(id, ms)`), `RegisteredWorkflow { path, def }` + the `Registry` type
     (`ReadonlyArray<RegisteredWorkflow>`), `WorkflowTrigger` (`WebhookTrigger | CronTrigger`), the
     `Backend` interface (just `deploy`) + deploy option types, and `RunwayConfig`
     (`{ backend, workflows: ReadonlyArray<string> }`).
-  - `src/workflow.ts` — `createWorkflow` (the builder; tags the def with `__kind: "workflow"`) and
-    `defineConfig`.
+  - `src/workflow.ts` — `createWorkflow` (the builder; tags the def with `__kind: "workflow"`,
+    validates declared secret names) and `defineConfig`.
   - `src/trigger.ts` — trigger authoring helpers: `webhook({ path, auth })`, `cron(expression)`, and
     `hmacSha256({ header, secret, prefix?, timestamp? })`; `secret` is the env/binding name.
-  - `src/ctx.ts` — `makeCtx(primitives, { runId })` assembles `ctx` from a backend's two primitives;
-    it auto-names each `sleep` positionally so the user passes only ms.
+  - `src/ctx.ts` — `makeCtx(primitives, { runId, secrets })` assembles `ctx` from a backend's two
+    primitives; it auto-names each `sleep` positionally so the user passes only ms. Also `secretsOf`
+    (pick a workflow's declared secret names from a backend's bindings record, throwing
+    `missing secret: NAME` on a miss) — `secrets` is required on `makeCtx` so a backend can't
+    forget to wire it.
   - `src/index.ts` — public barrel.
   - `bin/runway.ts` — the citty CLI: load `runway.config.ts`, map over `config.workflows` (the path
     array) importing each path and taking its `.default`, validate each is a `__kind === "workflow"`
@@ -36,8 +39,9 @@ pnpm workspace, three packages:
 - `packages/cloudflare/` — `@runway/cloudflare`, the one backend, in two halves:
   - `src/worker.ts` — the **runtime half** (`@runway/cloudflare/worker`, runs on workerd):
     `toEntrypoint` (→ a CF `WorkflowEntrypoint` class) implements `Primitives` over CF's
-    `WorkflowStep` — `step → step.do`, `sleep(ms) → step.sleep` — then defers to core's `makeCtx`;
-    re-exports `createRouter` from `router.ts`. The generated Worker imports this.
+    `WorkflowStep` — `step → step.do`, `sleep(ms) → step.sleep` — picks the workflow's declared
+    secrets off the Worker env (core's `secretsOf`) and defers to core's `makeCtx`; re-exports
+    `createRouter` from `router.ts`. The generated Worker imports this.
   - `src/router.ts` — trigger routing and local-testable runtime code with no `cloudflare:workers`
     import: POST webhook paths verify HMAC auth before JSON parsing, cron events dispatch by cron
     expression, and both call `env[binding].create({ params })`.
@@ -45,8 +49,8 @@ pnpm workspace, three packages:
     signs webhook requests, dispatches cron events, runs handlers with in-memory `step`/`sleep`, and
     records started runs/executions.
   - `src/deploy.ts` — the **deploy half** (`cloudflare(): Backend`, runs on Node): validates
-    required webhook secret env vars, codegens the Worker + `.runway/wrangler.jsonc`, esbuild-bundles
-    it, and uploads via the typed `cloudflare` SDK.
+    required secret env vars (webhook secrets + workflow-declared `secrets`), codegens the Worker +
+    `.runway/wrangler.jsonc`, esbuild-bundles it, and uploads via the typed `cloudflare` SDK.
   - `src/codegen.ts` — emits the Worker entry (one default import per workflow path —
     `import __w0 from "../src/hello.ts";` — then one `WorkflowEntrypoint` class per workflow bound by
     that default import, class name derived from the id —
@@ -68,25 +72,34 @@ pnpm workspace, three packages:
     (package-owned Vitest tests; Cloudflare runtime tests use `@cloudflare/vitest-pool-workers`)
 - The `runway` CLI (shipped by `@runway/core`) only exposes `runway deploy`. Deploy internally
   codegens/bundles before upload. A live deploy needs `CLOUDFLARE_API_TOKEN` +
-  `CLOUDFLARE_ACCOUNT_ID` plus any webhook secret env vars named by triggers.
+  `CLOUDFLARE_ACCOUNT_ID` plus env vars for any webhook secrets named by triggers and any
+  workflow-declared `secrets`.
 
 ## Conventions
 
 - Keep `example/` typechecking; package tests prove the CLI/deploy/codegen path. Code is
   comment-free — match it.
-- Authoring API: `createWorkflow({ id, trigger }).handler(async (ctx) => ...)`. Trigger is required;
-  there is no default public start endpoint. The handler is fire-and-forget (returns nothing). `ctx`
-  is just `{ runId, params, step, sleep }`: `runId` (the run instance id), `params` (trigger payload),
-  `step(id, fn)` (a memoized durable step; `fn` gets `{ id }`; the id is the idempotency key), and
-  `sleep(ms)` (durable sleep; just a number of ms — no id, no duration string). `step` is NAMED — CF
-  needs a stable name and named is replay-safe; `sleep` is auto-named positionally by core. The only
-  durable primitives are `ctx.step` and `ctx.sleep`; anything else (an HTTP call) is plain TS wrapped
-  inside a `ctx.step`.
-- Core owns the durable-execution contract: `makeCtx(primitives, { runId })` builds the whole `ctx`
-  in `@runway/core`, auto-naming each `sleep` positionally. A backend implements only the thin
-  `Primitives` contract (`step<T>(id, fn)` + `sleep(id, ms)`) and inherits `ctx` for free — the CF
-  backend's `worker.ts` is a few lines binding `step → step.do` and `sleep(ms) → step.sleep`. New
-  backends (Vercel/Postgres) implement `Primitives` and get the rest.
+- Authoring API: `createWorkflow({ id, trigger, secrets? }).handler(async (ctx) => ...)`. Trigger is
+  required; there is no default public start endpoint. The handler is fire-and-forget (returns
+  nothing). `ctx` is just `{ runId, params, secrets, step, sleep }`: `runId` (the run instance id),
+  `params` (trigger payload), `secrets` (the declared secrets, see below), `step(id, fn)` (a memoized
+  durable step; `fn` gets `{ id }`; the id is the idempotency key), and `sleep(ms)` (durable sleep;
+  just a number of ms — no id, no duration string). `step` is NAMED — CF needs a stable name and
+  named is replay-safe; `sleep` is auto-named positionally by core. The only durable primitives are
+  `ctx.step` and `ctx.sleep`; anything else (an HTTP call) is plain TS wrapped inside a `ctx.step`.
+- Workflow secrets are declared, typed, and deploy-gated: `secrets: ["LINEAR_API_KEY"]` on
+  `createWorkflow` names the secrets the handler needs (each provided as an env var at deploy); the
+  names infer as a literal union so `ctx.secrets.LINEAR_API_KEY` is `string` and any undeclared key
+  is a type error (no `secrets` declared → `ctx.secrets` is `{}`). Deploy fails before upload when a
+  declared secret (or webhook secret) is missing from the deploy env; values upload as `secret_text`
+  bindings, and the CF runtime picks the declared names off the Worker env. Non-secret config
+  doesn't belong in `secrets` — it's plain TS in the workflow file.
+- Core owns the durable-execution contract: `makeCtx(primitives, { runId, secrets })` builds the
+  whole `ctx` in `@runway/core`, auto-naming each `sleep` positionally. A backend implements only the
+  thin `Primitives` contract (`step<T>(id, fn)` + `sleep(id, ms)`), resolves declared secrets with
+  core's `secretsOf(def.secrets, bindings)`, and inherits `ctx` for free — the CF backend's
+  `worker.ts` is a few lines binding `step → step.do` and `sleep(ms) → step.sleep`. New backends
+  (Vercel/Postgres) implement `Primitives` and get the rest.
 - Registration is an explicit array of workflow file paths in the config — no glob, no per-file scan,
   no registration call. A workflow is one file that default-exports it:
   `export default createWorkflow({ id: "hello", trigger: webhook(...) }).handler(...)`, one workflow per file (no named
@@ -104,10 +117,11 @@ pnpm workspace, three packages:
   webhook trigger path is the public route; the class name is derived from the id.
 - Deploy = the typed `cloudflare` SDK + esbuild, no subprocess: `deploy` esbuild-bundles to one ESM
   module (`cloudflare:*` external, everything else bundled), then `cf.workers.scripts.update` (with
-  typed `type: "workflow"` bindings plus `secret_text` bindings for webhook secrets) +
-  `cf.workflows.update` per workflow + Worker cron schedule updates. Credentials =
-  `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` env vars; webhook triggers also require their
-  named secret env vars at deploy time. Runs start via POST to the configured webhook trigger path.
+  typed `type: "workflow"` bindings plus `secret_text` bindings for webhook secrets and declared
+  workflow `secrets`) + `cf.workflows.update` per workflow + Worker cron schedule updates.
+  Credentials = `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` env vars; webhook secrets and
+  declared workflow `secrets` are required (as env vars) at deploy time. Runs start via POST to the
+  configured webhook trigger path.
 - The `Backend` interface (`deploy`, taking the `Registry`) is the plug point: how `ctx.step` becomes
   durable is private to each backend. CF is the only backend now; Vercel/Postgres can be added
   without touching authoring code.
