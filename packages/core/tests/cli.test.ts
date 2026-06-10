@@ -37,7 +37,7 @@ test("deploy reports missing webhook secrets before upload", async () => {
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
   expect(result.output).toMatch(
-    /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/,
+    /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
   );
 });
 
@@ -47,7 +47,7 @@ test("deploy reports all missing env vars clearly", async () => {
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
   expect(result.output).toMatch(
-    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/,
+    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
   );
 });
 

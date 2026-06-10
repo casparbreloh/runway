@@ -1,9 +1,10 @@
 import { BINDING, validateTrigger } from "./trigger.ts";
 import type {
   RunwayConfig,
-  WorkflowBuilder,
+  TriggerBuilder,
   WorkflowDefinition,
   WorkflowOptions,
+  WorkflowTrigger,
 } from "./types.ts";
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -25,20 +26,30 @@ export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): voi
 
 export const createWorkflow = <SecretName extends string = never>(
   options: WorkflowOptions<SecretName>,
-): WorkflowBuilder<SecretName> => {
+): TriggerBuilder<SecretName> => {
   if (!ID.test(options.id)) {
     throw new Error(`invalid workflow id ${JSON.stringify(options.id)}: must be kebab-case`);
   }
-  validateTrigger(options.trigger);
   validateSecrets(options.secrets);
+  const secrets: ReadonlyArray<string> = options.secrets ?? [];
   return {
-    handler: (fn): WorkflowDefinition => ({
-      __kind: "workflow",
-      id: options.id,
-      trigger: options.trigger,
-      secrets: options.secrets ?? [],
-      handler: fn as WorkflowDefinition["handler"],
-    }),
+    trigger: (trigger: WorkflowTrigger) => {
+      validateTrigger(trigger);
+      if (trigger.type === "webhook" && !secrets.includes(trigger.secret)) {
+        throw new Error(
+          `workflow webhook secret ${JSON.stringify(trigger.secret)} must be declared in secrets`,
+        );
+      }
+      return {
+        handler: (fn: (ctx: never) => void | Promise<void>): WorkflowDefinition => ({
+          __kind: "workflow",
+          id: options.id,
+          trigger,
+          secrets,
+          handler: fn as WorkflowDefinition["handler"],
+        }),
+      };
+    },
   };
 };
 

@@ -1,20 +1,21 @@
 export { makeCtx, secretsOf } from "./ctx.ts";
-export { cron, hmacSha256, webhook } from "./trigger.ts";
+export { cron, webhook } from "./trigger.ts";
 export { createWorkflow, defineConfig } from "./workflow.ts";
 
 export type {
   Backend,
+  CronParams,
   CronTrigger,
   Ctx,
   DeployOptions,
-  HmacSha256Options,
+  DeployResult,
   Primitives,
   ProgressEvent,
   RegisteredWorkflow,
   Registry,
   RunwayConfig,
   StepContext,
-  WebhookAuth,
+  TriggerBuilder,
   WebhookOptions,
   WebhookTimestamp,
   WebhookTrigger,

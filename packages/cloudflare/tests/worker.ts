@@ -58,7 +58,7 @@ export const createTestWorker = (
         const execution = Promise.resolve()
           .then(() =>
             def.handler(
-              makeCtx(primitives, { runId: id, params, secrets: secretsOf(def.secrets, env) }),
+              makeCtx(primitives, { runId: id, params, secrets: secretsOf(def.secrets, env), env }),
             ),
           )
           .then(() => undefined);
@@ -79,15 +79,15 @@ export const createTestWorker = (
       if (def.trigger.type !== "webhook") {
         throw new Error(`workflow ${JSON.stringify(workflowId)} does not have a webhook trigger`);
       }
-      const secret = opts.secrets?.[def.trigger.auth.secret];
-      if (!secret) throw new Error(`missing test secret: ${def.trigger.auth.secret}`);
+      const secret = opts.secrets?.[def.trigger.secret];
+      if (!secret) throw new Error(`missing test secret: ${def.trigger.secret}`);
       const body = JSON.stringify(params);
       const signature = await hmacSha256Hex(secret, body);
       const headers = new Headers(webhookOpts.headers);
       headers.set("content-type", headers.get("content-type") ?? "application/json");
-      headers.set(def.trigger.auth.header, `${def.trigger.auth.prefix ?? ""}${signature}`);
-      if (def.trigger.auth.timestamp?.source === "header") {
-        headers.set(def.trigger.auth.timestamp.field, String(webhookOpts.timestamp ?? Date.now()));
+      headers.set(def.trigger.header, `${def.trigger.prefix ?? ""}${signature}`);
+      if (def.trigger.timestamp?.source === "header") {
+        headers.set(def.trigger.timestamp.field, String(webhookOpts.timestamp ?? Date.now()));
       }
       return router.fetch(
         new Request(`https://runway.test${def.trigger.path}`, {

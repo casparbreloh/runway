@@ -2,10 +2,11 @@ export interface StepContext {
   readonly id: string;
 }
 
-export interface Ctx<SecretName extends string = never> {
+export interface Ctx<SecretName extends string = never, Params = unknown> {
   readonly runId: string;
-  readonly params: unknown;
+  readonly params: Params;
   readonly secrets: Readonly<Record<SecretName, string>>;
+  readonly env: unknown;
   step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
   sleep(ms: number): Promise<void>;
 }
@@ -16,17 +17,10 @@ export interface WebhookTimestamp {
   readonly toleranceMs: number;
 }
 
-export interface WebhookAuth {
-  readonly type: "raw-hmac-sha256";
+export interface WebhookOptions<SecretName extends string = string> {
+  readonly path: string;
+  readonly secret: SecretName;
   readonly header: string;
-  readonly secret: string;
-  readonly prefix?: string;
-  readonly timestamp?: WebhookTimestamp;
-}
-
-export interface HmacSha256Options {
-  readonly header: string;
-  readonly secret: string;
   readonly prefix?: string;
   readonly timestamp?: {
     readonly source?: "body" | "header";
@@ -35,10 +29,14 @@ export interface HmacSha256Options {
   };
 }
 
-export interface WebhookTrigger {
+export interface WebhookTrigger<Params = unknown, SecretName extends string = string> {
   readonly type: "webhook";
   readonly path: string;
-  readonly auth: WebhookAuth;
+  readonly secret: SecretName;
+  readonly header: string;
+  readonly prefix?: string;
+  readonly timestamp?: WebhookTimestamp;
+  readonly handle?: (body: unknown) => Params | undefined;
 }
 
 export interface CronTrigger {
@@ -46,16 +44,17 @@ export interface CronTrigger {
   readonly cron: string;
 }
 
-export type WorkflowTrigger = WebhookTrigger | CronTrigger;
-
-export interface WebhookOptions {
-  readonly path: string;
-  readonly auth: WebhookAuth;
+export interface CronParams {
+  readonly cron: string;
+  readonly scheduledTime: number;
 }
+
+export type WorkflowTrigger<Params = unknown, SecretName extends string = string> =
+  | WebhookTrigger<Params, SecretName>
+  | CronTrigger;
 
 export interface WorkflowOptions<SecretName extends string = never> {
   readonly id: string;
-  readonly trigger: WorkflowTrigger;
   readonly secrets?: ReadonlyArray<SecretName>;
 }
 
@@ -67,8 +66,13 @@ export interface WorkflowDefinition {
   readonly handler: (ctx: Ctx<string>) => void | Promise<void>;
 }
 
-export interface WorkflowBuilder<SecretName extends string = never> {
-  handler(fn: (ctx: Ctx<SecretName>) => void | Promise<void>): WorkflowDefinition;
+export interface TriggerBuilder<SecretName extends string = never> {
+  trigger(trigger: CronTrigger): WorkflowBuilder<SecretName, CronParams>;
+  trigger<Params>(trigger: WebhookTrigger<Params, SecretName>): WorkflowBuilder<SecretName, Params>;
+}
+
+export interface WorkflowBuilder<SecretName extends string = never, Params = unknown> {
+  handler(fn: (ctx: Ctx<SecretName, Params>) => void | Promise<void>): WorkflowDefinition;
 }
 
 export interface Primitives {
@@ -95,8 +99,13 @@ export interface DeployOptions {
   readonly onProgress?: (event: ProgressEvent) => void;
 }
 
+export interface DeployResult {
+  readonly script: string;
+  readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
+}
+
 export interface Backend {
-  deploy(registry: Registry, opts: DeployOptions): Promise<void>;
+  deploy(registry: Registry, opts: DeployOptions): Promise<DeployResult>;
 }
 
 export interface RunwayConfig {
