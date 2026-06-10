@@ -179,12 +179,15 @@ const deploy = defineCommand({
       const config = await loadConfig(cwd);
       const registry = await loadRegistry(cwd, config);
       out.event({ step: "load", status: "done" });
-      await config.backend.deploy(registry, {
+      const result = await config.backend.deploy(registry, {
         cwd,
         env: process.env,
         onProgress: (event) => out.event(event),
       });
-      console.log(`Deployed ${registry.length} workflow(s)`);
+      console.log(`Deployed ${registry.length} workflow(s) as ${result.script}`);
+      for (const { id, url } of result.urls) {
+        console.log(`  ${id}: POST ${url}`);
+      }
     } catch (err) {
       out.fail(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;

@@ -8,8 +8,10 @@ allowBuilds:
   workerd: true
 
 catalog:
+  "@cloudflare/sandbox": 0.12.1
   "@cloudflare/workers-types": ^4.20260605.1
   "@cloudflare/vitest-pool-workers": ^0.16.14
+  "@linear/sdk": ^86.0.0
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
   citty: ^0.2.2
@@ -24,6 +26,7 @@ catalog:
 catalogMode: strict
 
 minimumReleaseAgeExclude:
+  - "@cloudflare/sandbox@0.12.1"
   - "@cloudflare/vitest-pool-workers@0.16.14"
   - "@cloudflare/workerd-darwin-64@1.20260609.1"
   - "@cloudflare/workerd-darwin-arm64@1.20260609.1"

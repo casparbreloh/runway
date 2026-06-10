@@ -43,20 +43,18 @@ const project = async (
 
 const workflow = (id: string): string => `import { createWorkflow, cron } from "@runway/core";
 
-export const ${id.replaceAll("-", "_")} = createWorkflow({
-  id: ${JSON.stringify(id)},
-  trigger: cron("* * * * *"),
-}).handler(async () => {});
+export const ${id.replaceAll("-", "_")} = createWorkflow({ id: ${JSON.stringify(id)} })
+  .trigger(cron("* * * * *"))
+  .handler(async () => {});
 `;
 
 const defaultWorkflow = (
   id: string,
 ): string => `import { createWorkflow, cron } from "@runway/core";
 
-export default createWorkflow({
-  id: ${JSON.stringify(id)},
-  trigger: cron("* * * * *"),
-}).handler(async () => {});
+export default createWorkflow({ id: ${JSON.stringify(id)} })
+  .trigger(cron("* * * * *"))
+  .handler(async () => {});
 `;
 
 const config = (body = ""): string => `import { defineConfig } from "@runway/core";
@@ -82,7 +80,7 @@ test("deploy reports missing webhook secrets before upload", async () => {
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
   expect(result.output).toMatch(
-    /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/,
+    /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
   );
 });
 
@@ -195,7 +193,7 @@ test("deploy reports all missing env vars clearly", async () => {
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/runway: deploy failed/);
   expect(result.output).toMatch(
-    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/,
+    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
   );
 });
 

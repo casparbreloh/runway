@@ -1,10 +1,4 @@
-import type {
-  CronTrigger,
-  WebhookAuth,
-  WebhookTimestamp,
-  WebhookTrigger,
-  WorkflowTrigger,
-} from "@runway/core";
+import type { CronTrigger, WebhookTimestamp, WebhookTrigger, WorkflowTrigger } from "@runway/core";
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string }>;
@@ -51,15 +45,15 @@ export const hmacSha256Hex = async (secret: string, body: string): Promise<strin
 };
 
 const verifySignature = async (
-  auth: WebhookAuth,
+  trigger: WebhookTrigger,
   secret: string,
   signature: string,
   body: string,
 ): Promise<boolean> => {
   let actual = signature;
-  if (auth.prefix) {
-    if (!signature.toLowerCase().startsWith(auth.prefix.toLowerCase())) return false;
-    actual = signature.slice(auth.prefix.length);
+  if (trigger.prefix) {
+    if (!signature.toLowerCase().startsWith(trigger.prefix.toLowerCase())) return false;
+    actual = signature.slice(trigger.prefix.length);
   }
   return timingSafeEqual(await hmacSha256Hex(secret, body), actual);
 };
@@ -99,14 +93,14 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
           ? webhooks.find((webhook) => webhook.trigger.path === pathname)
           : undefined;
       if (!entry) return new Response("not found", { status: 404 });
-      const auth = entry.trigger.auth;
-      const secret = (env as RouterEnv)[auth.secret];
+      const trigger = entry.trigger;
+      const secret = (env as RouterEnv)[trigger.secret];
       if (typeof secret !== "string") {
-        return new Response(`no secret: ${auth.secret}`, { status: 500 });
+        return new Response(`no secret: ${trigger.secret}`, { status: 500 });
       }
       const body = await req.text();
-      const signature = req.headers.get(auth.header);
-      if (!signature || !(await verifySignature(auth, secret, signature, body))) {
+      const signature = req.headers.get(trigger.header);
+      if (!signature || !(await verifySignature(trigger, secret, signature, body))) {
         return new Response("unauthorized", { status: 401 });
       }
       let params: unknown;
@@ -115,8 +109,14 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
       } catch {
         return new Response("invalid json", { status: 400 });
       }
-      if (auth.timestamp && !verifyTimestamp(auth.timestamp, params, req.headers)) {
+      if (trigger.timestamp && !verifyTimestamp(trigger.timestamp, params, req.headers)) {
         return new Response("unauthorized", { status: 401 });
+      }
+      if (trigger.handle) {
+        params = trigger.handle(params);
+        if (params === undefined || params === null) {
+          return Response.json({ skipped: true });
+        }
       }
       const workflow = (env as RouterEnv)[entry.binding];
       if (typeof workflow !== "object" || !workflow) {

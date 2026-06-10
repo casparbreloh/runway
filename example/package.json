@@ -7,10 +7,13 @@
     "deploy": "runway deploy"
   },
   "dependencies": {
+    "@cloudflare/sandbox": "catalog:",
+    "@linear/sdk": "catalog:",
     "@runway/cloudflare": "workspace:*",
     "@runway/core": "workspace:*"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
     "typescript": "catalog:"
   }
 }

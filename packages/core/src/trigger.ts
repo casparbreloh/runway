@@ -1,4 +1,4 @@
-import type { HmacSha256Options, WebhookAuth, WebhookOptions, WorkflowTrigger } from "./types.ts";
+import type { CronTrigger, WebhookOptions, WebhookTrigger, WorkflowTrigger } from "./types.ts";
 
 export const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -17,39 +17,45 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
         `invalid workflow trigger path ${JSON.stringify(trigger.path)}: contains "//"`,
       );
     }
-    if (trigger.auth.secret.length === 0) {
-      throw new Error("invalid workflow webhook secret: must name an env var");
-    }
-    if (!BINDING.test(trigger.auth.secret)) {
+    if (!BINDING.test(trigger.secret)) {
       throw new Error(
-        `invalid workflow webhook secret ${JSON.stringify(trigger.auth.secret)}: must be a valid binding name`,
+        `invalid workflow webhook secret ${JSON.stringify(trigger.secret)}: must be a valid binding name`,
       );
     }
-    if (trigger.auth.header.length === 0) {
+    if (trigger.header.length === 0) {
       throw new Error("invalid workflow webhook header: header is required");
     }
-    if (trigger.auth.timestamp && trigger.auth.timestamp.toleranceMs <= 0) {
+    if (trigger.timestamp && trigger.timestamp.toleranceMs <= 0) {
       throw new Error("invalid workflow webhook timestamp tolerance: must be positive");
     }
   }
 };
 
-export const webhook = (options: WebhookOptions): WorkflowTrigger => ({
-  type: "webhook",
-  ...options,
-});
+export function webhook<SecretName extends string>(
+  options: WebhookOptions<SecretName>,
+): WebhookTrigger<unknown, SecretName>;
+export function webhook<SecretName extends string, Body, Params>(
+  options: WebhookOptions<SecretName>,
+  handle: (body: Body) => Params | undefined,
+): WebhookTrigger<NonNullable<Params>, SecretName>;
+export function webhook<SecretName extends string>(
+  options: WebhookOptions<SecretName>,
+  handle?: (body: never) => unknown,
+): WebhookTrigger<unknown, SecretName> {
+  return {
+    type: "webhook",
+    path: options.path,
+    secret: options.secret,
+    header: options.header,
+    ...(options.prefix ? { prefix: options.prefix } : {}),
+    ...(options.timestamp
+      ? { timestamp: { ...options.timestamp, source: options.timestamp.source ?? "body" } }
+      : {}),
+    ...(handle ? { handle: handle as (body: unknown) => unknown } : {}),
+  };
+}
 
-export const cron = (expression: string): WorkflowTrigger => ({
+export const cron = (expression: string): CronTrigger => ({
   type: "cron",
   cron: expression,
-});
-
-export const hmacSha256 = (options: HmacSha256Options): WebhookAuth => ({
-  type: "raw-hmac-sha256",
-  header: options.header,
-  secret: options.secret,
-  ...(options.prefix ? { prefix: options.prefix } : {}),
-  ...(options.timestamp
-    ? { timestamp: { ...options.timestamp, source: options.timestamp.source ?? "body" } }
-    : {}),
 });

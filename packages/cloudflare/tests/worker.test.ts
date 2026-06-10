@@ -1,4 +1,4 @@
-import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
+import { createWorkflow, cron, webhook } from "@runway/core";
 import { expect, test } from "vitest";
 
 import { createRouter } from "../src/router.ts";
@@ -8,28 +8,24 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
   const seen: unknown[] = [];
   const hello = createWorkflow({
     id: "hello",
-    trigger: webhook({
-      path: "/hello",
-      auth: hmacSha256({
-        header: "linear-signature",
-        secret: "LINEAR_WEBHOOK_SECRET",
-      }),
-    }),
-    secrets: ["LINEAR_API_KEY"],
-  }).handler(async (ctx) => {
-    seen.push(
-      await ctx.step("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: ctx.params })),
-    );
-    await ctx.sleep(10);
-  });
-  const daily = createWorkflow({
-    id: "daily",
-    trigger: cron("0 9 * * *"),
-  }).handler((ctx) => {
-    // @ts-expect-error secrets must be declared on the workflow
-    void ctx.secrets.LINEAR_API_KEY;
-    seen.push(ctx.params);
-  });
+    secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
+  })
+    .trigger(
+      webhook({ path: "/hello", secret: "LINEAR_WEBHOOK_SECRET", header: "linear-signature" }),
+    )
+    .handler(async (ctx) => {
+      seen.push(
+        await ctx.step("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: ctx.params })),
+      );
+      await ctx.sleep(10);
+    });
+  const daily = createWorkflow({ id: "daily" })
+    .trigger(cron("0 9 * * *"))
+    .handler((ctx) => {
+      // @ts-expect-error secrets must be declared on the workflow
+      void ctx.secrets.LINEAR_API_KEY;
+      seen.push(ctx.params);
+    });
   const worker = createTestWorker([hello, daily], {
     secrets: { LINEAR_WEBHOOK_SECRET: "test-secret", LINEAR_API_KEY: "lin_api_test" },
   });
@@ -49,19 +45,41 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
   ]);
 });
 
+test("the trigger handle filters events and shapes the run params", async () => {
+  const review = createWorkflow({ id: "review", secrets: ["LINEAR_WEBHOOK_SECRET"] })
+    .trigger(
+      webhook(
+        { path: "/linear", secret: "LINEAR_WEBHOOK_SECRET", header: "linear-signature" },
+        (event: { action?: string; data?: { title?: string } }) =>
+          event.action === "create" ? event.data : undefined,
+      ),
+    )
+    .handler(async () => {});
+  const worker = createTestWorker([review], {
+    secrets: { LINEAR_WEBHOOK_SECRET: "test-secret" },
+  });
+
+  const skipped = await worker.webhook("review", { action: "update" });
+  const started = await worker.webhook("review", { action: "create", data: { title: "bug" } });
+
+  expect(skipped.status).toBe(200);
+  expect(await skipped.json()).toEqual({ skipped: true });
+  expect(started.status).toBe(202);
+  expect(worker.runs).toEqual([{ id: "review-1", workflowId: "review", params: { title: "bug" } }]);
+});
+
 test("verifies prefixed signatures and rejects stale timestamps", async () => {
-  const stamped = createWorkflow({
-    id: "stamped",
-    trigger: webhook({
-      path: "/stamped",
-      auth: hmacSha256({
-        header: "x-hub-signature-256",
+  const stamped = createWorkflow({ id: "stamped", secrets: ["GITHUB_WEBHOOK_SECRET"] })
+    .trigger(
+      webhook({
+        path: "/stamped",
         secret: "GITHUB_WEBHOOK_SECRET",
+        header: "x-hub-signature-256",
         prefix: "sha256=",
         timestamp: { field: "webhookTimestamp", toleranceMs: 60_000 },
       }),
-    }),
-  }).handler(async () => {});
+    )
+    .handler(async () => {});
   const worker = createTestWorker([stamped], {
     secrets: { GITHUB_WEBHOOK_SECRET: "test-secret" },
   });
@@ -77,14 +95,12 @@ test("verifies prefixed signatures and rejects stale timestamps", async () => {
 test("accepts the webhook but fails the run when a declared secret is missing", async () => {
   const needy = createWorkflow({
     id: "needy",
-    trigger: webhook({
-      path: "/needy",
-      auth: hmacSha256({ header: "x-signature", secret: "NEEDY_WEBHOOK_SECRET" }),
-    }),
-    secrets: ["NEEDY_API_KEY"],
-  }).handler(async (ctx) => {
-    void ctx.secrets.NEEDY_API_KEY;
-  });
+    secrets: ["NEEDY_WEBHOOK_SECRET", "NEEDY_API_KEY"],
+  })
+    .trigger(webhook({ path: "/needy", secret: "NEEDY_WEBHOOK_SECRET", header: "x-signature" }))
+    .handler(async (ctx) => {
+      void ctx.secrets.NEEDY_API_KEY;
+    });
   const worker = createTestWorker([needy], {
     secrets: { NEEDY_WEBHOOK_SECRET: "test-secret" },
   });
@@ -103,11 +119,8 @@ test("rejects unsigned webhooks before parsing the body", async () => {
       trigger: {
         type: "webhook",
         path: "/hello",
-        auth: {
-          type: "raw-hmac-sha256",
-          header: "linear-signature",
-          secret: "LINEAR_WEBHOOK_SECRET",
-        },
+        secret: "LINEAR_WEBHOOK_SECRET",
+        header: "linear-signature",
       },
     },
   ]);

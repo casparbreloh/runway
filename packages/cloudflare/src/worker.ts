@@ -22,6 +22,7 @@ export const toEntrypoint = (
             runId: event.instanceId,
             params: event.payload,
             secrets: secretsOf(def.secrets, this.env),
+            env: this.env,
           }),
         ),
       );
