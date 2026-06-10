@@ -1,6 +1,0 @@
-# runway deploy generates this — gitignore it in any project that uses runway
-.runway
-
-# scratch dirs from packages/cloudflare deploy tests (placed here so esbuild
-# resolves @runway/cloudflare/worker through example's node_modules)
-.tmp-deploy-test-*

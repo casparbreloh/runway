@@ -38,6 +38,9 @@ const validateRegistry = (registry: Registry): void => {
   }
 };
 
+const workflowRef = (index: number, exportName: string): string =>
+  exportName === "default" ? `__m${index}.default` : `__m${index}[${JSON.stringify(exportName)}]`;
+
 export const generateWorker = (
   registry: Registry,
   opts: { cwd: string; outDir: string },
@@ -46,11 +49,14 @@ export const generateWorker = (
   const imports = registry
     .map(
       (w, i) =>
-        `import __w${i} from ${JSON.stringify(relImport(opts.outDir, path.resolve(opts.cwd, w.path)))};`,
+        `import * as __m${i} from ${JSON.stringify(relImport(opts.outDir, path.resolve(opts.cwd, w.path)))};`,
     )
     .join("\n");
   const classes = registry
-    .map((w, i) => `export class ${classOf(w.def.id)} extends toEntrypoint(__w${i}) {}`)
+    .map(
+      (w, i) =>
+        `export class ${classOf(w.def.id)} extends toEntrypoint(${workflowRef(i, w.exportName)}) {}`,
+    )
     .join("\n");
   const routes = registry
     .map(
@@ -66,29 +72,5 @@ ${classes}
 export default createRouter([
 ${routes}
 ]);
-`;
-};
-
-export const generateWranglerConfig = (
-  registry: Registry,
-  opts: { name: string; main: string },
-): string => {
-  const workflows = registry.map((w) => ({
-    name: w.def.id,
-    binding: bindingOf(w.def.id),
-    class_name: classOf(w.def.id),
-  }));
-  const crons = cronsOf(registry);
-  return `${JSON.stringify(
-    {
-      name: opts.name,
-      main: opts.main,
-      compatibility_date: COMPATIBILITY_DATE,
-      workflows,
-      ...(crons.length > 0 ? { triggers: { crons } } : {}),
-    },
-    null,
-    2,
-  )}
 `;
 };

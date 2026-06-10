@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createWorkflow, cron, hmacSha256, webhook } from "@runway/core";
@@ -11,6 +11,7 @@ import type { CloudflareApi } from "../src/deploy.ts";
 const registry: Registry = [
   {
     path: "src/hello.ts",
+    exportName: "default",
     def: createWorkflow({
       id: "hello",
       trigger: webhook({
@@ -22,12 +23,13 @@ const registry: Registry = [
   },
   {
     path: "src/daily.ts",
+    exportName: "daily",
     def: createWorkflow({ id: "daily", trigger: cron("0 9 * * *") }).handler(async () => {}),
   },
 ];
 
-const moduleOf = (def: WorkflowDefinition): string =>
-  `export default { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
+const moduleOf = (name: string, def: WorkflowDefinition): string =>
+  `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
 
 const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
   const cwd = await mkdtemp(
@@ -36,7 +38,7 @@ const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }
   await mkdir(path.join(cwd, "src"));
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
   for (const w of registry) {
-    await writeFile(path.join(cwd, w.path), moduleOf(w.def));
+    await writeFile(path.join(cwd, w.path), moduleOf(w.exportName, w.def));
   }
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
@@ -71,7 +73,6 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
   try {
     await cloudflare({ client: () => client }).deploy(registry, {
       cwd: project.cwd,
-      outDir: path.join(project.cwd, ".runway"),
       env: {
         CLOUDFLARE_API_TOKEN: "token",
         CLOUDFLARE_ACCOUNT_ID: "account",
@@ -95,10 +96,6 @@ test("deploy uploads workflow bindings, webhook secrets, and cron schedules", as
       "runway-ship-it",
       { account_id: "account", body: [{ cron: "0 9 * * *" }] },
     ]);
-    const wrangler = JSON.parse(
-      await readFile(path.join(project.cwd, ".runway/wrangler.jsonc"), "utf8"),
-    ) as { triggers?: { crons: ReadonlyArray<string> } };
-    expect(wrangler.triggers).toEqual({ crons: ["0 9 * * *"] });
   } finally {
     await project.cleanup();
   }
@@ -127,7 +124,6 @@ test("deploy requires webhook secrets and workflow secrets before upload", async
     await expect(
       cloudflare({ client: () => client }).deploy(registry, {
         cwd: project.cwd,
-        outDir: path.join(project.cwd, ".runway"),
         env: {
           CLOUDFLARE_API_TOKEN: "token",
           CLOUDFLARE_ACCOUNT_ID: "account",

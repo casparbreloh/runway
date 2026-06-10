@@ -12,7 +12,7 @@ You author with `@runway/core` but run the `runway` CLI, which `@runway/core` sh
 ## A workflow
 
 ```ts
-// src/hello.ts
+// .runway/workflows/hello.ts
 import { createWorkflow, cron } from "@runway/core";
 
 export default createWorkflow({
@@ -25,8 +25,8 @@ export default createWorkflow({
 });
 ```
 
-`createWorkflow({ id, trigger }).handler(fn)` defines a workflow. Each workflow is the default export
-of its own file; you list those files by path in the config (see Wiring). Handlers are
+`createWorkflow({ id, trigger }).handler(fn)` defines a workflow. Export workflows from files under
+`.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers are
 fire-and-forget — they return nothing. The only durable primitives are `ctx.step` (a memoized durable
 step, named by its idempotency key) and `ctx.sleep` (durable sleep, just a number of ms). Anything
 else — an HTTP call, for example — is plain TypeScript wrapped inside a `ctx.step`.
@@ -88,30 +88,35 @@ The single handler argument is just `{ runId, params, step, sleep }`:
 
 ## Wiring
 
-Each workflow lives in its own file as the default export. Point `runway.config.ts` at a backend and
-list those files by path:
+Point `runway.config.ts` at a backend. The CLI discovers exported workflows from
+`.runway/workflows/**/*.ts` by default:
 
 ```ts
 // runway.config.ts
 import { cloudflare } from "@runway/cloudflare";
 import { defineConfig } from "@runway/core";
 
-export default defineConfig({ backend: cloudflare(), workflows: ["src/hello.ts"] });
+export default defineConfig({ backend: cloudflare() });
 ```
 
-`workflows` is an explicit array of path strings — it holds paths, not imported workflow values, so
-the config can import the Node backend without coupling it into the Worker. The CLI imports each
-listed path, takes its `.default`, and validates it's tagged `__kind: "workflow"` (a clear build-time
-error if a listed file forgot `export default createWorkflow(...)`), producing `{ path, def }` pairs.
-The backend codegens a Worker that emits one default import per path plus one Cloudflare
-`WorkflowEntrypoint` per workflow, bound by that import —
-`import __w0 from "../src/hello.ts";` … `export class Hello extends toEntrypoint(__w0) {}`. The `id`
-stays the deploy-time identity (the `workflow_name` and binding); the trigger path is the public
-webhook route. No glob, no autodiscovery magic — just an explicit path list.
+Customize discovery with repo-root-relative globs when needed:
+
+```ts
+export default defineConfig({
+  backend: cloudflare(),
+  include: [".runway/*.ts"],
+  exclude: ["**/*.test.ts"],
+});
+```
+
+Default excludes are `**/*.test.ts`, `**/*.spec.ts`, and `**/*.d.ts`. The backend codegens a Worker
+that namespace-imports each matched module and creates one Cloudflare `WorkflowEntrypoint` per
+workflow export. The `id` stays the deploy-time identity (the `workflow_name` and binding); the
+trigger path is the public webhook route.
 
 ## CLI
 
-- `runway deploy` — import each listed workflow path, codegen and bundle the Worker, then upload via
+- `runway deploy` — discover workflow exports, codegen and bundle the Worker, then upload via
   the typed `cloudflare` SDK (`cf.workers.scripts.update` with a `type: "workflow"` binding +
   `cf.workflows.update` per workflow). No wrangler, no Docker.
 

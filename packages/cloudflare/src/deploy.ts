@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -6,7 +6,7 @@ import type { Backend, DeployOptions, Registry } from "@runway/core";
 import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
 
-import { COMPATIBILITY_DATE, cronsOf, generateWorker, generateWranglerConfig } from "./codegen.ts";
+import { COMPATIBILITY_DATE, cronsOf, generateWorker } from "./codegen.ts";
 import { bindingOf, classOf } from "./naming.ts";
 
 type AsyncMethod<T extends (...args: never[]) => unknown> = (
@@ -70,30 +70,35 @@ const validateBindings = (registry: Registry): void => {
   }
 };
 
-const build = async (
-  registry: Registry,
-  opts: DeployOptions,
-  scriptName: string,
-): Promise<Uint8Array> => {
+const build = async (registry: Registry, opts: DeployOptions): Promise<Uint8Array> => {
   validateBindings(registry);
   opts.onProgress?.({ step: "build", status: "start" });
-  await mkdir(opts.outDir, { recursive: true });
-  const entry = path.join(opts.outDir, "worker.gen.ts");
-  await writeFile(entry, generateWorker(registry, opts));
-  await writeFile(
-    path.join(opts.outDir, "wrangler.jsonc"),
-    generateWranglerConfig(registry, { name: scriptName, main: path.basename(entry) }),
-  );
+  const entry = path.join(opts.cwd, "worker.gen.ts");
+  const worker = generateWorker(registry, { cwd: opts.cwd, outDir: opts.cwd });
   const result = await esbuild({
-    entryPoints: [entry],
+    entryPoints: ["runway:worker"],
     bundle: true,
     format: "esm",
     platform: "browser",
     external: ["cloudflare:*"],
     write: false,
+    plugins: [
+      {
+        name: "runway-worker",
+        setup(build) {
+          build.onResolve({ filter: /^runway:worker$/ }, () => ({
+            path: entry,
+          }));
+          build.onLoad({ filter: /^.*\/worker\.gen\.ts$/ }, () => ({
+            contents: worker,
+            loader: "ts",
+            resolveDir: opts.cwd,
+          }));
+        },
+      },
+    ],
   });
   const contents = result.outputFiles[0]!.contents;
-  await writeFile(path.join(opts.outDir, "worker.js"), contents);
   opts.onProgress?.({ step: "build", status: "done" });
   return contents;
 };
@@ -115,7 +120,7 @@ const deploy = async (
   const accountId = env.CLOUDFLARE_ACCOUNT_ID!;
 
   const scriptName = await scriptNameOf(opts.cwd);
-  const contents = await build(registry, opts, scriptName);
+  const contents = await build(registry, opts);
   const cf: CloudflareApi = backendOpts.client?.({ apiToken }) ?? new Cloudflare({ apiToken });
 
   opts.onProgress?.({ step: "deploy", status: "start" });
