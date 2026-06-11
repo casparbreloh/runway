@@ -1,7 +1,10 @@
 export { makeCtx, secretsOf } from "./ctx.ts";
-export { cron, webhook } from "./trigger.ts";
-export { createWorkflow, defineConfig } from "./workflow.ts";
 
+export { secretNameOf } from "./secrets.ts";
+export { cron, webhook } from "./trigger.ts";
+export { defineConfig, workflow } from "./workflow.ts";
+
+export type { SecretRef } from "./secrets.ts";
 export type {
   Backend,
   CronParams,
@@ -15,12 +18,11 @@ export type {
   Registry,
   RunwayConfig,
   StepContext,
-  TriggerBuilder,
+  Trigger,
+  TriggerContext,
   WebhookOptions,
   WebhookTimestamp,
   WebhookTrigger,
-  WorkflowBuilder,
   WorkflowDefinition,
-  WorkflowOptions,
   WorkflowTrigger,
 } from "./types.ts";

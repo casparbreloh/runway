@@ -15,16 +15,14 @@ export const toEntrypoint = (
   def: WorkflowDefinition,
 ): typeof WorkflowEntrypoint<unknown, unknown> =>
   class extends WorkflowEntrypoint<unknown, unknown> {
-    override run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
-      return Promise.resolve(
-        def.handler(
-          makeCtx(primitives(step), {
-            runId: event.instanceId,
-            params: event.payload,
-            secrets: secretsOf(def.secrets, this.env),
-            env: this.env,
-          }),
-        ),
+    override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
+      return await def.handler(
+        makeCtx(primitives(step), {
+          runId: event.instanceId,
+          secrets: secretsOf(def.secrets, this.env),
+          env: this.env,
+        }),
+        event.payload,
       );
     }
   };

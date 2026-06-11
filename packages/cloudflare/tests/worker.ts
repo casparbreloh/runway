@@ -1,8 +1,9 @@
-import { makeCtx, secretsOf } from "@runway/core";
+import { makeCtx, secretNameOf, secretsOf } from "@runway/core";
 import type { Primitives, WorkflowDefinition } from "@runway/core";
 
 import { bindingOf } from "../src/naming.ts";
 import { createRouter, hmacSha256Hex } from "../src/router.ts";
+import { validateRegistry } from "../src/validate.ts";
 
 export interface TestRun {
   readonly id: string;
@@ -38,7 +39,9 @@ export const createTestWorker = (
 ): TestWorker => {
   const runs: TestRun[] = [];
   const executions: Promise<void>[] = [];
+  validateRegistry(workflows.map((def) => ({ path: def.id, exportName: "default", def })));
   const entries = workflows.map((def) => ({
+    id: def.id,
     binding: bindingOf(def.id),
     trigger: def.trigger,
   }));
@@ -58,7 +61,12 @@ export const createTestWorker = (
         const execution = Promise.resolve()
           .then(() =>
             def.handler(
-              makeCtx(primitives, { runId: id, params, secrets: secretsOf(def.secrets, env), env }),
+              makeCtx(primitives, {
+                runId: id,
+                secrets: secretsOf(def.secrets, env),
+                env,
+              }),
+              params,
             ),
           )
           .then(() => undefined);
@@ -79,13 +87,14 @@ export const createTestWorker = (
       if (def.trigger.type !== "webhook") {
         throw new Error(`workflow ${JSON.stringify(workflowId)} does not have a webhook trigger`);
       }
-      const secret = opts.secrets?.[def.trigger.secret];
-      if (!secret) throw new Error(`missing test secret: ${def.trigger.secret}`);
+      const secretName = secretNameOf(def.trigger.secret);
+      const secret = opts.secrets?.[secretName];
+      if (!secret) throw new Error(`missing test secret: ${secretName}`);
       const body = JSON.stringify(params);
       const signature = await hmacSha256Hex(secret, body);
       const headers = new Headers(webhookOpts.headers);
       headers.set("content-type", headers.get("content-type") ?? "application/json");
-      headers.set(def.trigger.header, `${def.trigger.prefix ?? ""}${signature}`);
+      headers.set(def.trigger.signatureHeader, `${def.trigger.prefix ?? ""}${signature}`);
       if (def.trigger.timestamp?.source === "header") {
         headers.set(def.trigger.timestamp.field, String(webhookOpts.timestamp ?? Date.now()));
       }

@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@standard-schema/spec": "catalog:",
     "citty": "catalog:"
   }
 }

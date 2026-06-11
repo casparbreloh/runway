@@ -1,9 +1,11 @@
+import { secretNameOf, secretRef } from "./secrets.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
 import type {
+  Ctx,
   RunwayConfig,
-  TriggerBuilder,
+  Trigger,
+  TriggerContext,
   WorkflowDefinition,
-  WorkflowOptions,
   WorkflowTrigger,
 } from "./types.ts";
 
@@ -24,33 +26,35 @@ export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): voi
   }
 };
 
-export const createWorkflow = <SecretName extends string = never>(
-  options: WorkflowOptions<SecretName>,
-): TriggerBuilder<SecretName> => {
-  if (!ID.test(options.id)) {
-    throw new Error(`invalid workflow id ${JSON.stringify(options.id)}: must be kebab-case`);
+export function workflow<const S extends readonly string[] = readonly [], E = unknown>(opts: {
+  id: string;
+  secrets?: S;
+  trigger: (ctx: TriggerContext<S[number]>) => Trigger<E>;
+}): { handler(fn: (ctx: Ctx<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition } {
+  if (!ID.test(opts.id)) {
+    throw new Error(`invalid workflow id ${JSON.stringify(opts.id)}: must be kebab-case`);
   }
-  validateSecrets(options.secrets);
-  const secrets: ReadonlyArray<string> = options.secrets ?? [];
+  validateSecrets(opts.secrets);
+  const secrets: ReadonlyArray<string> = opts.secrets ?? [];
+  const context = {
+    secrets: Object.fromEntries(secrets.map((name) => [name, secretRef(name)])),
+  } as TriggerContext<S[number]>;
+  const trigger = opts.trigger(context) as WorkflowTrigger;
+  validateTrigger(trigger);
+  if (trigger.type === "webhook" && !secrets.includes(secretNameOf(trigger.secret))) {
+    throw new Error(
+      `workflow webhook secret ${JSON.stringify(secretNameOf(trigger.secret))} must be declared in secrets`,
+    );
+  }
   return {
-    trigger: (trigger: WorkflowTrigger) => {
-      validateTrigger(trigger);
-      if (trigger.type === "webhook" && !secrets.includes(trigger.secret)) {
-        throw new Error(
-          `workflow webhook secret ${JSON.stringify(trigger.secret)} must be declared in secrets`,
-        );
-      }
-      return {
-        handler: (fn: (ctx: never) => void | Promise<void>): WorkflowDefinition => ({
-          __kind: "workflow",
-          id: options.id,
-          trigger,
-          secrets,
-          handler: fn as WorkflowDefinition["handler"],
-        }),
-      };
-    },
+    handler: (fn) => ({
+      __kind: "workflow",
+      id: opts.id,
+      trigger,
+      secrets,
+      handler: fn as WorkflowDefinition["handler"],
+    }),
   };
-};
+}
 
 export const defineConfig = (config: RunwayConfig): RunwayConfig => config;

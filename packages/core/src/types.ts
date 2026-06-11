@@ -1,14 +1,27 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+
+import type { SecretRef } from "./secrets.ts";
+
 export interface StepContext {
   readonly id: string;
 }
 
-export interface Ctx<SecretName extends string = never, Params = unknown> {
+export interface Ctx<S extends string = string> {
   readonly runId: string;
-  readonly params: Params;
-  readonly secrets: Readonly<Record<SecretName, string>>;
+  readonly secrets: { readonly [K in S]: string };
   readonly env: unknown;
   step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
   sleep(ms: number): Promise<void>;
+}
+
+export type TriggerContext<S extends string> = {
+  readonly secrets: { readonly [K in S]: SecretRef<K> };
+};
+
+declare const EVENT: unique symbol;
+
+export interface Trigger<E> {
+  readonly [EVENT]?: E;
 }
 
 export interface WebhookTimestamp {
@@ -17,31 +30,16 @@ export interface WebhookTimestamp {
   readonly toleranceMs: number;
 }
 
-export interface WebhookOptions<SecretName extends string = string> {
-  readonly path: string;
-  readonly secret: SecretName;
-  readonly header: string;
-  readonly prefix?: string;
-  readonly timestamp?: {
-    readonly source?: "body" | "header";
-    readonly field: string;
-    readonly toleranceMs: number;
-  };
-}
-
-export interface WebhookTrigger<Params = unknown, SecretName extends string = string> {
+export interface WebhookTrigger<E> extends Trigger<E> {
   readonly type: "webhook";
   readonly path: string;
-  readonly secret: SecretName;
-  readonly header: string;
+  readonly secret: SecretRef;
+  readonly signatureHeader: string;
   readonly prefix?: string;
   readonly timestamp?: WebhookTimestamp;
-  readonly handle?: (body: unknown) => Params | undefined;
-}
-
-export interface CronTrigger {
-  readonly type: "cron";
-  readonly cron: string;
+  readonly schema?: StandardSchemaV1;
+  readonly predicate?: (event: unknown) => boolean;
+  filter<F extends E>(predicate: (event: E) => event is F): WebhookTrigger<F>;
 }
 
 export interface CronParams {
@@ -49,30 +47,27 @@ export interface CronParams {
   readonly scheduledTime: number;
 }
 
-export type WorkflowTrigger<Params = unknown, SecretName extends string = string> =
-  | WebhookTrigger<Params, SecretName>
-  | CronTrigger;
-
-export interface WorkflowOptions<SecretName extends string = never> {
-  readonly id: string;
-  readonly secrets?: ReadonlyArray<SecretName>;
+export interface CronTrigger extends Trigger<CronParams> {
+  readonly type: "cron";
+  readonly expression: string;
 }
+
+export interface WebhookOptions {
+  path: string;
+  secret: SecretRef;
+  signatureHeader: string;
+  prefix?: string;
+  timestamp?: { source?: "body" | "header"; field: string; toleranceMs: number };
+}
+
+export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger;
 
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
   readonly trigger: WorkflowTrigger;
   readonly secrets: ReadonlyArray<string>;
-  readonly handler: (ctx: Ctx<string>) => void | Promise<void>;
-}
-
-export interface TriggerBuilder<SecretName extends string = never> {
-  trigger(trigger: CronTrigger): WorkflowBuilder<SecretName, CronParams>;
-  trigger<Params>(trigger: WebhookTrigger<Params, SecretName>): WorkflowBuilder<SecretName, Params>;
-}
-
-export interface WorkflowBuilder<SecretName extends string = never, Params = unknown> {
-  handler(fn: (ctx: Ctx<SecretName, Params>) => void | Promise<void>): WorkflowDefinition;
+  readonly handler: (ctx: Ctx, event: unknown) => void | Promise<void>;
 }
 
 export interface Primitives {

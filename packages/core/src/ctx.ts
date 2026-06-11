@@ -16,15 +16,13 @@ export const makeCtx = (
   primitives: Primitives,
   meta: {
     runId: string;
-    params?: unknown;
     secrets: Readonly<Record<string, string>>;
     env: unknown;
   },
-): Ctx<string> => {
+): Ctx => {
   let sleeps = 0;
   return {
     runId: meta.runId,
-    params: meta.params,
     secrets: meta.secrets,
     env: meta.env,
     step: (id, fn) => primitives.step(id, () => Promise.resolve(fn({ id }))),
