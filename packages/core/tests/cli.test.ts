@@ -41,20 +41,20 @@ const project = async (
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
-const workflow = (id: string): string => `import { createWorkflow, cron } from "@runway/core";
+const workflow = (id: string): string => `import { cron, workflow } from "@runway/core";
 
-export const ${id.replaceAll("-", "_")} = createWorkflow({ id: ${JSON.stringify(id)} })
-  .trigger(cron("* * * * *"))
-  .handler(async () => {});
+export const ${id.replaceAll("-", "_")} = workflow({
+  id: ${JSON.stringify(id)},
+  trigger: () => cron("* * * * *"),
+}).handler(async () => {});
 `;
 
-const defaultWorkflow = (
-  id: string,
-): string => `import { createWorkflow, cron } from "@runway/core";
+const defaultWorkflow = (id: string): string => `import { cron, workflow } from "@runway/core";
 
-export default createWorkflow({ id: ${JSON.stringify(id)} })
-  .trigger(cron("* * * * *"))
-  .handler(async () => {});
+export default workflow({
+  id: ${JSON.stringify(id)},
+  trigger: () => cron("* * * * *"),
+}).handler(async () => {});
 `;
 
 const config = (body = ""): string => `import { defineConfig } from "@runway/core";
@@ -71,16 +71,22 @@ export default defineConfig({
 });
 `;
 
-test("deploy reports missing webhook secrets before upload", async () => {
-  const result = await run(["deploy"], {
+test("deploy reports missing required env vars before upload", async () => {
+  const missingSecrets = await run(["deploy"], {
     CLOUDFLARE_API_TOKEN: "test-token",
     CLOUDFLARE_ACCOUNT_ID: "test-account",
   });
+  const missingAll = await run(["deploy"]);
 
-  expect(result.code).toBe(1);
-  expect(result.output).toMatch(/runway: deploy failed/);
-  expect(result.output).toMatch(
+  expect(missingSecrets.code).toBe(1);
+  expect(missingSecrets.output).toMatch(/runway: deploy failed/);
+  expect(missingSecrets.output).toMatch(
     /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
+  );
+  expect(missingAll.code).toBe(1);
+  expect(missingAll.output).toMatch(/runway: deploy failed/);
+  expect(missingAll.output).toMatch(
+    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
   );
 });
 
@@ -185,16 +191,6 @@ test("deploy errors on duplicate workflow ids", async () => {
   } finally {
     await app.cleanup();
   }
-});
-
-test("deploy reports all missing env vars clearly", async () => {
-  const result = await run(["deploy"]);
-
-  expect(result.code).toBe(1);
-  expect(result.output).toMatch(/runway: deploy failed/);
-  expect(result.output).toMatch(
-    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
-  );
 });
 
 test("build is not a public command", async () => {

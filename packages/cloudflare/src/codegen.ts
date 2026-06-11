@@ -3,52 +3,24 @@ import path from "node:path";
 import type { Registry } from "@runway/core";
 
 import { bindingOf, classOf } from "./naming.ts";
+import { validateRegistry } from "./validate.ts";
 
 export const COMPATIBILITY_DATE = "2026-06-06";
 
-export const SANDBOX_VERSION = "0.12.1";
-export const SANDBOX_IMAGE = `docker.io/cloudflare/sandbox:${SANDBOX_VERSION}`;
-export const SANDBOX_CLASS = "Sandbox";
-
 export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
-  registry.flatMap((w) => (w.def.trigger.type === "cron" ? [w.def.trigger.cron] : []));
+  registry.flatMap((w) => (w.def.trigger.type === "cron" ? [w.def.trigger.expression] : []));
 
 const toPosix = (p: string): string => p.split(path.sep).join(path.posix.sep);
 
 const relImport = (cwd: string, module: string): string => {
   const rel = path.posix.relative(toPosix(cwd), toPosix(module));
-  return rel.startsWith(".") ? rel : `./${rel}`;
-};
-
-const validateRegistry = (registry: Registry): void => {
-  const paths = new Map<string, string>();
-  const classes = new Map<string, string>();
-  for (const w of registry) {
-    const className = classOf(w.def.id);
-    const classOwner = classes.get(className);
-    if (classOwner) {
-      throw new Error(`${w.path}: generated class name ${className} already used by ${classOwner}`);
-    }
-    classes.set(className, w.path);
-    if (w.def.trigger.type === "webhook") {
-      const owner = paths.get(w.def.trigger.path);
-      if (owner) {
-        throw new Error(
-          `${w.path}: duplicate webhook trigger path ${JSON.stringify(w.def.trigger.path)} already used by ${owner}`,
-        );
-      }
-      paths.set(w.def.trigger.path, w.path);
-    }
-  }
+  return rel.startsWith("./") || rel.startsWith("../") ? rel : `./${rel}`;
 };
 
 const workflowRef = (index: number, exportName: string): string =>
   exportName === "default" ? `__m${index}.default` : `__m${index}[${JSON.stringify(exportName)}]`;
 
-export const generateWorker = (
-  registry: Registry,
-  opts: { cwd: string; sandbox?: boolean },
-): string => {
+export const generateWorker = (registry: Registry, opts: { cwd: string }): string => {
   validateRegistry(registry);
   const imports = registry
     .map(
@@ -65,12 +37,12 @@ export const generateWorker = (
   const routes = registry
     .map(
       (w, i) =>
-        `  { binding: ${JSON.stringify(bindingOf(w.def.id))}, trigger: ${workflowRef(i, w.exportName)}.trigger },`,
+        `  { id: ${JSON.stringify(w.def.id)}, binding: ${JSON.stringify(bindingOf(w.def.id))}, trigger: ${workflowRef(i, w.exportName)}.trigger },`,
     )
     .join("\n");
   return `${imports}
 import { createRouter, toEntrypoint } from "@runway/cloudflare/worker";
-${opts.sandbox ? `export { ${SANDBOX_CLASS} } from "@cloudflare/sandbox";\n` : ""}
+
 ${classes}
 
 export default createRouter([

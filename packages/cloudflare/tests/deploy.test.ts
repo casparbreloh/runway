@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { createWorkflow, cron, webhook } from "@runway/core";
+import { cron, webhook, workflow } from "@runway/core";
 import type { Registry, WorkflowDefinition } from "@runway/core";
 import { expect, test } from "vitest";
 
@@ -11,20 +11,23 @@ import type { CloudflareApi } from "../src/deploy.ts";
 
 const registry: Registry = [
   {
-    path: "src/hello.ts",
+    path: ".runway/workflows/hello.ts",
     exportName: "default",
-    def: createWorkflow({ id: "hello", secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"] })
-      .trigger(
-        webhook({ path: "/hello", secret: "LINEAR_WEBHOOK_SECRET", header: "linear-signature" }),
-      )
-      .handler(async () => {}),
+    def: workflow({
+      id: "hello",
+      secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
+      trigger: (tctx) =>
+        webhook({
+          path: "/hello",
+          secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
+          signatureHeader: "linear-signature",
+        }),
+    }).handler(async () => {}),
   },
   {
-    path: "src/daily.ts",
+    path: ".runway/workflows/daily.ts",
     exportName: "daily",
-    def: createWorkflow({ id: "daily" })
-      .trigger(cron("0 9 * * *"))
-      .handler(async () => {}),
+    def: workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(async () => {}),
   },
 ];
 
@@ -32,7 +35,6 @@ const moduleOf = (name: string, def: WorkflowDefinition): string =>
   `import { LinearClient } from "@linear/sdk";
 export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {
   void LinearClient;
-  await import("@cloudflare/sandbox");
 } };
 `;
 
@@ -40,7 +42,7 @@ const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }
   const cwd = await mkdtemp(
     path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-deploy-test-"),
   );
-  await mkdir(path.join(cwd, "src"));
+  await mkdir(path.join(cwd, ".runway", "workflows"), { recursive: true });
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
   for (const w of registry) {
     await writeFile(path.join(cwd, w.path), moduleOf(w.exportName, w.def));
@@ -54,14 +56,12 @@ interface ApiCalls {
   workflowUpdates: unknown[];
   workflowDeletes: unknown[];
   subdomains: unknown[];
-  applicationsCreated: unknown[];
 }
 
 const fakeApi = (
   calls: ApiCalls,
   opts: {
     workflows?: ReadonlyArray<{ name: string; script_name: string }>;
-    namespaces?: () => ReadonlyArray<{ id: string; class: string; script: string }>;
   } = {},
 ): CloudflareApi => ({
   workers: {
@@ -93,28 +93,12 @@ const fakeApi = (
       calls.workflowDeletes.push(args);
     },
   },
-  durableObjects: {
-    namespaces: {
-      list: async () => ({ result: opts.namespaces?.() ?? [] }),
-    },
-  },
-  containers: {
-    applications: {
-      list: async () => ({ result: [] }),
-      create: async (params) => {
-        calls.applicationsCreated.push(params);
-        return {};
-      },
-      update: async () => ({}),
-    },
-  },
 });
 
 const emptyCalls = (): ApiCalls => ({
   workflowUpdates: [],
   workflowDeletes: [],
   subdomains: [],
-  applicationsCreated: [],
 });
 
 const deployEnv = {
@@ -123,6 +107,67 @@ const deployEnv = {
   LINEAR_WEBHOOK_SECRET: "secret-value",
   LINEAR_API_KEY: "key-value",
 };
+
+const sharedPathWorkflow = (
+  id: string,
+  overrides: Partial<{
+    secretName: string;
+    signatureHeader: string;
+    prefix: string;
+    toleranceMs: number;
+  }> = {},
+): WorkflowDefinition => {
+  const secretName = overrides.secretName ?? "HOOK_SECRET";
+  return workflow({
+    id,
+    secrets: [secretName],
+    trigger: (tctx) =>
+      webhook({
+        path: "/linear",
+        secret: tctx.secrets[secretName]!,
+        signatureHeader: overrides.signatureHeader ?? "x-signature",
+        prefix: overrides.prefix ?? "sha256=",
+        timestamp: { field: "ts", toleranceMs: overrides.toleranceMs ?? 60_000 },
+      }),
+  }).handler(async () => {});
+};
+
+test("workflows sharing a webhook path with identical verification config are accepted", () => {
+  const shared: Registry = [
+    { path: "src/a.ts", exportName: "default", def: sharedPathWorkflow("a") },
+    { path: "src/b.ts", exportName: "default", def: sharedPathWorkflow("b") },
+  ];
+
+  expect(() => generateWorker(shared, { cwd: "/tmp/project" })).not.toThrow();
+});
+
+test("workflows sharing a webhook path with conflicting verification config are rejected", () => {
+  const conflicting: Registry = [
+    { path: "src/a.ts", exportName: "default", def: sharedPathWorkflow("a") },
+    {
+      path: "src/c.ts",
+      exportName: "default",
+      def: sharedPathWorkflow("c", { secretName: "OTHER_SECRET", signatureHeader: "x-other" }),
+    },
+  ];
+  const staleTimestamp: Registry = [
+    { path: "src/a.ts", exportName: "default", def: sharedPathWorkflow("a") },
+    {
+      path: "src/d.ts",
+      exportName: "default",
+      def: sharedPathWorkflow("d", { toleranceMs: 5_000 }),
+    },
+  ];
+
+  expect(() => generateWorker(conflicting, { cwd: "/tmp/project" })).toThrow(
+    'src/c.ts: webhook path "/linear" conflicts with src/a.ts: ' +
+      'secret ("OTHER_SECRET" vs "HOOK_SECRET"), signatureHeader ("x-other" vs "x-signature")',
+  );
+  expect(() => generateWorker(staleTimestamp, { cwd: "/tmp/project" })).toThrow(
+    'src/d.ts: webhook path "/linear" conflicts with src/a.ts: ' +
+      'timestamp ({"field":"ts","toleranceMs":5000,"source":"body"} vs {"field":"ts","toleranceMs":60000,"source":"body"})',
+  );
+});
 
 test("deploy bundles, uploads bindings, owns the script, and returns webhook urls", async () => {
   const project = await writeProject();
@@ -141,6 +186,9 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       env: deployEnv,
     });
 
+    expect(generateWorker(registry, { cwd: project.cwd })).toContain(
+      'from "./.runway/workflows/hello.ts"',
+    );
     expect(result).toEqual({
       script: "runway-ship-it",
       urls: [{ id: "hello", url: "https://runway-ship-it.tester.workers.dev/hello" }],
@@ -170,6 +218,44 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
   }
 });
 
+test("deploy rejects a secret that collides with a workflow binding", async () => {
+  const colliding: Registry = [
+    {
+      path: ".runway/workflows/colliding.ts",
+      exportName: "default",
+      def: workflow({
+        id: "hook-secret",
+        secrets: ["HOOK_SECRET"],
+        trigger: (tctx) =>
+          webhook({
+            path: "/hook-secret",
+            secret: tctx.secrets.HOOK_SECRET,
+            signatureHeader: "x-signature",
+          }),
+      }).handler(async () => {}),
+    },
+  ];
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls);
+
+  try {
+    await expect(
+      cloudflare({ client: () => client }).deploy(colliding, {
+        cwd: project.cwd,
+        env: {
+          CLOUDFLARE_API_TOKEN: "token",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          HOOK_SECRET: "secret-value",
+        },
+      }),
+    ).rejects.toThrow('binding "HOOK_SECRET" is used by workflow "hook-secret" and a secret');
+    expect(calls.metadata).toBeUndefined();
+  } finally {
+    await project.cleanup();
+  }
+});
+
 test("deploy requires declared secrets before upload", async () => {
   const project = await writeProject();
   const calls = emptyCalls();
@@ -186,58 +272,6 @@ test("deploy requires declared secrets before upload", async () => {
       }),
     ).rejects.toThrow(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/);
     expect(calls.metadata).toBeUndefined();
-  } finally {
-    await project.cleanup();
-  }
-});
-
-test("deploy with sandbox provisions the container application", async () => {
-  const project = await writeProject();
-  const calls = emptyCalls();
-  let uploaded = false;
-  const client = fakeApi(calls, {
-    namespaces: () =>
-      uploaded ? [{ id: "ns-1", class: "Sandbox", script: "runway-ship-it" }] : [],
-  });
-  const update = client.workers.scripts.update;
-  client.workers.scripts.update = async (...args) => {
-    uploaded = true;
-    return update(...args);
-  };
-
-  try {
-    await cloudflare({ client: () => client, sandbox: true }).deploy(registry, {
-      cwd: project.cwd,
-      env: deployEnv,
-    });
-
-    const metadata = calls.metadata as {
-      containers?: unknown;
-      migrations?: unknown;
-      bindings: ReadonlyArray<unknown>;
-    };
-    expect(metadata.containers).toEqual([{ class_name: "Sandbox" }]);
-    expect(metadata.migrations).toEqual({ new_tag: "v1", new_sqlite_classes: ["Sandbox"] });
-    expect(metadata.bindings).toContainEqual({
-      type: "durable_object_namespace",
-      name: "Sandbox",
-      class_name: "Sandbox",
-    });
-    expect(calls.applicationsCreated).toEqual([
-      {
-        account_id: "account",
-        body: {
-          name: "runway-ship-it-sandbox",
-          scheduling_policy: "default",
-          instances: 0,
-          max_instances: 5,
-          durable_objects: { namespace_id: "ns-1" },
-          configuration: { image: "docker.io/cloudflare/sandbox:0.12.1", instance_type: "basic" },
-        },
-      },
-    ]);
-    const worker = generateWorker(registry, { cwd: project.cwd, sandbox: true });
-    expect(worker).toContain('export { Sandbox } from "@cloudflare/sandbox";');
   } finally {
     await project.cleanup();
   }

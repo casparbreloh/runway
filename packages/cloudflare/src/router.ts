@@ -1,3 +1,4 @@
+import { secretNameOf } from "@runway/core";
 import type { CronTrigger, WebhookTimestamp, WebhookTrigger, WorkflowTrigger } from "@runway/core";
 
 interface WorkflowBinding {
@@ -7,6 +8,7 @@ interface WorkflowBinding {
 type RouterEnv = Record<string, string | WorkflowBinding | undefined>;
 
 export interface RouterEntry {
+  readonly id: string;
   readonly binding: string;
   readonly trigger: WorkflowTrigger;
 }
@@ -45,7 +47,7 @@ export const hmacSha256Hex = async (secret: string, body: string): Promise<strin
 };
 
 const verifySignature = async (
-  trigger: WebhookTrigger,
+  trigger: WebhookTrigger<unknown>,
   secret: string,
   signature: string,
   body: string,
@@ -80,7 +82,8 @@ const verifyTimestamp = (
 
 export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
   const webhooks = entries.filter(
-    (entry): entry is RouterEntry & { trigger: WebhookTrigger } => entry.trigger.type === "webhook",
+    (entry): entry is RouterEntry & { trigger: WebhookTrigger<unknown> } =>
+      entry.trigger.type === "webhook",
   );
   const crons = entries.filter(
     (entry): entry is RouterEntry & { trigger: CronTrigger } => entry.trigger.type === "cron",
@@ -88,18 +91,20 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
   return {
     async fetch(req, env) {
       const pathname = new URL(req.url).pathname;
-      const entry =
+      const matches =
         req.method === "POST"
-          ? webhooks.find((webhook) => webhook.trigger.path === pathname)
-          : undefined;
-      if (!entry) return new Response("not found", { status: 404 });
-      const trigger = entry.trigger;
-      const secret = (env as RouterEnv)[trigger.secret];
+          ? webhooks.filter((webhook) => webhook.trigger.path === pathname)
+          : [];
+      const first = matches[0];
+      if (!first) return new Response("not found", { status: 404 });
+      const trigger = first.trigger;
+      const secretName = secretNameOf(trigger.secret);
+      const secret = (env as RouterEnv)[secretName];
       if (typeof secret !== "string") {
-        return new Response(`no secret: ${trigger.secret}`, { status: 500 });
+        return new Response(`no secret: ${secretName}`, { status: 500 });
       }
       const body = await req.text();
-      const signature = req.headers.get(trigger.header);
+      const signature = req.headers.get(trigger.signatureHeader);
       if (!signature || !(await verifySignature(trigger, secret, signature, body))) {
         return new Response("unauthorized", { status: 401 });
       }
@@ -112,23 +117,41 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
       if (trigger.timestamp && !verifyTimestamp(trigger.timestamp, params, req.headers)) {
         return new Response("unauthorized", { status: 401 });
       }
-      if (trigger.handle) {
-        params = trigger.handle(params);
-        if (params === undefined || params === null) {
-          return Response.json({ skipped: true });
+      const passing: Array<{ entry: RouterEntry; event: unknown }> = [];
+      try {
+        for (const entry of matches) {
+          let event = params;
+          if (entry.trigger.schema) {
+            const result = await entry.trigger.schema["~standard"].validate(params);
+            if (result.issues) continue;
+            event = result.value;
+          }
+          if (entry.trigger.predicate && !entry.trigger.predicate(event)) continue;
+          passing.push({ entry, event });
         }
+      } catch {
+        return new Response("trigger evaluation failed", { status: 500 });
       }
-      const workflow = (env as RouterEnv)[entry.binding];
-      if (typeof workflow !== "object" || !workflow) {
-        return new Response(`no binding: ${entry.binding}`, { status: 500 });
+      if (passing.length === 0) return Response.json({ skipped: true });
+      const starts: Array<{ entry: RouterEntry; event: unknown; workflow: WorkflowBinding }> = [];
+      for (const { entry, event } of passing) {
+        const workflow = (env as RouterEnv)[entry.binding];
+        if (typeof workflow !== "object" || !workflow) {
+          return new Response(`no binding: ${entry.binding}`, { status: 500 });
+        }
+        starts.push({ entry, event, workflow });
       }
-      const instance = await workflow.create({ params });
-      return Response.json({ id: instance.id }, { status: 202 });
+      const runs: Array<{ id: string; workflow: string }> = [];
+      for (const { entry, event, workflow } of starts) {
+        const instance = await workflow.create({ params: event });
+        runs.push({ id: instance.id, workflow: entry.id });
+      }
+      return Response.json({ runs }, { status: 202 });
     },
     async scheduled(event, env) {
       await Promise.all(
         crons
-          .filter((entry) => entry.trigger.cron === event.cron)
+          .filter((entry) => entry.trigger.expression === event.cron)
           .map((entry) => {
             const workflow = (env as RouterEnv)[entry.binding];
             if (typeof workflow !== "object" || !workflow) {

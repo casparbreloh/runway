@@ -13,75 +13,87 @@ You author with `@runway/core` but run the `runway` CLI, which `@runway/core` sh
 
 ```ts
 // .runway/workflows/hello.ts
-import { createWorkflow, cron } from "@runway/core";
+import { cron, workflow } from "@runway/core";
 
-export default createWorkflow({ id: "hello" })
-  .trigger(cron("0 9 * * *"))
-  .handler(async (ctx) => {
-    const greeting = await ctx.step("greet", () => "hello");
-    await ctx.sleep(5000);
-    await ctx.step("finish", () => `${greeting} world (run ${ctx.runId})`);
-  });
+export default workflow({
+  id: "hello",
+  trigger: () => cron("0 9 * * *"),
+}).handler(async (ctx, event) => {
+  const greeting = await ctx.step("greet", () => "hello");
+  await ctx.sleep(5000);
+  await ctx.step("finish", () => `${greeting} world (run ${ctx.runId})`);
+});
 ```
 
-`createWorkflow({ id, secrets? }).trigger(...).handler(fn)` defines a workflow — the trigger is a
-required chained call. Export workflows from files under
-`.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers are
-fire-and-forget — they return nothing. The only durable primitives are `ctx.step` (a memoized durable
-step, named by its idempotency key) and `ctx.sleep` (durable sleep, just a number of ms). Anything
-else — an HTTP call, for example — is plain TypeScript wrapped inside a `ctx.step`.
+`workflow({ id, secrets?, trigger }).handler(fn)` defines a workflow — the trigger is a required
+callback and the typed event is the handler's second argument. Export workflows from files under
+`.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers
+are fire-and-forget — they return nothing. The only durable primitives are `ctx.step` (a memoized
+durable step, named by its idempotency key) and `ctx.sleep` (durable sleep, just a number of ms).
+Anything else — an HTTP call, for example — is plain TypeScript wrapped inside a `ctx.step`.
 
 ## Triggers
 
 Triggers are explicit. There is no default public start endpoint.
 
 ```ts
-import { createWorkflow, cron, webhook } from "@runway/core";
+import { webhook, workflow } from "@runway/core";
+import { z } from "zod";
 
-createWorkflow({ id: "linear", secrets: ["LINEAR_WEBHOOK_SECRET"] }).trigger(
-  webhook({
-    path: "/webhooks/linear",
-    secret: "LINEAR_WEBHOOK_SECRET",
-    header: "linear-signature",
-    timestamp: { field: "webhookTimestamp", toleranceMs: 60_000 },
-  }),
-);
-createWorkflow({ id: "daily-report" }).trigger(cron("0 9 * * *"));
+const issueCreated = z.object({
+  type: z.literal("Issue"),
+  action: z.literal("create"),
+  data: z.object({ id: z.string(), title: z.string() }),
+});
+
+export default workflow({
+  id: "linear",
+  secrets: ["LINEAR_WEBHOOK_SECRET"],
+  trigger: (ctx) =>
+    webhook({
+      path: "/webhooks/linear",
+      secret: ctx.secrets.LINEAR_WEBHOOK_SECRET,
+      signatureHeader: "linear-signature",
+      timestamp: { field: "webhookTimestamp", toleranceMs: 60_000 },
+      schema: issueCreated,
+    }),
+}).handler(async (ctx, event) => {
+  // event is typed by the schema: { type: "Issue"; action: "create"; data: { id, title } }
+});
 ```
 
 Webhook triggers are POST-only and verify a raw-body HMAC-SHA256 signature — the only webhook auth,
 so its options live flat on the webhook (providers that prefix the signature take
-`prefix: "sha256="`). `secret` names one of the workflow's declared `secrets`, typed against the
-declared union — a typo or undeclared name is a type error. Cron triggers start from Cloudflare
-Worker Cron Triggers and type `ctx.params` as `{ cron, scheduledTime }`.
+`prefix: "sha256="`). `secret` takes `ctx.secrets.X` from the trigger callback's context — a branded
+reference to one of the workflow's declared `secrets`, so a typo or undeclared name is a type error
+at the dot. Cron triggers type the event as `{ cron, scheduledTime }`.
 
-A webhook's optional second argument `handle(body)` is raw TypeScript run at the router after HMAC
-auth: return `undefined`/`null` to skip the event (200 `{ skipped: true }`, no run started), or
-return a value to make it the run's `ctx.params` — typed by inference from the return, no generics.
-Without `handle`, `ctx.params` is the raw parsed body (`unknown`).
+How the event is typed is a three-rung ladder:
 
-```ts
-webhook(
-  { path: "/webhooks/linear", secret: "LINEAR_WEBHOOK_SECRET", header: "linear-signature" },
-  (event: LinearWebhookPayload) =>
-    event.type === "Issue" && event.action === "create" ? event.data : undefined,
-);
-```
+- `webhook({ schema })` — validate the parsed body with any Standard Schema (zod, valibot, ...);
+  the event is the validate **output**, so transforms apply. An event that fails the schema is
+  skipped (200 `{ skipped: true }`, no run started) — the schema doubles as the firehose filter,
+  so one webhook URL can receive every event a provider sends without burning runs.
+- `webhook<T>(opts)` — assertion-only typing, no runtime validation.
+- `webhook(opts)` — the raw parsed body as `unknown`.
 
-Configure which events send webhooks in the provider itself — for example Linear issue/comment events
-in Linear's webhook settings. One webhook URL can receive an event firehose; `handle` filters it
-without burning runs.
+`.filter(typeGuard)` narrows after any rung — it must be a type-guard predicate, AND-composes with
+prior filters, and returns a new trigger. A predicate returning false skips the event.
+
+Two workflows may share one webhook path to fan out from a single event source — verification config
+must be identical on the shared path, the signature is verified once, and each workflow's
+schema/filter gates its own run. The response is `202 { runs: [...] }` when at least one run
+started, `200 { skipped: true }` when none did. Signed-but-malformed JSON is a 400; a throwing
+predicate or rejecting schema validation is a 500 and starts no runs.
 
 ## `ctx`
 
-The single handler argument is just `{ runId, params, secrets, env, step, sleep }`:
+The handler's first argument is `{ runId, secrets, env, step, sleep }`:
 
 - `ctx.runId` — the run instance id.
-- `ctx.params` — the trigger payload: the `handle` return for webhooks (the raw parsed body as
-  `unknown` without one), `{ cron, scheduledTime }` for cron.
 - `ctx.secrets` — the declared secrets as a typed record of name → value.
 - `ctx.env` — the backend's raw environment, typed `unknown`; the escape hatch to backend-specific
-  bindings (like the sandbox DO namespace) — cast it in the workflow.
+  bindings — cast it in the workflow.
 - `ctx.step(id, fn)` — a durable, memoized step; `id` is the idempotency key and `fn` receives
   `{ id }`. Returns a JSON-serializable value. Steps re-run on replay, so keep them idempotent.
 - `ctx.sleep(ms)` — durable sleep. `ms` is a plain number of milliseconds; there is no id and no
@@ -89,11 +101,13 @@ The single handler argument is just `{ runId, params, secrets, env, step, sleep 
 
 ## Secrets
 
-`secrets: [...]` on `createWorkflow` names every secret the workflow needs — the webhook signing
-secret included. The names infer as a literal union, so `ctx.secrets.LINEAR_API_KEY` is `string`
-and any undeclared key is a type error. Deploy is gated on them: it fails before upload when a
-declared secret is missing from the deploy env, and values upload as `secret_text` bindings.
-Non-secret config doesn't belong in `secrets` — it's plain TypeScript in the workflow file.
+`secrets: [...]` on `workflow` names every secret the workflow needs — the webhook signing secret
+included. Secrets live in two worlds: in the trigger callback, `ctx.secrets.X` is a branded
+name reference (values don't exist at authoring time) that `webhook({ secret })` requires; in the
+handler, `ctx.secrets.X` is the `string` value. Any undeclared key is a type error in both. Deploy
+is gated on them: it fails before upload when a declared secret is missing from the deploy env, and
+values upload as `secret_text` bindings. Non-secret config doesn't belong in `secrets` — it's plain
+TypeScript in the workflow file.
 
 ## Wiring
 
@@ -131,21 +145,12 @@ route.
   workflow plus `secret_text` bindings for the declared secrets + `cf.workflows.update` per
   workflow). No wrangler, no Docker. Prints the script name and one POST URL per webhook trigger.
 
-## Sandbox
+## Example
 
-`cloudflare({ sandbox: true })` additionally provisions a Cloudflare Sandbox — still no Docker, no
-wrangler: the script gains a `Sandbox` Durable Object binding and a container application pointing
-at the prebuilt `docker.io/cloudflare/sandbox` image. Inside a workflow step, use
-`@cloudflare/sandbox`'s `getSandbox` against `ctx.env`:
-
-```ts
-const { getSandbox } = await import("@cloudflare/sandbox");
-const sandbox = getSandbox((ctx.env as SandboxEnv).Sandbox, ctx.runId);
-const result = await sandbox.exec("echo hello");
-```
-
-See `example/.runway/workflows/issue-review.ts` for the full dogfood: a Linear issue-created webhook
-that runs a coding agent in a sandbox against the issue and posts the review back as a comment.
+See `example/.runway/workflows/issue-review.ts` for the full dogfood: a Linear webhook typed with
+`@linear/sdk`'s `LinearWebhookPayload` and narrowed with `.filter` to created issues, runs an LLM
+review with `@openrouter/sdk` inside a `ctx.step` against the issue, and posts the review back as a
+comment with `@linear/sdk`'s `createComment` inside another `ctx.step`.
 
 ## Testing
 
