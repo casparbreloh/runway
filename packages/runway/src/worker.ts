@@ -1,3 +1,5 @@
+import { getSandbox } from "@cloudflare/sandbox";
+import type { Sandbox } from "@cloudflare/sandbox";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
@@ -11,11 +13,19 @@ interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string | Promise<string> }>;
 }
 
-type DynamicWorkerEnv = Record<string, unknown> & { WORKFLOWS?: WorkflowBinding };
+type DynamicWorkerEnv = Record<string, unknown> & {
+  WORKFLOWS?: WorkflowBinding;
+  Sandbox?: DurableObjectNamespace<Sandbox>;
+};
 
-const primitives = (step: WorkflowStep): Primitives => ({
+const primitives = (step: WorkflowStep, env: unknown): Primitives => ({
   step: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
     step.do(id, fn as () => Promise<never>) as Promise<T>,
+  sandbox: async (name) => {
+    const binding = (env as DynamicWorkerEnv).Sandbox;
+    if (!binding) throw new Error("missing sandbox binding: Sandbox");
+    return getSandbox(binding, name);
+  },
   sleep: (id: string, ms: number): Promise<void> => step.sleep(id, ms),
 });
 
@@ -25,7 +35,7 @@ export const toEntrypoint = (
   class extends WorkflowEntrypoint<unknown, unknown> {
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       return await def.handler(
-        makeCtx(primitives(step), {
+        makeCtx(primitives(step, this.env), {
           runId: event.instanceId,
           secrets: secretsOf(def.secrets, this.env),
           env: this.env,

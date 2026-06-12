@@ -23,7 +23,9 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
   id: string;
   secrets?: S;
   trigger: (ctx: TriggerContext<S[number]>) => Trigger<E>;
-}): { handler(fn: (ctx: Ctx<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition } {
+}): {
+  handler(fn: (ctx: Ctx<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
+} {
   if (!ID.test(opts.id)) {
     throw new Error(`invalid workflow id ${JSON.stringify(opts.id)}: must be kebab-case`);
   }

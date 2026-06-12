@@ -26,6 +26,10 @@ export const makeCtx = (
     secrets: meta.secrets,
     env: meta.env,
     step: (id, fn) => primitives.step(id, () => Promise.resolve(fn({ id }))),
+    sandbox: (id, fn) =>
+      primitives.step(id, async () => {
+        return await fn(await primitives.sandbox(`${meta.runId}-${id}`));
+      }),
     sleep: (ms) => primitives.sleep(`sleep-${sleeps++}`, ms),
   };
 };

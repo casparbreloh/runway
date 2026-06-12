@@ -1,3 +1,4 @@
+import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 
 import type { SecretRef } from "./secrets.ts";
@@ -6,11 +7,12 @@ export interface StepContext {
   readonly id: string;
 }
 
-export interface Ctx<S extends string = string> {
+export interface Ctx<S extends string = string, E = unknown> {
   readonly runId: string;
   readonly secrets: { readonly [K in S]: string };
-  readonly env: unknown;
+  readonly env: E;
   step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
+  sandbox<T>(id: string, fn: (sandbox: Sandbox) => T | Promise<T>): Promise<T>;
   sleep(ms: number): Promise<void>;
 }
 
@@ -62,6 +64,8 @@ export interface WebhookOptions {
 
 export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger;
 
+export type Sandbox = CloudflareSandbox;
+
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
@@ -72,6 +76,7 @@ export interface WorkflowDefinition {
 
 export interface Primitives {
   step<T>(id: string, fn: () => Promise<T>): Promise<T>;
+  sandbox(name: string): Promise<Sandbox>;
   sleep(id: string, ms: number): Promise<void>;
 }
 
