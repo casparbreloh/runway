@@ -26,6 +26,7 @@ import {
   generateWorker,
 } from "./codegen.ts";
 import { secretNamesOf } from "./registry.ts";
+import { listScriptSecrets, secretCandidates } from "./secret-store.ts";
 import type { ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 
 type AsyncMethod<T extends (...args: never[]) => unknown> = (
@@ -40,6 +41,10 @@ export type CloudflareApi = {
     scripts: {
       list(params: { account_id: string }): Promise<unknown>;
       update: AsyncMethod<Cloudflare["workers"]["scripts"]["update"]>;
+      secrets: {
+        list(scriptName: string, params: { account_id: string }): Promise<unknown>;
+        bulkUpdate(scriptName: string, params: unknown): Promise<unknown>;
+      };
       schedules: {
         update: AsyncMethod<Cloudflare["workers"]["scripts"]["schedules"]["update"]>;
       };
@@ -85,7 +90,7 @@ const resultOf = (response: unknown): unknown =>
     ? (response as { result: unknown }).result
     : response;
 
-const SCRIPT_NAME = "runway";
+export const SCRIPT_NAME = "runway";
 const execFileAsync = promisify(execFile);
 
 const validateBindings = (secrets: ReadonlyArray<string>): void => {
@@ -100,6 +105,16 @@ const validateBindings = (secrets: ReadonlyArray<string>): void => {
     }
   }
 };
+
+const selectSecretBinding = (
+  remoteSecrets: ReadonlySet<string>,
+  localSecrets: ReadonlySet<string>,
+  workflowId: string,
+  name: string,
+): string | undefined =>
+  secretCandidates(workflowId, name).find((candidate) =>
+    candidate === name ? localSecrets.has(name) : remoteSecrets.has(candidate),
+  );
 
 const parseTomlString = (contents: string, key: string): string | undefined => {
   const match = contents.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"));
@@ -210,23 +225,15 @@ const currentMigrationTagOf = async (
   return undefined;
 };
 
-const resolveAuth = async (
+export const resolveAuth = async (
   opts: DeployContext,
   env: Record<string, string | undefined>,
-  missingSecrets: ReadonlyArray<string>,
 ): Promise<{ accountId: string; cf: CloudflareApi }> => {
   const apiToken = env.CLOUDFLARE_API_TOKEN ?? (await wranglerTokenOf(opts, env));
   if (!apiToken) {
     throw new Error(
-      `missing required env var(s): ${[
-        "CLOUDFLARE_API_TOKEN",
-        "CLOUDFLARE_ACCOUNT_ID",
-        ...missingSecrets,
-      ].join(", ")}; or run wrangler login`,
+      `missing required env var(s): ${["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"].join(", ")}; or run wrangler login`,
     );
-  }
-  if (missingSecrets.length > 0) {
-    throw new Error(`missing required env var(s): ${missingSecrets.join(", ")}`);
   }
   const cf: CloudflareApi = opts.client?.({ apiToken }) ?? defaultClient(apiToken);
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
@@ -350,11 +357,30 @@ const build = async (
 export const deploy = async (registry: Registry, opts: DeployContext): Promise<DeployOutput> => {
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
-  const missingSecrets = secrets.filter((name) => !Object.hasOwn(env, name) || !env[name]);
-  const { accountId, cf } = await resolveAuth(opts, env, missingSecrets);
-
   const scriptName = SCRIPT_NAME;
-  const contents = await build(registry, opts, secrets);
+  const { accountId, cf } = await resolveAuth(opts, env);
+  const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
+  const localSecrets = new Set(secrets.filter((name) => env[name]));
+  const resolvedSecrets = registry.flatMap((w) =>
+    w.def.secrets.map((name) => ({
+      workflowId: w.def.id,
+      name,
+      binding: selectSecretBinding(remoteSecrets, localSecrets, w.def.id, name),
+    })),
+  );
+  const missingSecrets = resolvedSecrets
+    .filter((secret) => !secret.binding)
+    .map((secret) => `${secret.workflowId}.${secret.name}`);
+  if (missingSecrets.length > 0) {
+    throw new Error(`missing secret(s): ${missingSecrets.join(", ")}`);
+  }
+  validateBindings(secrets);
+  const localSecretBindings = [
+    ...new Set(
+      resolvedSecrets.flatMap((s) => (s.binding && localSecrets.has(s.binding) ? [s.binding] : [])),
+    ),
+  ];
+  const contents = await build(registry, opts, localSecretBindings);
   const migrationTag = await currentMigrationTagOf(cf, accountId, scriptName);
 
   opts.onProgress?.({ step: "deploy", status: "start" });
@@ -373,6 +399,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
       main_module: "worker.js",
       compatibility_date: COMPATIBILITY_DATE,
       compatibility_flags: ["nodejs_compat"],
+      keep_bindings: ["secret_text"],
       bindings: [
         { type: "worker_loader" as const, name: LOADER_BINDING },
         {
@@ -386,7 +413,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
           name: SANDBOX_BINDING,
           class_name: SANDBOX_CLASS,
         },
-        ...secrets.map((name) => ({
+        ...localSecretBindings.map((name) => ({
           type: "secret_text" as const,
           name,
           text: env[name]!,

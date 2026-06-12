@@ -80,6 +80,8 @@ const fakeApi = (
     workflows?: ReadonlyArray<{ name: string; script_name: string }>;
     accounts?: ReadonlyArray<{ id: string }>;
     scripts?: ReadonlyArray<{ id: string; migration_tag?: string }>;
+    secrets?: ReadonlyArray<{ name: string }>;
+    secretsError?: unknown;
   } = {},
 ): CloudflareApi => ({
   accounts: {
@@ -90,6 +92,13 @@ const fakeApi = (
       list: async () => opts.scripts ?? [],
       update: async (...args) => {
         calls.metadata = args[1].metadata;
+      },
+      secrets: {
+        list: async () => {
+          if (opts.secretsError) throw opts.secretsError;
+          return opts.secrets ?? [];
+        },
+        bulkUpdate: async () => {},
       },
       schedules: {
         update: async (...args) => {
@@ -221,9 +230,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       'const workflowLoaders: Record<string, string> = {"hello":"hello-hash","daily":"daily-hash"}',
     );
     expect(generated).toContain('compatibilityFlags: ["nodejs_compat"]');
-    expect(generated).toContain(
-      "...Object.fromEntries(secretNames.map((name) => [name, parentEnv[name]]))",
-    );
+    expect(generated).toContain("const secretBindings");
+    expect(generated).toContain("...secretsFor(parentEnv, workflowId)");
     expect(generated).toContain('export { Sandbox } from "@cloudflare/sandbox";');
     expect(generated).toContain('"Sandbox": parentEnv["Sandbox"]');
     expect(generated).toContain("wrapWorkflowBinding({ workflowId })");
@@ -234,11 +242,13 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     });
     const metadata = calls.metadata as {
       compatibility_flags?: ReadonlyArray<string>;
+      keep_bindings?: ReadonlyArray<string>;
       bindings: ReadonlyArray<unknown>;
       containers?: ReadonlyArray<unknown>;
       migrations?: unknown;
     };
     expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
+    expect(metadata.keep_bindings).toEqual(["secret_text"]);
     expect(metadata.bindings).toEqual([
       { type: "worker_loader", name: "LOADER" },
       {
@@ -388,8 +398,106 @@ test("deploy requires declared secrets before upload", async () => {
         client: () => client,
         wranglerAuth: false,
       }),
-    ).rejects.toThrow(/missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY/);
+    ).rejects.toThrow(/missing secret\(s\): hello.LINEAR_WEBHOOK_SECRET, hello.LINEAR_API_KEY/);
     expect(calls.metadata).toBeUndefined();
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy accepts remote scoped secrets", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    secrets: [
+      { name: "RUNWAY_GLOBAL_LINEAR_WEBHOOK_SECRET" },
+      { name: "RUNWAY_WORKFLOW_HELLO_LINEAR_API_KEY" },
+    ],
+  });
+
+  try {
+    await deploy(registry, {
+      cwd: project.cwd,
+      env: {
+        CLOUDFLARE_API_TOKEN: "token",
+        CLOUDFLARE_ACCOUNT_ID: "account",
+      },
+      client: () => client,
+      wranglerAuth: false,
+    });
+
+    const metadata = calls.metadata as {
+      keep_bindings?: ReadonlyArray<string>;
+      bindings: ReadonlyArray<unknown>;
+    };
+    expect(metadata.keep_bindings).toEqual(["secret_text"]);
+    expect(metadata.bindings).not.toContainEqual({
+      type: "secret_text",
+      name: "RUNWAY_GLOBAL_LINEAR_WEBHOOK_SECRET",
+    });
+    expect(metadata.bindings).not.toContainEqual({
+      type: "secret_text",
+      name: "RUNWAY_WORKFLOW_HELLO_LINEAR_API_KEY",
+    });
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy treats a missing script secret list as empty", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const error = new Error("script not found") as Error & { status: number };
+  error.status = 404;
+  const client = fakeApi(calls, { secretsError: error });
+
+  try {
+    await deploy(registry, {
+      cwd: project.cwd,
+      env: deployEnv,
+      client: () => client,
+      wranglerAuth: false,
+    });
+
+    expect(calls.metadata).toBeDefined();
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy env secrets override remote scoped secrets", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    secrets: [
+      { name: "RUNWAY_WORKFLOW_HELLO_LINEAR_WEBHOOK_SECRET" },
+      { name: "RUNWAY_GLOBAL_LINEAR_API_KEY" },
+    ],
+  });
+
+  try {
+    await deploy(registry, {
+      cwd: project.cwd,
+      env: deployEnv,
+      client: () => client,
+      wranglerAuth: false,
+    });
+
+    const metadata = calls.metadata as { bindings: ReadonlyArray<unknown> };
+    expect(metadata.bindings).toContainEqual({
+      type: "secret_text",
+      name: "LINEAR_WEBHOOK_SECRET",
+      text: "secret-value",
+    });
+    expect(metadata.bindings).toContainEqual({
+      type: "secret_text",
+      name: "LINEAR_API_KEY",
+      text: "key-value",
+    });
+    expect(metadata.bindings).not.toContainEqual({
+      type: "secret_text",
+      name: "RUNWAY_WORKFLOW_HELLO_LINEAR_WEBHOOK_SECRET",
+    });
   } finally {
     await project.cleanup();
   }

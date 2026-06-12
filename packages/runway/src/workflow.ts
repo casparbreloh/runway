@@ -4,6 +4,12 @@ import type { Ctx, Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger 
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
+export const validateWorkflowId = (id: string): void => {
+  if (!ID.test(id)) {
+    throw new Error(`invalid workflow id ${JSON.stringify(id)}: must be kebab-case`);
+  }
+};
+
 export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): void => {
   const seen = new Set<string>();
   for (const name of secrets ?? []) {
@@ -26,9 +32,7 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
 }): {
   handler(fn: (ctx: Ctx<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
 } {
-  if (!ID.test(opts.id)) {
-    throw new Error(`invalid workflow id ${JSON.stringify(opts.id)}: must be kebab-case`);
-  }
+  validateWorkflowId(opts.id);
   validateSecrets(opts.secrets);
   const secrets: ReadonlyArray<string> = opts.secrets ?? [];
   const context = {
