@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "@cloudflare/workers-types"],
+    "outDir": "../../.tsbuild/runway",
+    "declarationDir": "../../.tsbuild/runway",
+    "tsBuildInfoFile": "../../.tsbuild/runway.tsbuildinfo"
+  },
+  "include": ["src", "bin", "tests", "vitest.config.ts", "package.json"]
+}

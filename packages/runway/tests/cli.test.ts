@@ -6,7 +6,7 @@ import { expect, test } from "vitest";
 
 const repo = path.resolve(import.meta.dirname, "../../..");
 const example = path.join(repo, "example");
-const bin = path.join(repo, "packages/core/bin/runway.ts");
+const bin = path.join(repo, "packages/runway/bin/runway.ts");
 
 const run = async (
   args: ReadonlyArray<string>,
@@ -18,6 +18,7 @@ const run = async (
     env: {
       PATH: process.env.PATH,
       NODE_OPTIONS: process.env.NODE_OPTIONS,
+      RUNWAY_DISABLE_WRANGLER_AUTH: "1",
       ...env,
     },
   });
@@ -41,34 +42,28 @@ const project = async (
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
-const workflow = (id: string): string => `import { cron, workflow } from "@runway/core";
+const workflow = (
+  id: string,
+  secrets: ReadonlyArray<string> = [],
+): string => `import { cron, workflow } from "runway";
 
 export const ${id.replaceAll("-", "_")} = workflow({
   id: ${JSON.stringify(id)},
+  secrets: ${JSON.stringify(secrets)},
   trigger: () => cron("* * * * *"),
 }).handler(async () => {});
 `;
 
-const defaultWorkflow = (id: string): string => `import { cron, workflow } from "@runway/core";
+const defaultWorkflow = (
+  id: string,
+  secrets: ReadonlyArray<string> = [],
+): string => `import { cron, workflow } from "runway";
 
 export default workflow({
   id: ${JSON.stringify(id)},
+  secrets: ${JSON.stringify(secrets)},
   trigger: () => cron("* * * * *"),
 }).handler(async () => {});
-`;
-
-const config = (body = ""): string => `import { defineConfig } from "@runway/core";
-
-export default defineConfig({
-  backend: {
-    deploy: async (registry) => {
-      throw new Error(
-        "registry:" + registry.map((w) => w.path + "#" + w.exportName + "=" + w.def.id).join(","),
-      );
-    },
-  },
-  ${body}
-});
 `;
 
 test("deploy reports missing required env vars before upload", async () => {
@@ -90,35 +85,45 @@ test("deploy reports missing required env vars before upload", async () => {
   );
 });
 
-test("deploy discovers default workflow includes", async () => {
+test("deploy discovers workflows without config", async () => {
   const app = await project({
-    "runway.config.ts": config(),
-    ".runway/workflows/hello.ts": defaultWorkflow("hello"),
-    ".runway/workflows/ignored.test.ts": workflow("ignored"),
+    ".runway/workflows/hello.ts": defaultWorkflow("hello", ["HELLO_SECRET"]),
+    ".runway/workflows/ignored.test.ts": workflow("ignored", ["IGNORED_SECRET"]),
   });
 
   try {
-    const result = await run(["deploy"], {}, app.cwd);
+    const result = await run(
+      ["deploy"],
+      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
+      app.cwd,
+    );
 
     expect(result.code).toBe(1);
-    expect(result.output).toMatch(/registry:\.runway\/workflows\/hello\.ts#default=hello/);
-    expect(result.output).not.toMatch(/ignored/);
+    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
+    expect(result.output).not.toMatch(/IGNORED_SECRET/);
   } finally {
     await app.cleanup();
   }
 });
 
-test("deploy falls back to .runway config", async () => {
+test("deploy only discovers fixed workflow path", async () => {
   const app = await project({
-    ".runway/runway.config.ts": config(),
-    ".runway/workflows/hello.ts": workflow("hello"),
+    ".runway/visible.ts": workflow("visible", ["VISIBLE_SECRET"]),
+    ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),
+    ".runway/workflows/ignored.spec.ts": workflow("spec", ["SPEC_SECRET"]),
+    ".runway/workflows/ignored.d.ts": workflow("types", ["TYPES_SECRET"]),
   });
 
   try {
-    const result = await run(["deploy"], {}, app.cwd);
+    const result = await run(
+      ["deploy"],
+      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
+      app.cwd,
+    );
 
     expect(result.code).toBe(1);
-    expect(result.output).toMatch(/registry:\.runway\/workflows\/hello\.ts#hello=hello/);
+    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
+    expect(result.output).not.toMatch(/VISIBLE_SECRET|SPEC_SECRET|TYPES_SECRET/);
   } finally {
     await app.cleanup();
   }
@@ -126,35 +131,19 @@ test("deploy falls back to .runway config", async () => {
 
 test("deploy supports barrel exports without duplicate registration", async () => {
   const app = await project({
-    "runway.config.ts": config(),
-    ".runway/workflows/hello.ts": workflow("hello"),
+    ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),
     ".runway/workflows/index.ts": 'export { hello } from "./hello.ts";\n',
   });
 
   try {
-    const result = await run(["deploy"], {}, app.cwd);
+    const result = await run(
+      ["deploy"],
+      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
+      app.cwd,
+    );
 
     expect(result.code).toBe(1);
-    expect(result.output.match(/=hello/g)).toHaveLength(1);
-  } finally {
-    await app.cleanup();
-  }
-});
-
-test("deploy supports custom include and exclude", async () => {
-  const app = await project({
-    "runway.config.ts": config('include: [".runway/*.ts"], exclude: [".runway/private.ts"],'),
-    ".runway/visible.ts": workflow("visible"),
-    ".runway/private.ts": workflow("private"),
-    ".runway/workflows/ignored.ts": workflow("ignored"),
-  });
-
-  try {
-    const result = await run(["deploy"], {}, app.cwd);
-
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/registry:\.runway\/visible\.ts#visible=visible/);
-    expect(result.output).not.toMatch(/private|ignored/);
+    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
   } finally {
     await app.cleanup();
   }
@@ -162,7 +151,6 @@ test("deploy supports custom include and exclude", async () => {
 
 test("deploy errors when no workflows are discovered", async () => {
   const app = await project({
-    "runway.config.ts": config(),
     ".runway/workflows/helper.ts": "export const helper = 1;\n",
   });
 
@@ -178,7 +166,6 @@ test("deploy errors when no workflows are discovered", async () => {
 
 test("deploy errors on duplicate workflow ids", async () => {
   const app = await project({
-    "runway.config.ts": config(),
     ".runway/workflows/one.ts": workflow("same"),
     ".runway/workflows/two.ts": workflow("same"),
   });

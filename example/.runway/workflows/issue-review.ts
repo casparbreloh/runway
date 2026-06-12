@@ -1,7 +1,7 @@
 import { LinearClient } from "@linear/sdk";
 import type { EntityWebhookPayloadWithIssueData, LinearWebhookPayload } from "@linear/sdk/webhooks";
 import { OpenRouter } from "@openrouter/sdk";
-import { webhook, workflow } from "@runway/core";
+import { webhook, workflow } from "runway";
 
 export default workflow({
   id: "issue-review",

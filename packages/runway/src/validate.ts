@@ -1,7 +1,5 @@
-import { secretNameOf } from "@runway/core";
-import type { Registry, WebhookTimestamp, WebhookTrigger } from "@runway/core";
-
-import { classOf } from "./naming.ts";
+import { secretNameOf } from "./secrets.ts";
+import type { Registry, WebhookTimestamp, WebhookTrigger } from "./types.ts";
 
 const timestampEqual = (a?: WebhookTimestamp, b?: WebhookTimestamp): boolean =>
   a?.source === b?.source && a?.field === b?.field && a?.toleranceMs === b?.toleranceMs;
@@ -27,14 +25,7 @@ const verificationDiffs = (
 
 export const validateRegistry = (registry: Registry): void => {
   const paths = new Map<string, { path: string; trigger: WebhookTrigger<unknown> }>();
-  const classes = new Map<string, string>();
   for (const w of registry) {
-    const className = classOf(w.def.id);
-    const classOwner = classes.get(className);
-    if (classOwner) {
-      throw new Error(`${w.path}: generated class name ${className} already used by ${classOwner}`);
-    }
-    classes.set(className, w.path);
     if (w.def.trigger.type === "webhook") {
       const owner = paths.get(w.def.trigger.path);
       if (!owner) {

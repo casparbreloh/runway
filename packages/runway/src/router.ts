@@ -1,5 +1,5 @@
-import { secretNameOf } from "@runway/core";
-import type { CronTrigger, WebhookTimestamp, WebhookTrigger, WorkflowTrigger } from "@runway/core";
+import { secretNameOf } from "./secrets.ts";
+import type { CronTrigger, WebhookTimestamp, WebhookTrigger, WorkflowTrigger } from "./types.ts";
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string }>;
@@ -9,8 +9,12 @@ type RouterEnv = Record<string, string | WorkflowBinding | undefined>;
 
 export interface RouterEntry {
   readonly id: string;
-  readonly binding: string;
+  readonly binding?: string;
   readonly trigger: WorkflowTrigger;
+}
+
+export interface WorkflowStarter {
+  start(entry: RouterEntry, event: unknown, env: unknown): Promise<{ id: string }>;
 }
 
 export interface Router {
@@ -80,7 +84,21 @@ const verifyTimestamp = (
   return Math.abs(Date.now() - ms) <= timestamp.toleranceMs;
 };
 
-export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
+const bindingStarter: WorkflowStarter = {
+  async start(entry, event, env) {
+    const binding = entry.binding ?? entry.id;
+    const workflow = (env as RouterEnv)[binding];
+    if (typeof workflow !== "object" || !workflow) {
+      throw new Error(`no binding: ${binding}`);
+    }
+    return await workflow.create({ params: event });
+  },
+};
+
+export const createRouter = (
+  entries: ReadonlyArray<RouterEntry>,
+  starter: WorkflowStarter = bindingStarter,
+): Router => {
   const webhooks = entries.filter(
     (entry): entry is RouterEntry & { trigger: WebhookTrigger<unknown> } =>
       entry.trigger.type === "webhook",
@@ -133,17 +151,9 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
         return new Response("trigger evaluation failed", { status: 500 });
       }
       if (passing.length === 0) return Response.json({ skipped: true });
-      const starts: Array<{ entry: RouterEntry; event: unknown; workflow: WorkflowBinding }> = [];
-      for (const { entry, event } of passing) {
-        const workflow = (env as RouterEnv)[entry.binding];
-        if (typeof workflow !== "object" || !workflow) {
-          return new Response(`no binding: ${entry.binding}`, { status: 500 });
-        }
-        starts.push({ entry, event, workflow });
-      }
       const runs: Array<{ id: string; workflow: string }> = [];
-      for (const { entry, event, workflow } of starts) {
-        const instance = await workflow.create({ params: event });
+      for (const { entry, event } of passing) {
+        const instance = await starter.start(entry, event, env);
         runs.push({ id: instance.id, workflow: entry.id });
       }
       return Response.json({ runs }, { status: 202 });
@@ -152,15 +162,9 @@ export const createRouter = (entries: ReadonlyArray<RouterEntry>): Router => {
       await Promise.all(
         crons
           .filter((entry) => entry.trigger.expression === event.cron)
-          .map((entry) => {
-            const workflow = (env as RouterEnv)[entry.binding];
-            if (typeof workflow !== "object" || !workflow) {
-              throw new Error(`no binding: ${entry.binding}`);
-            }
-            return workflow.create({
-              params: { cron: event.cron, scheduledTime: event.scheduledTime },
-            });
-          }),
+          .map((entry) =>
+            starter.start(entry, { cron: event.cron, scheduledTime: event.scheduledTime }, env),
+          ),
       );
     },
   };

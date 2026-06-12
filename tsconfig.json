@@ -19,15 +19,10 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "paths": {
-      "@runway/core": ["./packages/core/src/index.ts"],
-      "@runway/cloudflare": ["./packages/cloudflare/src/index.ts"],
-      "@runway/cloudflare/worker": ["./packages/cloudflare/src/worker.ts"]
+      "runway": ["./packages/runway/src/index.ts"],
+      "runway/worker": ["./packages/runway/src/worker.ts"]
     }
   },
   "files": [],
-  "references": [
-    { "path": "packages/core" },
-    { "path": "packages/cloudflare" },
-    { "path": "example" }
-  ]
+  "references": [{ "path": "packages/runway" }, { "path": "example" }]
 }

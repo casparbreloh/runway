@@ -1,13 +1,6 @@
 import { secretNameOf, secretRef } from "./secrets.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type {
-  Ctx,
-  RunwayConfig,
-  Trigger,
-  TriggerContext,
-  WorkflowDefinition,
-  WorkflowTrigger,
-} from "./types.ts";
+import type { Ctx, Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger } from "./types.ts";
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
@@ -56,5 +49,3 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
     }),
   };
 }
-
-export const defineConfig = (config: RunwayConfig): RunwayConfig => config;

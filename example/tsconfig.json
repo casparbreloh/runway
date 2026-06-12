@@ -6,6 +6,6 @@
     "declarationDir": "../.tsbuild/example",
     "tsBuildInfoFile": "../.tsbuild/example.tsbuildinfo"
   },
-  "references": [{ "path": "../packages/core" }, { "path": "../packages/cloudflare" }],
-  "include": [".runway/workflows", "runway.config.ts"]
+  "references": [{ "path": "../packages/runway" }],
+  "include": [".runway/workflows"]
 }

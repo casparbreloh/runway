@@ -9,8 +9,7 @@
   "dependencies": {
     "@linear/sdk": "catalog:",
     "@openrouter/sdk": "catalog:",
-    "@runway/cloudflare": "workspace:*",
-    "@runway/core": "workspace:*"
+    "runway": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",

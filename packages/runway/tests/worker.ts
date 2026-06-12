@@ -1,5 +1,5 @@
-import { makeCtx, secretNameOf, secretsOf } from "@runway/core";
-import type { Primitives, WorkflowDefinition } from "@runway/core";
+import { makeCtx, secretNameOf, secretsOf } from "runway";
+import type { Primitives, WorkflowDefinition } from "runway";
 
 import { bindingOf } from "../src/naming.ts";
 import { createRouter, hmacSha256Hex } from "../src/router.ts";
