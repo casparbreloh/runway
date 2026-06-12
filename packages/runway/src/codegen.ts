@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { secretNamesOf } from "./registry.ts";
 import type { RegisteredWorkflow } from "./types.ts";
 import type { Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
@@ -61,7 +62,7 @@ export const generateWorker = (
     .join("\n");
   const modules = JSON.stringify(opts.modules);
   const workflowLoaders = JSON.stringify(opts.workflowLoaders);
-  const secretNames = JSON.stringify([...new Set(registry.flatMap((w) => w.def.secrets))]);
+  const secretNames = JSON.stringify(secretNamesOf(registry));
   return `${imports}
 import {
   createDynamicWorkflowEntrypoint,

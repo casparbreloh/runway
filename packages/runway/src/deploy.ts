@@ -21,6 +21,7 @@ import {
   generateDynamicWorker,
   generateWorker,
 } from "./codegen.ts";
+import { secretNamesOf } from "./registry.ts";
 import type { ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 
 type AsyncMethod<T extends (...args: never[]) => unknown> = (
@@ -81,10 +82,6 @@ const resultOf = (response: unknown): unknown =>
 
 const SCRIPT_NAME = "runway";
 const execFileAsync = promisify(execFile);
-
-const secretNamesOf = (registry: Registry): ReadonlyArray<string> => [
-  ...new Set(registry.flatMap((w) => w.def.secrets)),
-];
 
 const validateBindings = (secrets: ReadonlyArray<string>): void => {
   const names = new Map<string, string>();
