@@ -57,11 +57,14 @@ const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
-const writeWrangler = async (cwd: string): Promise<string> => {
+const writeWrangler = async (
+  cwd: string,
+  script = '#!/bin/sh\nprintf \'{"type":"oauth","token":"oauth-token"}\\n\'\n',
+): Promise<string> => {
   const bin = path.join(cwd, ".bin");
   await mkdir(bin, { recursive: true });
   const wrangler = path.join(bin, "wrangler");
-  await writeFile(wrangler, "#!/bin/sh\nprintf '{\"loggedIn\":true}\\n'\n");
+  await writeFile(wrangler, script);
   await chmod(wrangler, 0o755);
   return bin;
 };
@@ -506,12 +509,6 @@ test("deploy env secrets override remote scoped secrets", async () => {
 test("deploy can use wrangler oauth and infer a single account", async () => {
   const project = await writeProject();
   const bin = await writeWrangler(project.cwd);
-  const wranglerConfig = path.join(project.cwd, ".config", ".wrangler", "config");
-  await mkdir(wranglerConfig, { recursive: true });
-  await writeFile(
-    path.join(wranglerConfig, "default.toml"),
-    `oauth_token = "oauth-token"\nexpiration_time = ${Date.now() + 60_000}\n`,
-  );
   const calls = emptyCalls();
   const client = fakeApi(calls, { accounts: [{ id: "wrangler-account" }] });
   const tokens: string[] = [];
@@ -520,7 +517,6 @@ test("deploy can use wrangler oauth and infer a single account", async () => {
     const result = await deploy(registry, {
       cwd: project.cwd,
       env: {
-        XDG_CONFIG_HOME: path.join(project.cwd, ".config"),
         PATH: bin,
         LINEAR_WEBHOOK_SECRET: "secret-value",
         LINEAR_API_KEY: "key-value",
@@ -547,12 +543,6 @@ test("deploy can use wrangler oauth and infer a single account", async () => {
 test("deploy requires account id when wrangler auth sees multiple accounts", async () => {
   const project = await writeProject();
   const bin = await writeWrangler(project.cwd);
-  const wranglerConfig = path.join(project.cwd, ".config", ".wrangler", "config");
-  await mkdir(wranglerConfig, { recursive: true });
-  await writeFile(
-    path.join(wranglerConfig, "default.toml"),
-    `oauth_token = "oauth-token"\nexpiration_time = ${Date.now() + 60_000}\n`,
-  );
   const client = fakeApi(emptyCalls(), { accounts: [{ id: "one" }, { id: "two" }] });
 
   try {
@@ -560,7 +550,6 @@ test("deploy requires account id when wrangler auth sees multiple accounts", asy
       deploy(registry, {
         cwd: project.cwd,
         env: {
-          XDG_CONFIG_HOME: path.join(project.cwd, ".config"),
           PATH: bin,
           LINEAR_WEBHOOK_SECRET: "secret-value",
           LINEAR_API_KEY: "key-value",
@@ -573,15 +562,9 @@ test("deploy requires account id when wrangler auth sees multiple accounts", asy
   }
 });
 
-test("deploy ignores expired wrangler oauth tokens", async () => {
+test("deploy ignores unavailable wrangler auth", async () => {
   const project = await writeProject();
-  const bin = await writeWrangler(project.cwd);
-  const wranglerConfig = path.join(project.cwd, ".config", ".wrangler", "config");
-  await mkdir(wranglerConfig, { recursive: true });
-  await writeFile(
-    path.join(wranglerConfig, "default.toml"),
-    `oauth_token = "oauth-token"\nexpiration_time = ${Date.now() - 60_000}\n`,
-  );
+  const bin = await writeWrangler(project.cwd, "#!/bin/sh\nexit 1\n");
   const calls = emptyCalls();
 
   try {
@@ -589,7 +572,6 @@ test("deploy ignores expired wrangler oauth tokens", async () => {
       deploy(registry, {
         cwd: project.cwd,
         env: {
-          XDG_CONFIG_HOME: path.join(project.cwd, ".config"),
           PATH: bin,
           LINEAR_WEBHOOK_SECRET: "secret-value",
           LINEAR_API_KEY: "key-value",

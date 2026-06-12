@@ -1,8 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
@@ -116,66 +114,24 @@ const selectSecretBinding = (
     candidate === name ? localSecrets.has(name) : remoteSecrets.has(candidate),
   );
 
-const parseTomlString = (contents: string, key: string): string | undefined => {
-  const match = contents.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"));
-  return match?.[1];
-};
-
-const parseTomlNumber = (contents: string, key: string): number | undefined => {
-  const match = contents.match(new RegExp(`^${key}\\s*=\\s*([0-9]+(?:\\.[0-9]+)?)`, "m"));
-  return match ? Number(match[1]) : undefined;
-};
-
-const validExpiry = (expires: number | undefined): boolean => {
-  if (expires === undefined) return false;
-  const ms = expires < 10_000_000_000 ? expires * 1000 : expires;
-  return ms > Date.now() + 30_000;
-};
-
-const wranglerConfigPaths = (env: Record<string, string | undefined>): ReadonlyArray<string> => {
-  const home = env.HOME ?? env.USERPROFILE ?? os.homedir();
-  if (!home) return [];
-  const xdg = env.XDG_CONFIG_HOME ?? path.join(home, ".config");
-  return [
-    path.join(xdg, ".wrangler", "config", "default.toml"),
-    path.join(home, ".wrangler", "config", "default.toml"),
-  ];
-};
-
-const runWranglerWhoami = async (
-  opts: DeployContext,
-  env: Record<string, string | undefined>,
-): Promise<boolean> => {
-  try {
-    await execFileAsync("wrangler", ["whoami", "--json"], {
-      cwd: opts.cwd,
-      env: { ...process.env, ...env },
-      timeout: 10_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 const wranglerTokenOf = async (
   opts: DeployContext,
   env: Record<string, string | undefined>,
 ): Promise<string | undefined> => {
   if (opts.wranglerAuth === false || env.RUNWAY_DISABLE_WRANGLER_AUTH) return undefined;
-  if (!(await runWranglerWhoami(opts, env))) return undefined;
-  for (const configPath of wranglerConfigPaths(env)) {
-    try {
-      const contents = await readFile(configPath, "utf8");
-      const apiToken = parseTomlString(contents, "api_token");
-      if (apiToken) return apiToken;
-      const oauthToken = parseTomlString(contents, "oauth_token");
-      if (oauthToken && validExpiry(parseTomlNumber(contents, "expiration_time"))) {
-        return oauthToken;
-      }
-    } catch {}
+  try {
+    const { stdout } = await execFileAsync("wrangler", ["auth", "token", "--json"], {
+      cwd: opts.cwd,
+      env: { ...process.env, ...env },
+      timeout: 10_000,
+    });
+    const auth = JSON.parse(stdout) as { type?: unknown; token?: unknown };
+    return (auth.type === "oauth" || auth.type === "api_token") && typeof auth.token === "string"
+      ? auth.token
+      : undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 };
 
 const accountIdsOf = async (response: unknown): Promise<ReadonlyArray<string>> => {
