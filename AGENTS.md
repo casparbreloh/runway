@@ -2,23 +2,20 @@
 
 Code-first TypeScript library for durable workflows. Author workflows with
 `workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
-`.runway/workflows/**/*.ts`, and let a backend codegen + deploy the runtime.
+`.runway/workflows/**/*.ts`, and let the CLI codegen + deploy the Cloudflare runtime.
 
-Core is portable and Web-Standards only. `@runway/cloudflare` is the only backend today: Cloudflare
-Workflows own replay, persistence, and durable sleep. The `Backend` interface keeps authoring code
-portable for future Vercel/Postgres/self-hosted backends.
+Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and durable sleep.
 
 ## Layout
 
-- `packages/core/` — `@runway/core`, SDK + `runway` CLI.
-  - `src/types.ts` — public contracts: `Ctx`, triggers, registry, backend/deploy types.
+- `packages/runway/` — `runway`, SDK + `runway` CLI.
+  - `src/types.ts` — public contracts: `Ctx`, triggers, registry, workflow types.
   - `src/secrets.ts` — `SecretRef`, `secretRef`, `secretNameOf`.
-  - `src/workflow.ts` — `workflow()` + `defineConfig`.
+  - `src/workflow.ts` — `workflow()`.
   - `src/trigger.ts` — `webhook()`, `.filter()`, `cron()`, trigger validation.
   - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
-  - `bin/runway.ts` — loads config, discovers workflow exports, calls `backend.deploy`.
-- `packages/cloudflare/` — Cloudflare backend.
-  - `src/worker.ts` — workerd runtime adapter: `toEntrypoint(def)`, `step.do`, `step.sleep`.
+  - `bin/runway.ts` — discovers workflow exports and deploys Cloudflare.
+  - `src/worker.ts` — workerd runtime adapter: `toEntrypoint(def)`, Dynamic Worker fetch starter.
   - `src/router.ts` — local-testable webhook/cron routing, HMAC, schema/filter gating.
   - `src/deploy.ts` — Node deploy path: validate env, codegen, esbuild, Cloudflare SDK upload.
   - `src/codegen.ts` — generated Worker module imports/classes/router.
@@ -35,8 +32,8 @@ portable for future Vercel/Postgres/self-hosted backends.
   - `pnpm format` / `pnpm format-check` — `oxfmt`
   - `pnpm test` — Vitest
 - CLI: only `runway deploy`.
-- Live deploy needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and all declared workflow
-  secrets.
+- Live deploy needs `wrangler login` or `CLOUDFLARE_API_TOKEN`; set `CLOUDFLARE_ACCOUNT_ID` when
+  auth can see multiple accounts. All declared workflow secrets must be env vars.
 
 ## Authoring Model
 
@@ -91,13 +88,11 @@ export default workflow({
 - Deploy fails before upload when any declared secret env var is missing.
 - Non-secret config belongs in normal TypeScript, not `secrets`.
 
-## Backend Contract
+## Runtime Contract
 
-- Core owns `makeCtx(primitives, { runId, secrets, env })`.
-- A backend only implements `Primitives`: `step<T>(id, fn)` and `sleep(id, ms)`.
-- Cloudflare maps those to `step.do(id, fn)` and `step.sleep(id, ms)`.
-- `sleep(ms)` is auto-named positionally by core (`sleep-0`, `sleep-1`, ...).
-- Core must stay Cloudflare-free. Worker-specific code lives in `@runway/cloudflare`.
+- Runway owns `makeCtx(primitives, { runId, secrets, env })`.
+- Cloudflare maps primitives to `step.do(id, fn)` and `step.sleep(id, ms)`.
+- `sleep(ms)` is auto-named positionally by Runway (`sleep-0`, `sleep-1`, ...).
 
 ## Registration And Deploy
 
@@ -106,8 +101,10 @@ export default workflow({
 - Only exports tagged `__kind === "workflow"` are registered.
 - Registry entries are `{ path, exportName, def }`.
 - Codegen imports workflow modules by reference so schemas and filter functions survive bundling.
-- Deploy owns the `runway-<package-name>` script, updates workflow bindings/cron schedules, removes
-  stale workflows for that script, enables workers.dev, and returns webhook URLs.
+- Deploy owns the `runway` script with one Worker Loader binding (`LOADER`) and one Dynamic
+  Workflows binding (`WORKFLOWS`) backed by the singleton Cloudflare Workflow named `runway`.
+- Deploy updates cron schedules, removes stale non-`runway` workflow resources for that script,
+  enables workers.dev, and returns webhook URLs.
 
 ## Conventions
 

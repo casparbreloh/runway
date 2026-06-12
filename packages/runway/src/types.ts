@@ -87,24 +87,3 @@ export interface ProgressEvent {
   readonly step: "load" | "build" | "deploy";
   readonly status: "start" | "done";
 }
-
-export interface DeployOptions {
-  readonly cwd: string;
-  readonly env?: Record<string, string | undefined>;
-  readonly onProgress?: (event: ProgressEvent) => void;
-}
-
-export interface DeployResult {
-  readonly script: string;
-  readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
-}
-
-export interface Backend {
-  deploy(registry: Registry, opts: DeployOptions): Promise<DeployResult>;
-}
-
-export interface RunwayConfig {
-  readonly backend: Backend;
-  readonly include?: ReadonlyArray<string>;
-  readonly exclude?: ReadonlyArray<string>;
-}

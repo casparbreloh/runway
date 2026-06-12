@@ -7,8 +7,9 @@ import { pathToFileURL } from "node:url";
 import { defineCommand, runMain } from "citty";
 
 import pkg from "../package.json" with { type: "json" };
+import { deploy as deployCloudflare } from "../src/deploy.ts";
 import { validateTrigger } from "../src/trigger.ts";
-import type { ProgressEvent, Registry, RunwayConfig, WorkflowDefinition } from "../src/types.ts";
+import type { ProgressEvent, Registry, WorkflowDefinition } from "../src/types.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
@@ -59,8 +60,8 @@ const isWorkflow = (value: unknown): value is WorkflowDefinition =>
   (value as { __kind?: unknown }).__kind === "workflow" &&
   Array.isArray((value as { secrets?: unknown }).secrets);
 
-const DEFAULT_INCLUDE = [".runway/workflows/**/*.ts"];
-const DEFAULT_EXCLUDE = ["**/*.test.ts", "**/*.spec.ts", "**/*.d.ts"];
+const INCLUDE = [".runway/workflows/**/*.ts"];
+const EXCLUDE = ["**/*.test.ts", "**/*.spec.ts", "**/*.d.ts"];
 
 const toPosix = (path: string): string => path.split(sep).join("/");
 
@@ -102,16 +103,6 @@ const walkFiles = async (dir: string): Promise<ReadonlyArray<string>> => {
 const matches = (file: string, pattern: string): boolean =>
   matchesGlob(file, pattern) || matchesGlob(file.replaceAll("/.", "/").replace(/^\./, ""), pattern);
 
-const loadConfig = async (cwd: string): Promise<RunwayConfig> => {
-  const path = (await exists(resolve(cwd, "runway.config.ts")))
-    ? resolve(cwd, "runway.config.ts")
-    : resolve(cwd, ".runway/runway.config.ts");
-  const mod = (await import(pathToFileURL(path).href)) as {
-    default: RunwayConfig;
-  };
-  return mod.default;
-};
-
 const discoverFiles = async (
   cwd: string,
   include: ReadonlyArray<string>,
@@ -134,12 +125,8 @@ const discoverFiles = async (
     .sort();
 };
 
-const loadRegistry = async (cwd: string, config: RunwayConfig): Promise<Registry> => {
-  const paths = await discoverFiles(
-    cwd,
-    config.include ?? DEFAULT_INCLUDE,
-    config.exclude ?? DEFAULT_EXCLUDE,
-  );
+const loadRegistry = async (cwd: string): Promise<Registry> => {
+  const paths = await discoverFiles(cwd, INCLUDE, EXCLUDE);
   const workflows = new Map<WorkflowDefinition, { path: string; exportName: string }>();
   for (const path of paths) {
     const mod = (await import(pathToFileURL(resolve(cwd, path)).href)) as Record<string, unknown>;
@@ -176,10 +163,9 @@ const deploy = defineCommand({
     try {
       const cwd = process.cwd();
       out.event({ step: "load", status: "start" });
-      const config = await loadConfig(cwd);
-      const registry = await loadRegistry(cwd, config);
+      const registry = await loadRegistry(cwd);
       out.event({ step: "load", status: "done" });
-      const result = await config.backend.deploy(registry, {
+      const result = await deployCloudflare(registry, {
         cwd,
         env: process.env,
         onProgress: (event) => out.event(event),

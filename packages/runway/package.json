@@ -1,19 +1,23 @@
 {
-  "name": "@runway/cloudflare",
+  "name": "runway",
   "version": "0.1.0",
+  "bin": {
+    "runway": "./bin/runway.ts"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./worker": "./src/worker.ts"
   },
   "dependencies": {
-    "@runway/core": "workspace:*",
+    "@cloudflare/dynamic-workflows": "catalog:",
+    "@standard-schema/spec": "catalog:",
+    "citty": "catalog:",
     "cloudflare": "catalog:",
     "esbuild": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
-    "@cloudflare/workers-types": "catalog:",
-    "@standard-schema/spec": "catalog:"
+    "@cloudflare/workers-types": "catalog:"
   }
 }

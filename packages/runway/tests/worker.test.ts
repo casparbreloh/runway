@@ -1,5 +1,5 @@
-import { cron, webhook, workflow } from "@runway/core";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { cron, webhook, workflow } from "runway";
 import { expect, test } from "vitest";
 
 import { createRouter, hmacSha256Hex } from "../src/router.ts";

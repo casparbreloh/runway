@@ -1,19 +1,14 @@
 # Runway
 
-A code-first TypeScript library for durable workflows. The core (`@runway/core`) is a portable,
-Web-Standards-only authoring SDK with zero Cloudflare deps that owns the durable-execution contract;
-the durable runtime is a **pluggable backend**. Today there is one — `@runway/cloudflare`, backed by
-native Cloudflare Workflows, which owns replay, persistence, and durable sleep. The `Backend` seam
-keeps your workflows portable, so other backends (Vercel, self-hosted Postgres) can be added later
-without touching authoring code.
-
-You author with `@runway/core` but run the `runway` CLI, which `@runway/core` ships as its `bin`.
+A code-first TypeScript library for durable workflows on Cloudflare Workflows. You author workflows
+with the `runway` package and deploy them with the `runway` CLI. Cloudflare owns replay,
+persistence, durable sleep, cron schedules, and webhook routing.
 
 ## A workflow
 
 ```ts
 // .runway/workflows/hello.ts
-import { cron, workflow } from "@runway/core";
+import { cron, workflow } from "runway";
 
 export default workflow({
   id: "hello",
@@ -37,7 +32,7 @@ Anything else — an HTTP call, for example — is plain TypeScript wrapped insi
 Triggers are explicit. There is no default public start endpoint.
 
 ```ts
-import { webhook, workflow } from "@runway/core";
+import { webhook, workflow } from "runway";
 import { z } from "zod";
 
 const issueCreated = z.object({
@@ -92,8 +87,8 @@ The handler's first argument is `{ runId, secrets, env, step, sleep }`:
 
 - `ctx.runId` — the run instance id.
 - `ctx.secrets` — the declared secrets as a typed record of name → value.
-- `ctx.env` — the backend's raw environment, typed `unknown`; the escape hatch to backend-specific
-  bindings — cast it in the workflow.
+- `ctx.env` — the raw Cloudflare environment, typed `unknown`; the escape hatch to bindings — cast
+  it in the workflow.
 - `ctx.step(id, fn)` — a durable, memoized step; `id` is the idempotency key and `fn` receives
   `{ id }`. Returns a JSON-serializable value. Steps re-run on replay, so keep them idempotent.
 - `ctx.sleep(ms)` — durable sleep. `ms` is a plain number of milliseconds; there is no id and no
@@ -111,39 +106,26 @@ TypeScript in the workflow file.
 
 ## Wiring
 
-Point `runway.config.ts` at a backend. The CLI discovers exported workflows from
-`.runway/workflows/**/*.ts` by default:
+The CLI discovers exported workflows from `.runway/workflows/**/*.ts`, excluding `**/*.test.ts`,
+`**/*.spec.ts`, and `**/*.d.ts`. There is no `runway.config.ts`.
 
-```ts
-// runway.config.ts
-import { cloudflare } from "@runway/cloudflare";
-import { defineConfig } from "@runway/core";
+Deploy codegens one Cloudflare Worker named `runway`. That Worker is a Dynamic Workflows loader: it
+owns webhook and cron routing, uses one Cloudflare Workflow binding named `WORKFLOWS`, and loads each
+repo workflow through a Cloudflare Worker Loader binding named `LOADER`. No wrangler config and no
+generated files on disk. The workflow `id` is the Runway routing identity; the deployed Cloudflare
+Workflow resource is the singleton `runway`.
 
-export default defineConfig({ backend: cloudflare() });
-```
-
-Customize discovery with repo-root-relative globs when needed:
-
-```ts
-export default defineConfig({
-  backend: cloudflare(),
-  include: [".runway/*.ts"],
-  exclude: ["**/*.test.ts"],
-});
-```
-
-Default excludes are `**/*.test.ts`, `**/*.spec.ts`, and `**/*.d.ts`. The backend codegens a Worker
-that namespace-imports each matched module and creates one Cloudflare `WorkflowEntrypoint` per
-workflow export — fully in memory, no wrangler config, no generated files on disk. The `id` stays
-the deploy-time identity (the `workflow_name` and binding); the trigger path is the public webhook
-route.
+For this first Cloudflare-native PR, workflow resumes use the latest deployed workflow code and
+secrets. Version-pinned resumes require durable artifact storage and are intentionally left for the
+future registry/control-plane work.
 
 ## CLI
 
 - `runway deploy` — discover workflow exports, codegen and bundle the Worker in memory, then upload
-  via the typed `cloudflare` SDK (`cf.workers.scripts.update` with a `type: "workflow"` binding per
-  workflow plus `secret_text` bindings for the declared secrets + `cf.workflows.update` per
-  workflow). No wrangler, no Docker. Prints the script name and one POST URL per webhook trigger.
+  via the typed `cloudflare` SDK (`cf.workers.scripts.update` with one `worker_loader` binding, one
+  Dynamic Workflows `type: "workflow"` binding, and `secret_text` bindings for the declared secrets
+  - `cf.workflows.update("runway", ...)`). The Worker script name is always `runway`. Runway does
+    not shell out to `wrangler deploy`. Prints the script name and one POST URL per webhook trigger.
 
 ## Example
 
@@ -154,12 +136,18 @@ comment with `@linear/sdk`'s `createComment` inside another `ctx.step`.
 
 ## Testing
 
-- `pnpm test` — runs package-owned Vitest tests. Core owns the CLI test; Cloudflare owns deploy and
-  Workers-runtime trigger tests, with the runtime test running under `@cloudflare/vitest-pool-workers`.
+- `pnpm test` — runs package-owned Vitest tests. The Workers-runtime trigger tests run under
+  `@cloudflare/vitest-pool-workers`.
 - `pnpm typecheck` includes the example workflow; deploy tests cover the codegen/bundle/upload path
   with a mocked Cloudflare SDK.
 
-Deploying needs Cloudflare credentials plus every workflow-declared secret in the environment:
+Deploying needs every workflow-declared secret in the environment. For Cloudflare auth, use either
+Wrangler login locally or explicit env vars in CI:
+
+```sh
+wrangler login
+runway deploy
+```
 
 ```sh
 export CLOUDFLARE_API_TOKEN=...
@@ -167,6 +155,8 @@ export CLOUDFLARE_ACCOUNT_ID=...
 export LINEAR_WEBHOOK_SECRET=...
 runway deploy
 ```
+
+If Wrangler is logged into multiple Cloudflare accounts, set `CLOUDFLARE_ACCOUNT_ID`.
 
 Deploy prints one POST URL per webhook trigger. Start a run by POSTing a signed body to it:
 

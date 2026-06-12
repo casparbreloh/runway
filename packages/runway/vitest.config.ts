@@ -5,11 +5,12 @@ import { COMPATIBILITY_DATE } from "./src/codegen.ts";
 
 export default defineConfig({
   test: {
+    testTimeout: 20_000,
     projects: [
       {
         test: {
           name: "node",
-          include: ["tests/deploy.test.ts"],
+          include: ["tests/cli.test.ts", "tests/deploy.test.ts", "tests/workflow.test.ts"],
           testTimeout: 20_000,
         },
       },
