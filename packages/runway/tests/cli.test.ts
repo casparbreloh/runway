@@ -67,21 +67,12 @@ export default workflow({
 `;
 
 test("deploy reports missing required env vars before upload", async () => {
-  const missingSecrets = await run(["deploy"], {
-    CLOUDFLARE_API_TOKEN: "test-token",
-    CLOUDFLARE_ACCOUNT_ID: "test-account",
-  });
   const missingAll = await run(["deploy"]);
 
-  expect(missingSecrets.code).toBe(1);
-  expect(missingSecrets.output).toMatch(/runway: deploy failed/);
-  expect(missingSecrets.output).toMatch(
-    /missing required env var\(s\): LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
-  );
   expect(missingAll.code).toBe(1);
   expect(missingAll.output).toMatch(/runway: deploy failed/);
   expect(missingAll.output).toMatch(
-    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, LINEAR_WEBHOOK_SECRET, LINEAR_API_KEY, OPENROUTER_API_KEY/,
+    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
   );
 });
 
@@ -92,14 +83,10 @@ test("deploy discovers workflows without config", async () => {
   });
 
   try {
-    const result = await run(
-      ["deploy"],
-      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
-      app.cwd,
-    );
+    const result = await run(["deploy"], {}, app.cwd);
 
     expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
+    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
     expect(result.output).not.toMatch(/IGNORED_SECRET/);
   } finally {
     await app.cleanup();
@@ -115,14 +102,10 @@ test("deploy only discovers fixed workflow path", async () => {
   });
 
   try {
-    const result = await run(
-      ["deploy"],
-      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
-      app.cwd,
-    );
+    const result = await run(["deploy"], {}, app.cwd);
 
     expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
+    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
     expect(result.output).not.toMatch(/VISIBLE_SECRET|SPEC_SECRET|TYPES_SECRET/);
   } finally {
     await app.cleanup();
@@ -136,14 +119,10 @@ test("deploy supports barrel exports without duplicate registration", async () =
   });
 
   try {
-    const result = await run(
-      ["deploy"],
-      { CLOUDFLARE_API_TOKEN: "test-token", CLOUDFLARE_ACCOUNT_ID: "test-account" },
-      app.cwd,
-    );
+    const result = await run(["deploy"], {}, app.cwd);
 
     expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): HELLO_SECRET/);
+    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
   } finally {
     await app.cleanup();
   }
@@ -185,4 +164,35 @@ test("build is not a public command", async () => {
 
   expect(result.code).toBe(1);
   expect(result.output).toMatch(/Unknown command/);
+});
+
+test("secrets set validates command shape before auth", async () => {
+  const invalidName = await run(["secrets", "set", "not-valid", "value", "--global"]);
+  const missingValue = await run(["secrets", "set", "LINEAR_API_KEY"]);
+  const missingWorkflow = await run([
+    "secrets",
+    "set",
+    "LINEAR_API_KEY",
+    "value",
+    "--workflow",
+    "--global",
+  ]);
+  const invalidWorkflow = await run([
+    "secrets",
+    "set",
+    "LINEAR_API_KEY",
+    "value",
+    "--workflow",
+    "bad_name",
+  ]);
+
+  expect(invalidName.code).toBe(1);
+  expect(invalidName.output).toMatch(/runway: secrets failed/);
+  expect(invalidName.output).toMatch(/invalid workflow secret "not-valid"/);
+  expect(missingValue.code).toBe(1);
+  expect(missingValue.output).toMatch(/usage: runway secrets set <name> <value>/);
+  expect(missingWorkflow.code).toBe(1);
+  expect(missingWorkflow.output).toMatch(/--workflow requires a workflow id/);
+  expect(invalidWorkflow.code).toBe(1);
+  expect(invalidWorkflow.output).toMatch(/invalid workflow id "bad_name"/);
 });

@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { secretNamesOf } from "./registry.ts";
+import { secretCandidates } from "./secret-store.ts";
 import type { RegisteredWorkflow } from "./types.ts";
 import type { Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
@@ -66,7 +66,14 @@ export const generateWorker = (
     .join("\n");
   const modules = JSON.stringify(opts.modules);
   const workflowLoaders = JSON.stringify(opts.workflowLoaders);
-  const secretNames = JSON.stringify(secretNamesOf(registry));
+  const secretBindings = JSON.stringify(
+    Object.fromEntries(
+      registry.map((w) => [
+        w.def.id,
+        Object.fromEntries(w.def.secrets.map((name) => [name, secretCandidates(w.def.id, name)])),
+      ]),
+    ),
+  );
   return `${imports}
 import {
   createDynamicWorkflowEntrypoint,
@@ -102,7 +109,15 @@ interface Env {
 
 const modules: Record<string, string> = ${modules};
 const workflowLoaders: Record<string, string> = ${workflowLoaders};
-const secretNames: ReadonlyArray<string> = ${secretNames};
+const secretBindings: Record<string, Record<string, ReadonlyArray<string>>> = ${secretBindings};
+
+const secretsFor = (parentEnv: Record<string, unknown>, workflowId: string): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(secretBindings[workflowId] ?? {}).map(([name, candidates]) => [
+      name,
+      candidates.map((candidate) => parentEnv[candidate]).find((value) => typeof value === "string"),
+    ]),
+  );
 
 const loadWorkflow = (env: Env, workflowId: string): LoaderStub => {
   const loaderId = workflowLoaders[workflowId];
@@ -116,7 +131,7 @@ const loadWorkflow = (env: Env, workflowId: string): LoaderStub => {
     mainModule: "index.js",
     modules: { "index.js": code },
     env: {
-      ...Object.fromEntries(secretNames.map((name) => [name, parentEnv[name]])),
+      ...secretsFor(parentEnv, workflowId),
       ${JSON.stringify(SANDBOX_BINDING)}: parentEnv[${JSON.stringify(SANDBOX_BINDING)}],
       ${WORKFLOW_BINDING}: wrapWorkflowBinding({ workflowId }),
     },
