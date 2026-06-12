@@ -79,6 +79,7 @@ const fakeApi = (
   opts: {
     workflows?: ReadonlyArray<{ name: string; script_name: string }>;
     accounts?: ReadonlyArray<{ id: string }>;
+    scripts?: ReadonlyArray<{ id: string; migration_tag?: string }>;
   } = {},
 ): CloudflareApi => ({
   accounts: {
@@ -86,6 +87,7 @@ const fakeApi = (
   },
   workers: {
     scripts: {
+      list: async () => opts.scripts ?? [],
       update: async (...args) => {
         calls.metadata = args[1].metadata;
       },
@@ -222,6 +224,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     expect(generated).toContain(
       "...Object.fromEntries(secretNames.map((name) => [name, parentEnv[name]]))",
     );
+    expect(generated).toContain('export { Sandbox } from "@cloudflare/sandbox";');
+    expect(generated).toContain('"Sandbox": parentEnv["Sandbox"]');
     expect(generated).toContain("wrapWorkflowBinding({ workflowId })");
     expect(generated).not.toContain("wrapWorkflowBinding({ workflowId, loaderId })");
     expect(result).toEqual({
@@ -231,6 +235,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     const metadata = calls.metadata as {
       compatibility_flags?: ReadonlyArray<string>;
       bindings: ReadonlyArray<unknown>;
+      containers?: ReadonlyArray<unknown>;
+      migrations?: unknown;
     };
     expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
     expect(metadata.bindings).toEqual([
@@ -241,9 +247,21 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         workflow_name: "runway",
         class_name: "DynamicWorkflow",
       },
+      { type: "durable_object_namespace", name: "Sandbox", class_name: "Sandbox" },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
       { type: "secret_text", name: "LINEAR_API_KEY", text: "key-value" },
     ]);
+    expect(metadata.containers).toEqual([
+      {
+        class_name: "Sandbox",
+        image: "docker.io/cloudflare/sandbox:0.12.1",
+        instance_type: "lite",
+      },
+    ]);
+    expect(metadata.migrations).toEqual({
+      new_tag: "runway-sandbox-v1",
+      new_sqlite_classes: ["Sandbox"],
+    });
     expect(calls.workflowUpdates).toEqual([
       ["runway", { account_id: "account", class_name: "DynamicWorkflow", script_name: "runway" }],
     ]);
@@ -253,6 +271,27 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     ]);
     expect(calls.subdomains).toEqual([["runway", { account_id: "account", enabled: true }]]);
     expect(calls.schedules).toEqual([{ cron: "0 9 * * *" }]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy does not replay the sandbox migration after it has been applied", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    scripts: [{ id: "runway", migration_tag: "runway-sandbox-v1" }],
+  });
+
+  try {
+    await deploy(registry, {
+      cwd: project.cwd,
+      env: deployEnv,
+      client: () => client,
+    });
+
+    const metadata = calls.metadata as { migrations?: unknown };
+    expect(metadata.migrations).toBeUndefined();
   } finally {
     await project.cleanup();
   }
@@ -292,6 +331,41 @@ test("deploy rejects a secret that collides with a runway binding", async () => 
         wranglerAuth: false,
       }),
     ).rejects.toThrow('binding "WORKFLOWS" is used by Runway workflow binding and a secret');
+    expect(calls.metadata).toBeUndefined();
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects a secret that collides with the sandbox binding", async () => {
+  const colliding: Registry = [
+    {
+      path: ".runway/workflows/colliding.ts",
+      exportName: "default",
+      def: workflow({
+        id: "colliding",
+        secrets: ["Sandbox"],
+        trigger: () => cron("0 9 * * *"),
+      }).handler(async () => {}),
+    },
+  ];
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls);
+
+  try {
+    await expect(
+      deploy(colliding, {
+        cwd: project.cwd,
+        env: {
+          CLOUDFLARE_API_TOKEN: "token",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          Sandbox: "secret-value",
+        },
+        client: () => client,
+        wranglerAuth: false,
+      }),
+    ).rejects.toThrow('binding "Sandbox" is used by Runway sandbox binding and a secret');
     expect(calls.metadata).toBeUndefined();
   } finally {
     await project.cleanup();

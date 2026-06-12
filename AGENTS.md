@@ -21,7 +21,7 @@ Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and d
   - `src/codegen.ts` — generated Worker module imports/classes/router.
   - `src/validate.ts` — registry validation.
   - `tests/worker.ts` — no-account integration helper.
-- `example/` — dogfood Linear issue review workflow using OpenRouter + Linear inside `ctx.step`.
+- `example/` — dogfood Linear issue review workflow using Pi in `ctx.sandbox` + Linear.
 
 ## Commands
 
@@ -60,8 +60,8 @@ export default workflow({
 
 - Trigger is required and lives in the `workflow()` object, not a chained `.trigger()`.
 - Handler receives `(ctx, event)`. There is no `ctx.params`.
-- `ctx` is `{ runId, secrets, env, step, sleep }`.
-- Only `ctx.step(id, fn)` and `ctx.sleep(ms)` are durable primitives.
+- `ctx` is `{ runId, secrets, env, step, sandbox, sleep }`.
+- Durable primitives are `ctx.step(id, fn)`, `ctx.sandbox(id, fn)`, and `ctx.sleep(ms)`.
 - Wrap HTTP/API calls in named steps. Keep step return values JSON-serializable.
 - Steps can replay. Keep them idempotent.
 
@@ -91,7 +91,8 @@ export default workflow({
 ## Runtime Contract
 
 - Runway owns `makeCtx(primitives, { runId, secrets, env })`.
-- Cloudflare maps primitives to `step.do(id, fn)` and `step.sleep(id, ms)`.
+- Cloudflare maps primitives to `step.do(id, fn)`, `getSandbox(env.Sandbox, name)`, and
+  `step.sleep(id, ms)`.
 - `sleep(ms)` is auto-named positionally by Runway (`sleep-0`, `sleep-1`, ...).
 
 ## Registration And Deploy
@@ -101,8 +102,9 @@ export default workflow({
 - Only exports tagged `__kind === "workflow"` are registered.
 - Registry entries are `{ path, exportName, def }`.
 - Codegen imports workflow modules by reference so schemas and filter functions survive bundling.
-- Deploy owns the `runway` script with one Worker Loader binding (`LOADER`) and one Dynamic
-  Workflows binding (`WORKFLOWS`) backed by the singleton Cloudflare Workflow named `runway`.
+- Deploy owns the `runway` script with one Worker Loader binding (`LOADER`), one Dynamic Workflows
+  binding (`WORKFLOWS`) backed by the singleton Cloudflare Workflow named `runway`, and the hidden
+  Cloudflare Sandbox binding used by `ctx.sandbox`.
 - Deploy updates cron schedules, removes stale non-`runway` workflow resources for that script,
   enables workers.dev, and returns webhook URLs.
 
@@ -112,5 +114,3 @@ export default workflow({
 - Code is effectively comment-free; match that unless a comment explains a non-obvious why.
 - Touch only the requested surface.
 - Add catalog deps in `pnpm-workspace.yaml`; use `"catalog:"` in packages.
-- Do not reintroduce sandbox primitives in this PR. If needed, use provider SDKs manually inside a
-  normal step in separate work.

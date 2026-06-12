@@ -1,6 +1,5 @@
 import { LinearClient } from "@linear/sdk";
 import type { EntityWebhookPayloadWithIssueData, LinearWebhookPayload } from "@linear/sdk/webhooks";
-import { OpenRouter } from "@openrouter/sdk";
 import { webhook, workflow } from "runway";
 
 export default workflow({
@@ -18,26 +17,32 @@ export default workflow({
     ),
 }).handler(async (ctx, event) => {
   const issue = event.data;
-  const review = await ctx.step("review", async () => {
-    const openrouter = new OpenRouter({ apiKey: ctx.secrets.OPENROUTER_API_KEY });
-    const result = await openrouter.chat.send({
-      chatRequest: {
-        model: "google/gemini-2.5-flash-lite",
-        messages: [
-          {
-            role: "system",
-            content:
-              "Review this Linear issue as a senior engineer: clarity, completeness, feasibility, missing acceptance criteria, hidden scope. Reply with a concise markdown comment of a few bullets, no preamble.",
-          },
-          {
-            role: "user",
-            content: `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? "(no description)"}`,
-          },
-        ],
+  const review = await ctx.sandbox("review", async (sandbox) => {
+    await sandbox.writeFile(
+      "/workspace/issue.md",
+      `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? "(no description)"}`,
+    );
+    const result = await sandbox.exec(
+      [
+        "npx --yes @earendil-works/pi-coding-agent@0.79.1",
+        "--provider openrouter",
+        "--model google/gemini-2.5-flash-lite",
+        "--no-context-files",
+        "--no-session",
+        "-p",
+        "@issue.md",
+        JSON.stringify(
+          "Review this Linear issue as a senior engineer: clarity, completeness, feasibility, missing acceptance criteria, hidden scope. Reply with a concise markdown comment of a few bullets, no preamble.",
+        ),
+      ].join(" "),
+      {
+        cwd: "/workspace",
+        timeout: 120_000,
+        env: { OPENROUTER_API_KEY: ctx.secrets.OPENROUTER_API_KEY },
       },
-    });
-    const content = result.choices[0]?.message.content;
-    return typeof content === "string" ? content.trim() : "";
+    );
+    if (!result.success) throw new Error(result.stderr || `pi exited ${result.exitCode}`);
+    return result.stdout.trim();
   });
   await ctx.step("comment", async () => {
     const linear = new LinearClient({ apiKey: ctx.secrets.LINEAR_API_KEY });

@@ -23,9 +23,10 @@ export default workflow({
 `workflow({ id, secrets?, trigger }).handler(fn)` defines a workflow — the trigger is a required
 callback and the typed event is the handler's second argument. Export workflows from files under
 `.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers
-are fire-and-forget — they return nothing. The only durable primitives are `ctx.step` (a memoized
-durable step, named by its idempotency key) and `ctx.sleep` (durable sleep, just a number of ms).
-Anything else — an HTTP call, for example — is plain TypeScript wrapped inside a `ctx.step`.
+are fire-and-forget — they return nothing. The durable primitives are `ctx.step` (a memoized durable
+step, named by its idempotency key), `ctx.sandbox` (a memoized step with a Cloudflare Sandbox), and
+`ctx.sleep` (durable sleep, just a number of ms). Anything else — an HTTP call, for example — is
+plain TypeScript wrapped inside a primitive.
 
 ## Triggers
 
@@ -83,14 +84,15 @@ predicate or rejecting schema validation is a 500 and starts no runs.
 
 ## `ctx`
 
-The handler's first argument is `{ runId, secrets, env, step, sleep }`:
+The handler's first argument is `{ runId, secrets, env, step, sandbox, sleep }`:
 
 - `ctx.runId` — the run instance id.
 - `ctx.secrets` — the declared secrets as a typed record of name → value.
-- `ctx.env` — the raw Cloudflare environment, typed `unknown`; the escape hatch to bindings — cast
-  it in the workflow.
+- `ctx.env` — the raw Cloudflare environment, typed `unknown`; an escape hatch for advanced use.
 - `ctx.step(id, fn)` — a durable, memoized step; `id` is the idempotency key and `fn` receives
   `{ id }`. Returns a JSON-serializable value. Steps re-run on replay, so keep them idempotent.
+- `ctx.sandbox(id, fn)` — a durable, memoized step that creates/opens a Cloudflare Sandbox for this
+  workflow run and passes it to `fn`. Use it for agent loops and isolated command execution.
 - `ctx.sleep(ms)` — durable sleep. `ms` is a plain number of milliseconds; there is no id and no
   duration string.
 
@@ -111,7 +113,8 @@ The CLI discovers exported workflows from `.runway/workflows/**/*.ts`, excluding
 
 Deploy codegens one Cloudflare Worker named `runway`. That Worker is a Dynamic Workflows loader: it
 owns webhook and cron routing, uses one Cloudflare Workflow binding named `WORKFLOWS`, and loads each
-repo workflow through a Cloudflare Worker Loader binding named `LOADER`. No wrangler config and no
+repo workflow through a Cloudflare Worker Loader binding named `LOADER`. It also owns the hidden
+Cloudflare Sandbox Durable Object/container used by `ctx.sandbox`. No wrangler config and no
 generated files on disk. The workflow `id` is the Runway routing identity; the deployed Cloudflare
 Workflow resource is the singleton `runway`.
 
@@ -122,17 +125,17 @@ future registry/control-plane work.
 ## CLI
 
 - `runway deploy` — discover workflow exports, codegen and bundle the Worker in memory, then upload
-  via the typed `cloudflare` SDK (`cf.workers.scripts.update` with one `worker_loader` binding, one
-  Dynamic Workflows `type: "workflow"` binding, and `secret_text` bindings for the declared secrets
-  - `cf.workflows.update("runway", ...)`). The Worker script name is always `runway`. Runway does
-    not shell out to `wrangler deploy`. Prints the script name and one POST URL per webhook trigger.
+  via the typed `cloudflare` SDK (`cf.workers.scripts.update` with `worker_loader`, Dynamic
+  Workflows, Sandbox Durable Object, container, migration, and declared `secret_text` bindings;
+  `cf.workflows.update("runway", ...)`). The Worker script name is always `runway`. Runway does not
+  shell out to `wrangler deploy`. Prints the script name and one POST URL per webhook trigger.
 
 ## Example
 
 See `example/.runway/workflows/issue-review.ts` for the full dogfood: a Linear webhook typed with
-`@linear/sdk`'s `LinearWebhookPayload` and narrowed with `.filter` to created issues, runs an LLM
-review with `@openrouter/sdk` inside a `ctx.step` against the issue, and posts the review back as a
-comment with `@linear/sdk`'s `createComment` inside another `ctx.step`.
+`@linear/sdk`'s `LinearWebhookPayload` and narrowed with `.filter` to created issues, starts a
+Cloudflare Sandbox with `ctx.sandbox`, runs Pi against the issue with OpenRouter credentials, and
+posts the review back as a comment with `@linear/sdk`'s `createComment` inside `ctx.step`.
 
 ## Testing
 

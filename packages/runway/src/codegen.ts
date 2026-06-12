@@ -9,6 +9,10 @@ export const COMPATIBILITY_DATE = "2026-06-06";
 export const WORKFLOW_NAME = "runway";
 export const WORKFLOW_BINDING = "WORKFLOWS";
 export const LOADER_BINDING = "LOADER";
+export const SANDBOX_BINDING = "Sandbox";
+export const SANDBOX_CLASS = "Sandbox";
+export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.1";
+export const SANDBOX_MIGRATION_TAG = "runway-sandbox-v1";
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
 export const TENANT_WORKFLOW_CLASS = "TenantWorkflow";
 
@@ -73,6 +77,7 @@ import {
 import { createRouter, type RouterEntry, type WorkflowStarter } from "runway/worker";
 
 export { DynamicWorkflowBinding };
+export { Sandbox } from "@cloudflare/sandbox";
 
 interface LoaderStub {
   getEntrypoint(name?: string): { fetch(req: Request): Promise<Response>; run?: unknown };
@@ -112,6 +117,7 @@ const loadWorkflow = (env: Env, workflowId: string): LoaderStub => {
     modules: { "index.js": code },
     env: {
       ...Object.fromEntries(secretNames.map((name) => [name, parentEnv[name]])),
+      ${JSON.stringify(SANDBOX_BINDING)}: parentEnv[${JSON.stringify(SANDBOX_BINDING)}],
       ${WORKFLOW_BINDING}: wrapWorkflowBinding({ workflowId }),
     },
   }));

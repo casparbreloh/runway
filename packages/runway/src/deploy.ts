@@ -15,6 +15,10 @@ import {
   COMPATIBILITY_DATE,
   DYNAMIC_WORKFLOW_CLASS,
   LOADER_BINDING,
+  SANDBOX_BINDING,
+  SANDBOX_CLASS,
+  SANDBOX_IMAGE,
+  SANDBOX_MIGRATION_TAG,
   WORKFLOW_BINDING,
   WORKFLOW_NAME,
   cronsOf,
@@ -34,6 +38,7 @@ export type CloudflareApi = {
   };
   workers: {
     scripts: {
+      list(params: { account_id: string }): Promise<unknown>;
       update: AsyncMethod<Cloudflare["workers"]["scripts"]["update"]>;
       schedules: {
         update: AsyncMethod<Cloudflare["workers"]["scripts"]["schedules"]["update"]>;
@@ -87,6 +92,7 @@ const validateBindings = (secrets: ReadonlyArray<string>): void => {
   const names = new Map<string, string>();
   names.set(WORKFLOW_BINDING, "Runway workflow binding");
   names.set(LOADER_BINDING, "Runway worker loader binding");
+  names.set(SANDBOX_BINDING, "Runway sandbox binding");
   for (const secret of secrets) {
     const owner = names.get(secret);
     if (owner) {
@@ -175,6 +181,35 @@ const accountIdsOf = async (response: unknown): Promise<ReadonlyArray<string>> =
   return ids;
 };
 
+const currentMigrationTagOf = async (
+  cf: CloudflareApi,
+  accountId: string,
+  scriptName: string,
+): Promise<string | undefined> => {
+  const collect = (item: unknown): string | undefined => {
+    if (!item || typeof item !== "object") return undefined;
+    const script = item as { id?: unknown; migration_tag?: unknown };
+    return script.id === scriptName && typeof script.migration_tag === "string"
+      ? script.migration_tag
+      : undefined;
+  };
+  const response = await cf.workers.scripts.list({ account_id: accountId });
+  const result = resultOf(response);
+  if (Array.isArray(result)) {
+    for (const item of result) {
+      const tag = collect(item);
+      if (tag) return tag;
+    }
+  }
+  if (response && typeof response === "object" && Symbol.asyncIterator in response) {
+    for await (const item of response as AsyncIterable<unknown>) {
+      const tag = collect(item);
+      if (tag) return tag;
+    }
+  }
+  return undefined;
+};
+
 const resolveAuth = async (
   opts: DeployContext,
   env: Record<string, string | undefined>,
@@ -221,6 +256,9 @@ const runtimeDependencyResolver: Plugin = {
         import.meta.dirname,
         "../node_modules/@cloudflare/dynamic-workflows/dist/index.js",
       ),
+    }));
+    build.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
+      path: path.resolve(import.meta.dirname, "../node_modules/@cloudflare/sandbox/dist/index.js"),
     }));
   },
 };
@@ -317,9 +355,18 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
 
   const scriptName = SCRIPT_NAME;
   const contents = await build(registry, opts, secrets);
+  const migrationTag = await currentMigrationTagOf(cf, accountId, scriptName);
 
   opts.onProgress?.({ step: "deploy", status: "start" });
   type ScriptMetadata = Parameters<CloudflareApi["workers"]["scripts"]["update"]>[1]["metadata"];
+  type ScriptMetadataWithContainers = ScriptMetadata & {
+    containers?: ReadonlyArray<{
+      class_name: string;
+      image: string;
+      instance_type?: string;
+      max_instances?: number;
+    }>;
+  };
   await cf.workers.scripts.update(scriptName, {
     account_id: accountId,
     metadata: {
@@ -334,13 +381,34 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
           workflow_name: WORKFLOW_NAME,
           class_name: DYNAMIC_WORKFLOW_CLASS,
         },
+        {
+          type: "durable_object_namespace" as const,
+          name: SANDBOX_BINDING,
+          class_name: SANDBOX_CLASS,
+        },
         ...secrets.map((name) => ({
           type: "secret_text" as const,
           name,
           text: env[name]!,
         })),
       ],
-    } as ScriptMetadata,
+      containers: [
+        {
+          class_name: SANDBOX_CLASS,
+          image: SANDBOX_IMAGE,
+          instance_type: "lite",
+        },
+      ],
+      ...(migrationTag === SANDBOX_MIGRATION_TAG
+        ? {}
+        : {
+            migrations: {
+              ...(migrationTag ? { old_tag: migrationTag } : {}),
+              new_tag: SANDBOX_MIGRATION_TAG,
+              new_sqlite_classes: [SANDBOX_CLASS],
+            },
+          }),
+    } as ScriptMetadataWithContainers,
     files: [await toFile(contents, "worker.js", { type: "application/javascript+module" })],
   });
 

@@ -127,6 +127,7 @@ test("makeCtx forwards stable step ids and positional sleep ids", async () => {
         calls.push(["step", id]);
         return fn();
       },
+      sandbox: async (name) => ({ name }) as never,
       sleep: async (id, ms) => {
         calls.push(["sleep", id, ms]);
       },
@@ -145,6 +146,32 @@ test("makeCtx forwards stable step ids and positional sleep ids", async () => {
     ["step", "fetch-linear"],
     ["sleep", "sleep-0", 10],
     ["sleep", "sleep-1", 25],
+  ]);
+});
+
+test("makeCtx runs sandbox work inside a named step", async () => {
+  const calls: unknown[] = [];
+  const ctx = makeCtx(
+    {
+      step: async (id, fn) => {
+        calls.push(["step", id]);
+        return fn();
+      },
+      sandbox: async (name) => {
+        calls.push(["sandbox", name]);
+        return { name } as never;
+      },
+      sleep: async () => {},
+    },
+    { runId: "run-1", secrets: {}, env: {} },
+  );
+
+  const result = await ctx.sandbox("review", async (sandbox) => sandbox);
+
+  expect(result).toEqual({ name: "run-1-review" });
+  expect(calls).toEqual([
+    ["step", "review"],
+    ["sandbox", "run-1-review"],
   ]);
 });
 

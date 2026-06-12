@@ -13,6 +13,7 @@ export type {
   ProgressEvent,
   RegisteredWorkflow,
   Registry,
+  Sandbox,
   StepContext,
   Trigger,
   TriggerContext,

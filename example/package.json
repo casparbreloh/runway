@@ -8,7 +8,6 @@
   },
   "dependencies": {
     "@linear/sdk": "catalog:",
-    "@openrouter/sdk": "catalog:",
     "runway": "workspace:*"
   },
   "devDependencies": {
