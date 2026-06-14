@@ -75,6 +75,7 @@ interface ApiCalls {
   workflowUpdates: unknown[];
   workflowDeletes: unknown[];
   subdomains: unknown[];
+  containerCreates: unknown[];
 }
 
 const fakeApi = (
@@ -103,6 +104,21 @@ const fakeApi = (
         },
         bulkUpdate: async () => {},
       },
+      versions: {
+        list: async () => [{ id: "version" }],
+        get: async () => ({
+          resources: {
+            bindings: [
+              {
+                type: "durable_object_namespace",
+                name: "Sandbox",
+                class_name: "Sandbox",
+                namespace_id: "sandbox-namespace",
+              },
+            ],
+          },
+        }),
+      },
       schedules: {
         update: async (...args) => {
           calls.schedules = args[1].body;
@@ -127,12 +143,21 @@ const fakeApi = (
       calls.workflowDeletes.push(args);
     },
   },
+  containers: {
+    applications: {
+      list: async () => [],
+      create: async (...args) => {
+        calls.containerCreates.push(args);
+      },
+    },
+  },
 });
 
 const emptyCalls = (): ApiCalls => ({
   workflowUpdates: [],
   workflowDeletes: [],
   subdomains: [],
+  containerCreates: [],
 });
 
 const deployEnv = {
@@ -235,8 +260,13 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     expect(generated).toContain('compatibilityFlags: ["nodejs_compat"]');
     expect(generated).toContain("const secretBindings");
     expect(generated).toContain("...secretsFor(parentEnv, workflowId)");
+    expect(generated).toContain('secretBindings: secretBindings["hello"]');
     expect(generated).toContain('export { Sandbox } from "@cloudflare/sandbox";');
-    expect(generated).toContain('"Sandbox": parentEnv["Sandbox"]');
+    expect(generated).toContain("export { DynamicWorkflowBinding }");
+    expect(generated).toContain("export class RunwaySandboxBinding");
+    expect(generated).toContain(
+      '"RUNWAY_SANDBOX": ctx.exports.RunwaySandboxBinding({ props: {} })',
+    );
     expect(generated).toContain("wrapWorkflowBinding({ workflowId })");
     expect(generated).not.toContain("wrapWorkflowBinding({ workflowId, loaderId })");
     expect(result).toEqual({
@@ -275,6 +305,26 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       new_tag: "runway-sandbox-v1",
       new_sqlite_classes: ["Sandbox"],
     });
+    expect(calls.containerCreates).toEqual([
+      [
+        {
+          account_id: "account",
+          body: {
+            name: "runway-Sandbox",
+            scheduling_policy: "default",
+            configuration: {
+              image: "docker.io/cloudflare/sandbox:0.12.1",
+              instance_type: "lite",
+            },
+            instances: 0,
+            max_instances: 20,
+            constraints: { tiers: [1, 2] },
+            durable_objects: { namespace_id: "sandbox-namespace" },
+            rollout_active_grace_period: 0,
+          },
+        },
+      ],
+    ]);
     expect(calls.workflowUpdates).toEqual([
       ["runway", { account_id: "account", class_name: "DynamicWorkflow", script_name: "runway" }],
     ]);

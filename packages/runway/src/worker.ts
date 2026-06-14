@@ -16,15 +16,27 @@ interface WorkflowBinding {
 type DynamicWorkerEnv = Record<string, unknown> & {
   WORKFLOWS?: WorkflowBinding;
   Sandbox?: DurableObjectNamespace<Sandbox>;
+  RUNWAY_SANDBOX?: {
+    exec(name: string, command: string, options?: unknown): Promise<unknown>;
+    writeFile(name: string, path: string, content: unknown, options?: unknown): Promise<unknown>;
+  };
 };
 
 const primitives = (step: WorkflowStep, env: unknown): Primitives => ({
   step: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
     step.do(id, fn as () => Promise<never>) as Promise<T>,
   sandbox: async (name) => {
-    const binding = (env as DynamicWorkerEnv).Sandbox;
-    if (!binding) throw new Error("missing sandbox binding: Sandbox");
-    return getSandbox(binding, name);
+    const runtime = env as DynamicWorkerEnv;
+    const bridge = runtime.RUNWAY_SANDBOX;
+    if (bridge) {
+      return {
+        exec: (command: string, options?: unknown) => bridge.exec(name, command, options),
+        writeFile: (path: string, content: unknown, options?: unknown) =>
+          bridge.writeFile(name, path, content, options),
+      } as Sandbox;
+    }
+    if (!runtime.Sandbox) throw new Error("missing sandbox binding: Sandbox");
+    return getSandbox(runtime.Sandbox, name);
   },
   sleep: (id: string, ms: number): Promise<void> => step.sleep(id, ms),
 });

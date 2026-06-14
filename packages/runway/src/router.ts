@@ -10,18 +10,20 @@ type RouterEnv = Record<string, string | WorkflowBinding | undefined>;
 export interface RouterEntry {
   readonly id: string;
   readonly binding?: string;
+  readonly secretBindings?: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly trigger: WorkflowTrigger;
 }
 
 export interface WorkflowStarter {
-  start(entry: RouterEntry, event: unknown, env: unknown): Promise<{ id: string }>;
+  start(entry: RouterEntry, event: unknown, env: unknown, ctx?: unknown): Promise<{ id: string }>;
 }
 
 export interface Router {
-  fetch(req: Request, env: unknown): Promise<Response>;
+  fetch(req: Request, env: unknown, ctx?: unknown): Promise<Response>;
   scheduled(
     event: { readonly cron: string; readonly scheduledTime: number },
     env: unknown,
+    ctx?: unknown,
   ): Promise<void>;
 }
 
@@ -95,6 +97,11 @@ const bindingStarter: WorkflowStarter = {
   },
 };
 
+const secretOf = (entry: RouterEntry, env: RouterEnv, name: string): string | undefined => {
+  const candidates = entry.secretBindings?.[name] ?? [name];
+  return candidates.map((candidate) => env[candidate]).find((value) => typeof value === "string");
+};
+
 export const createRouter = (
   entries: ReadonlyArray<RouterEntry>,
   starter: WorkflowStarter = bindingStarter,
@@ -107,7 +114,7 @@ export const createRouter = (
     (entry): entry is RouterEntry & { trigger: CronTrigger } => entry.trigger.type === "cron",
   );
   return {
-    async fetch(req, env) {
+    async fetch(req, env, ctx) {
       const pathname = new URL(req.url).pathname;
       const matches =
         req.method === "POST"
@@ -117,8 +124,8 @@ export const createRouter = (
       if (!first) return new Response("not found", { status: 404 });
       const trigger = first.trigger;
       const secretName = secretNameOf(trigger.secret);
-      const secret = (env as RouterEnv)[secretName];
-      if (typeof secret !== "string") {
+      const secret = secretOf(first, env as RouterEnv, secretName);
+      if (!secret) {
         return new Response(`no secret: ${secretName}`, { status: 500 });
       }
       const body = await req.text();
@@ -153,17 +160,22 @@ export const createRouter = (
       if (passing.length === 0) return Response.json({ skipped: true });
       const runs: Array<{ id: string; workflow: string }> = [];
       for (const { entry, event } of passing) {
-        const instance = await starter.start(entry, event, env);
+        const instance = await starter.start(entry, event, env, ctx);
         runs.push({ id: instance.id, workflow: entry.id });
       }
       return Response.json({ runs }, { status: 202 });
     },
-    async scheduled(event, env) {
+    async scheduled(event, env, ctx) {
       await Promise.all(
         crons
           .filter((entry) => entry.trigger.expression === event.cron)
           .map((entry) =>
-            starter.start(entry, { cron: event.cron, scheduledTime: event.scheduledTime }, env),
+            starter.start(
+              entry,
+              { cron: event.cron, scheduledTime: event.scheduledTime },
+              env,
+              ctx,
+            ),
           ),
       );
     },

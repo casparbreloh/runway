@@ -43,6 +43,17 @@ export type CloudflareApi = {
         list(scriptName: string, params: { account_id: string }): Promise<unknown>;
         bulkUpdate(scriptName: string, params: unknown): Promise<unknown>;
       };
+      versions: {
+        list(
+          scriptName: string,
+          params: { account_id: string; per_page?: number },
+        ): Promise<unknown>;
+        get(
+          scriptName: string,
+          versionId: string,
+          params: { account_id: string },
+        ): Promise<unknown>;
+      };
       schedules: {
         update: AsyncMethod<Cloudflare["workers"]["scripts"]["schedules"]["update"]>;
       };
@@ -58,6 +69,12 @@ export type CloudflareApi = {
     update: AsyncMethod<Cloudflare["workflows"]["update"]>;
     list(params: { account_id: string }): Promise<unknown>;
     delete: AsyncMethod<Cloudflare["workflows"]["delete"]>;
+  };
+  containers: {
+    applications: {
+      list(params: { account_id: string }): Promise<unknown>;
+      create(params: { account_id: string; body: unknown }): Promise<unknown>;
+    };
   };
 };
 
@@ -76,10 +93,40 @@ interface DeployOutput {
 
 const defaultClient = (apiToken: string): CloudflareApi => {
   const cf = new Cloudflare({ apiToken });
+  const containerRequest = async (
+    accountId: string,
+    path: string,
+    init: { method?: string; body?: unknown } = {},
+  ): Promise<unknown> => {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers${path}`,
+      {
+        method: init.method ?? "GET",
+        headers: {
+          authorization: `Bearer ${apiToken}`,
+          ...(init.body ? { "content-type": "application/json" } : {}),
+        },
+        ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+      },
+    );
+    const text = await response.text();
+    const parsed = text ? (JSON.parse(text) as unknown) : undefined;
+    if (!response.ok) {
+      throw new Error(`Cloudflare Containers API ${response.status}: ${text}`);
+    }
+    return parsed;
+  };
   return {
     accounts: cf.accounts,
     workers: cf.workers,
     workflows: cf.workflows,
+    containers: {
+      applications: {
+        list: async ({ account_id }) => containerRequest(account_id, "/applications"),
+        create: async ({ account_id, body }) =>
+          containerRequest(account_id, "/applications", { method: "POST", body }),
+      },
+    },
   };
 };
 
@@ -179,6 +226,97 @@ const currentMigrationTagOf = async (
     }
   }
   return undefined;
+};
+
+const firstIdOf = async (response: unknown): Promise<string | undefined> => {
+  const collect = (item: unknown): string | undefined =>
+    item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string"
+      ? (item as { id: string }).id
+      : undefined;
+  const result = resultOf(response);
+  if (Array.isArray(result)) {
+    for (const item of result) {
+      const id = collect(item);
+      if (id) return id;
+    }
+  }
+  if (response && typeof response === "object" && Symbol.asyncIterator in response) {
+    for await (const item of response as AsyncIterable<unknown>) {
+      const id = collect(item);
+      if (id) return id;
+    }
+  }
+  return undefined;
+};
+
+const sandboxNamespaceIdOf = (version: unknown): string | undefined => {
+  const bindings =
+    version && typeof version === "object"
+      ? (version as { resources?: { bindings?: ReadonlyArray<unknown> } }).resources?.bindings
+      : undefined;
+  const binding = bindings?.find(
+    (b) =>
+      b &&
+      typeof b === "object" &&
+      (b as { type?: unknown }).type === "durable_object_namespace" &&
+      (b as { name?: unknown }).name === SANDBOX_BINDING &&
+      (b as { class_name?: unknown }).class_name === SANDBOX_CLASS,
+  );
+  return binding && typeof (binding as { namespace_id?: unknown }).namespace_id === "string"
+    ? (binding as { namespace_id: string }).namespace_id
+    : undefined;
+};
+
+const deploySandboxContainer = async (
+  cf: CloudflareApi,
+  accountId: string,
+  scriptName: string,
+): Promise<void> => {
+  const versionId = await firstIdOf(
+    await cf.workers.scripts.versions.list(scriptName, { account_id: accountId, per_page: 1 }),
+  );
+  if (!versionId) throw new Error(`missing Worker version after deploy: ${scriptName}`);
+  const namespaceId = sandboxNamespaceIdOf(
+    resultOf(
+      await cf.workers.scripts.versions.get(scriptName, versionId, { account_id: accountId }),
+    ),
+  );
+  if (!namespaceId) throw new Error(`missing sandbox durable object namespace: ${SANDBOX_BINDING}`);
+
+  const appName = `${scriptName}-${SANDBOX_CLASS}`;
+  const apps = resultOf(await cf.containers.applications.list({ account_id: accountId }));
+  const existing = Array.isArray(apps)
+    ? apps.find(
+        (app) => app && typeof app === "object" && (app as { name?: unknown }).name === appName,
+      )
+    : undefined;
+  if (existing) {
+    const existingNamespace = (existing as { durable_objects?: { namespace_id?: unknown } })
+      .durable_objects?.namespace_id;
+    if (existingNamespace !== namespaceId) {
+      throw new Error(
+        `container application ${appName} is attached to a different durable object namespace`,
+      );
+    }
+    return;
+  }
+
+  await cf.containers.applications.create({
+    account_id: accountId,
+    body: {
+      name: appName,
+      scheduling_policy: "default",
+      configuration: {
+        image: SANDBOX_IMAGE,
+        instance_type: "lite",
+      },
+      instances: 0,
+      max_instances: 20,
+      constraints: { tiers: [1, 2] },
+      durable_objects: { namespace_id: namespaceId },
+      rollout_active_grace_period: 0,
+    },
+  });
 };
 
 export const resolveAuth = async (
@@ -394,6 +532,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
     } as ScriptMetadataWithContainers,
     files: [await toFile(contents, "worker.js", { type: "application/javascript+module" })],
   });
+  await deploySandboxContainer(cf, accountId, scriptName);
 
   await cf.workflows.update(WORKFLOW_NAME, {
     account_id: accountId,
