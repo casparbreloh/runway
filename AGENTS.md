@@ -14,6 +14,8 @@ Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and d
   - `src/workflow.ts` — `workflow()`.
   - `src/trigger.ts` — `webhook()`, `.filter()`, `cron()`, trigger validation.
   - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
+  - `src/ai.ts` — `ctx.ai()` OpenRouter call helper.
+  - `src/agent.ts` — `ctx.agent()` Pi-in-Sandbox helper.
   - `bin/runway.ts` — discovers workflow exports and deploys Cloudflare.
   - `src/worker.ts` — workerd runtime adapter: `toEntrypoint(def)`, Dynamic Worker fetch starter.
   - `src/router.ts` — local-testable webhook/cron routing, HMAC, schema/filter gating.
@@ -21,7 +23,7 @@ Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and d
   - `src/codegen.ts` — generated Worker module imports/classes/router.
   - `src/validate.ts` — registry validation.
   - `tests/worker.ts` — no-account integration helper.
-- `example/` — dogfood Linear issue review workflow using Pi in `ctx.sandbox` + Linear.
+- `example/` — dogfood Linear issue review workflow using `ctx.agent` + Linear.
 
 ## Commands
 
@@ -60,8 +62,11 @@ export default workflow({
 
 - Trigger is required and lives in the `workflow()` object, not a chained `.trigger()`.
 - Handler receives `(ctx, event)`. There is no `ctx.params`.
-- `ctx` is `{ runId, secrets, env, step, sandbox, sleep }`.
-- Durable primitives are `ctx.step(id, fn)`, `ctx.sandbox(id, fn)`, and `ctx.sleep(ms)`.
+- `ctx` is `{ runId, secrets, env, step, ai, agent, sandbox, sleep }`.
+- Durable primitives are `ctx.step(id, fn)`, `ctx.ai(id, opts)`, `ctx.agent(id, opts)`,
+  `ctx.sandbox(id, fn)`, and `ctx.sleep(ms)`.
+- `ctx.ai` is for simple OpenRouter LLM calls that do not need an execution environment.
+- `ctx.agent` runs Pi in a Cloudflare Sandbox using caller-provided Pi args/env and returns stdout.
 - Wrap HTTP/API calls in named steps. Keep step return values JSON-serializable.
 - Steps can replay. Keep them idempotent.
 

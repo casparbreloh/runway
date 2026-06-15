@@ -17,32 +17,22 @@ export default workflow({
     ),
 }).handler(async (ctx, event) => {
   const issue = event.data;
-  const review = await ctx.sandbox("review", async (sandbox) => {
-    await sandbox.writeFile(
-      "/workspace/issue.md",
-      `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? "(no description)"}`,
-    );
-    const result = await sandbox.exec(
-      [
-        "npx --yes @earendil-works/pi-coding-agent@0.79.1",
-        "--provider openrouter",
-        "--model google/gemini-2.5-flash-lite",
-        "--no-context-files",
-        "--no-session",
-        "-p",
-        "@issue.md",
-        JSON.stringify(
-          "Review this Linear issue as a senior engineer: clarity, completeness, feasibility, missing acceptance criteria, hidden scope. Reply with a concise markdown comment of a few bullets, no preamble.",
-        ),
-      ].join(" "),
-      {
-        cwd: "/workspace",
-        timeout: 120_000,
-        env: { OPENROUTER_API_KEY: ctx.secrets.OPENROUTER_API_KEY },
-      },
-    );
-    if (!result.success) throw new Error(result.stderr || `pi exited ${result.exitCode}`);
-    return result.stdout.trim();
+  const review = await ctx.agent("review", {
+    files: {
+      "issue.md": `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? "(no description)"}`,
+    },
+    args: [
+      "--provider",
+      "openrouter",
+      "--model",
+      "google/gemini-2.5-flash-lite",
+      "--no-context-files",
+      "--no-session",
+      "-p",
+      "@issue.md",
+      "Review this Linear issue as a senior engineer: clarity, completeness, feasibility, missing acceptance criteria, hidden scope. Reply with a concise markdown comment of a few bullets, no preamble.",
+    ],
+    env: { OPENROUTER_API_KEY: ctx.secrets.OPENROUTER_API_KEY },
   });
   await ctx.step("comment", async () => {
     const linear = new LinearClient({ apiKey: ctx.secrets.LINEAR_API_KEY });
