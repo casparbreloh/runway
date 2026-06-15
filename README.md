@@ -24,9 +24,10 @@ export default workflow({
 callback and the typed event is the handler's second argument. Export workflows from files under
 `.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers
 are fire-and-forget — they return nothing. The durable primitives are `ctx.step` (a memoized durable
-step, named by its idempotency key), `ctx.sandbox` (a memoized step with a Cloudflare Sandbox), and
-`ctx.sleep` (durable sleep, just a number of ms). Anything else — an HTTP call, for example — is
-plain TypeScript wrapped inside a primitive.
+step, named by its idempotency key), `ctx.ai` (a named OpenRouter call), `ctx.agent` (Pi inside a
+Cloudflare Sandbox), `ctx.sandbox` (the raw Sandbox escape hatch), and `ctx.sleep` (durable sleep,
+just a number of ms). Anything else — an HTTP call, for example — is plain TypeScript wrapped inside
+a primitive.
 
 ## Triggers
 
@@ -84,15 +85,20 @@ predicate or rejecting schema validation is a 500 and starts no runs.
 
 ## `ctx`
 
-The handler's first argument is `{ runId, secrets, env, step, sandbox, sleep }`:
+The handler's first argument is `{ runId, secrets, env, step, ai, agent, sandbox, sleep }`:
 
 - `ctx.runId` — the run instance id.
 - `ctx.secrets` — the declared secrets as a typed record of name → value.
 - `ctx.env` — the raw Cloudflare environment, typed `unknown`; an escape hatch for advanced use.
 - `ctx.step(id, fn)` — a durable, memoized step; `id` is the idempotency key and `fn` receives
   `{ id }`. Returns a JSON-serializable value. Steps re-run on replay, so keep them idempotent.
+- `ctx.ai(id, opts)` — a durable, memoized OpenRouter chat completion. Use it for simple LLM calls
+  that do not need files or command execution.
+- `ctx.agent(id, opts)` — a durable, memoized Pi run inside a Cloudflare Sandbox. Runway writes
+  optional files into `/workspace`, executes `npx --yes @earendil-works/pi-coding-agent@0.79.1`
+  with your `args` and `env`, and returns stdout.
 - `ctx.sandbox(id, fn)` — a durable, memoized step that creates/opens a Cloudflare Sandbox for this
-  workflow run and passes it to `fn`. Use it for agent loops and isolated command execution.
+  workflow run and passes it to `fn`. Use it for custom isolated command execution.
 - `ctx.sleep(ms)` — durable sleep. `ms` is a plain number of milliseconds; there is no id and no
   duration string.
 
@@ -118,6 +124,9 @@ Cloudflare Sandbox Durable Object/container used by `ctx.sandbox`. No wrangler c
 generated files on disk. The workflow `id` is the Runway routing identity; the deployed Cloudflare
 Workflow resource is the singleton `runway`.
 
+Pi is intentionally invoked with `npx` inside the Sandbox rather than added as a package dependency:
+the CLI runs in the isolated execution environment, not in Runway's deploy bundle.
+
 For this first Cloudflare-native PR, workflow resumes use the latest deployed workflow code and
 secrets. Version-pinned resumes require durable artifact storage and are intentionally left for the
 future registry/control-plane work.
@@ -134,8 +143,8 @@ future registry/control-plane work.
 
 See `example/.runway/workflows/issue-review.ts` for the full dogfood: a Linear webhook typed with
 `@linear/sdk`'s `LinearWebhookPayload` and narrowed with `.filter` to created issues, starts a
-Cloudflare Sandbox with `ctx.sandbox`, runs Pi against the issue with OpenRouter credentials, and
-posts the review back as a comment with `@linear/sdk`'s `createComment` inside `ctx.step`.
+Pi review with `ctx.agent` against the issue using OpenRouter credentials, and posts the review back
+as a comment with `@linear/sdk`'s `createComment` inside `ctx.step`.
 
 ## Testing
 

@@ -1,6 +1,8 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { expect, expectTypeOf, test } from "vitest";
 
+import type { AgentOptions } from "../src/agent.ts";
+import type { AiOptions } from "../src/ai.ts";
 import { makeCtx } from "../src/ctx.ts";
 import { secretNameOf } from "../src/secrets.ts";
 import type { SecretRef } from "../src/secrets.ts";
@@ -149,6 +151,91 @@ test("makeCtx forwards stable step ids and positional sleep ids", async () => {
   ]);
 });
 
+test("makeCtx runs ai calls inside a named step", async () => {
+  const calls: unknown[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    if (typeof init?.body !== "string") throw new Error("expected string body");
+    calls.push(["fetch", JSON.parse(init.body)]);
+    return Response.json({ choices: [{ message: { content: "  done  " } }] });
+  }) as typeof fetch;
+  try {
+    const ctx = makeCtx(
+      {
+        step: async (id, fn) => {
+          calls.push(["step", id]);
+          return fn();
+        },
+        sandbox: async () => ({}) as never,
+        sleep: async () => {},
+      },
+      { runId: "run-1", secrets: {}, env: {} },
+    );
+
+    const result = await ctx.ai("summarize", {
+      model: { name: "test-model", apiKey: "key" },
+      prompt: "hello",
+    });
+
+    expect(result).toBe("done");
+    expect(calls).toEqual([
+      ["step", "summarize"],
+      ["fetch", { model: "test-model", messages: [{ role: "user", content: "hello" }] }],
+    ]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("makeCtx surfaces ai provider errors", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    Response.json({ error: { message: "bad model" } }, { status: 400 })) as typeof fetch;
+  try {
+    const ctx = makeCtx(
+      {
+        step: async (_id, fn) => fn(),
+        sandbox: async () => ({}) as never,
+        sleep: async () => {},
+      },
+      { runId: "run-1", secrets: {}, env: {} },
+    );
+
+    await expect(
+      ctx.ai("summarize", {
+        model: { name: "test-model", apiKey: "key" },
+        prompt: "hello",
+      }),
+    ).rejects.toThrow("bad model");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("makeCtx rejects ai responses without text", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ choices: [{}] })) as typeof fetch;
+  try {
+    const ctx = makeCtx(
+      {
+        step: async (_id, fn) => fn(),
+        sandbox: async () => ({}) as never,
+        sleep: async () => {},
+      },
+      { runId: "run-1", secrets: {}, env: {} },
+    );
+
+    await expect(
+      ctx.ai("summarize", {
+        model: { name: "test-model", apiKey: "key" },
+        prompt: "hello",
+      }),
+    ).rejects.toThrow("OpenRouter response did not include text");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("makeCtx runs sandbox work inside a named step", async () => {
   const calls: unknown[] = [];
   const ctx = makeCtx(
@@ -175,6 +262,101 @@ test("makeCtx runs sandbox work inside a named step", async () => {
   ]);
 });
 
+test("makeCtx runs agent work inside a named step backed by a sandbox", async () => {
+  const calls: unknown[] = [];
+  const ctx = makeCtx(
+    {
+      step: async (id, fn) => {
+        calls.push(["step", id]);
+        return fn();
+      },
+      sandbox: async (name) => {
+        calls.push(["sandbox", name]);
+        return {
+          writeFile: async (path: string, content: string) => {
+            calls.push(["write", path, content]);
+          },
+          exec: async (command: string, options: unknown) => {
+            calls.push(["exec", command, options]);
+            return { success: true, stdout: " review\n" };
+          },
+        } as never;
+      },
+      sleep: async () => {},
+    },
+    { runId: "run-1", secrets: {}, env: {} },
+  );
+
+  const result = await ctx.agent("review", {
+    files: { "notes/issue.md": "body" },
+    args: [
+      "--provider",
+      "openrouter",
+      "--model",
+      "test-model",
+      "-p",
+      "@notes/issue.md",
+      "review Bob's issue",
+    ],
+    env: { OPENROUTER_API_KEY: "key" },
+  });
+
+  expect(result).toBe("review");
+  expect(calls).toEqual([
+    ["step", "review"],
+    ["sandbox", "run-1-review"],
+    ["write", "/workspace/notes/issue.md", "body"],
+    [
+      "exec",
+      "'npx' '--yes' '@earendil-works/pi-coding-agent@0.79.1' '--provider' 'openrouter' '--model' 'test-model' '-p' '@notes/issue.md' 'review Bob'\\''s issue'",
+      {
+        cwd: "/workspace",
+        timeout: 120_000,
+        env: { OPENROUTER_API_KEY: "key" },
+      },
+    ],
+  ]);
+});
+
+test("makeCtx surfaces agent command failures", async () => {
+  const ctx = makeCtx(
+    {
+      step: async (_id, fn) => fn(),
+      sandbox: async () =>
+        ({
+          writeFile: async () => {},
+          exec: async () => ({ success: false, stderr: "pi failed", exitCode: 1 }),
+        }) as never,
+      sleep: async () => {},
+    },
+    { runId: "run-1", secrets: {}, env: {} },
+  );
+
+  await expect(ctx.agent("review", { args: ["-p", "review it"] })).rejects.toThrow("pi failed");
+});
+
+test("makeCtx rejects unsafe agent file paths", async () => {
+  const ctx = makeCtx(
+    {
+      step: async (_id, fn) => fn(),
+      sandbox: async () =>
+        ({
+          writeFile: async () => {},
+          exec: async () => ({ success: true, stdout: "" }),
+        }) as never,
+      sleep: async () => {},
+    },
+    { runId: "run-1", secrets: {}, env: {} },
+  );
+
+  await expect(
+    ctx.agent("review", {
+      files: { "../issue.md": "body" },
+      args: ["-p", "review it"],
+    }),
+  ).rejects.toThrow("invalid agent file path");
+});
+
 test("types the trigger context, handler secrets, and the raw webhook event", () => {
   const def = workflow({
     id: "typed",
@@ -196,7 +378,11 @@ test("types the trigger context, handler secrets, and the raw webhook event", ()
       });
     },
   }).handler(async (ctx, event) => {
+    type AiParam = Parameters<typeof ctx.ai>[1];
+    type AgentParam = Parameters<typeof ctx.agent>[1];
     expectTypeOf(ctx.secrets.LINEAR_API_KEY).toEqualTypeOf<string>();
+    expectTypeOf<AiParam>().toEqualTypeOf<AiOptions>();
+    expectTypeOf<AgentParam>().toEqualTypeOf<AgentOptions>();
     expectTypeOf(event).toBeUnknown();
   });
   expect(def.trigger.type).toBe("webhook");
