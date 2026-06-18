@@ -1,10 +1,12 @@
 # Runway
 
-Code-first TypeScript library for durable workflows. Author workflows with
+TypeScript-first workflow infrastructure for repository automation, CI/CD-style checks, custom
+triggers, scheduled work, webhooks, and agent-native execution on Cloudflare. Author workflows with
 `workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
 `.runway/workflows/**/*.ts`, and let the CLI codegen + deploy the Cloudflare runtime.
 
-Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and durable sleep.
+Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and durable sleep, while
+Cloudflare Sandbox powers `ctx.agent` and `ctx.sandbox`.
 
 ## Layout
 
@@ -33,7 +35,7 @@ Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and d
   - `pnpm lint` — `oxlint`
   - `pnpm format` / `pnpm format-check` — `oxfmt`
   - `pnpm test` — Vitest
-- CLI: only `runway deploy`.
+- CLI: `runway deploy` and `runway secrets set`.
 - Live deploy needs `wrangler login` or `CLOUDFLARE_API_TOKEN`; set `CLOUDFLARE_ACCOUNT_ID` when
   auth can see multiple accounts. All declared workflow secrets must be env vars.
 
