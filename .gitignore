@@ -31,3 +31,6 @@ logs
 
 # Agent scratch (Conductor)
 .context
+
+# Riptide artifacts (cloud-synced)
+.humanlayer/tasks/
