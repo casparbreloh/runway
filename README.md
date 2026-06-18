@@ -1,8 +1,11 @@
 # Runway
 
-A code-first TypeScript library for durable workflows on Cloudflare Workflows. You author workflows
+TypeScript-first workflow infrastructure for repository automation, CI/CD-style checks, custom
+triggers, scheduled work, webhooks, and agent-native execution on Cloudflare. You author workflows
 with the `runway` package and deploy them with the `runway` CLI. Cloudflare owns replay,
-persistence, durable sleep, cron schedules, and webhook routing.
+persistence, durable sleep, cron schedules, webhook routing, and sandboxed agent execution.
+
+For the product direction, architecture, and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
 
 ## A workflow
 
@@ -20,14 +23,15 @@ export default workflow({
 });
 ```
 
-`workflow({ id, secrets?, trigger }).handler(fn)` defines a workflow — the trigger is a required
-callback and the typed event is the handler's second argument. Export workflows from files under
-`.runway/workflows`; default exports, named exports, and barrel re-exports are supported. Handlers
-are fire-and-forget — they return nothing. The durable primitives are `ctx.step` (a memoized durable
-step, named by its idempotency key), `ctx.ai` (a named OpenRouter call), `ctx.agent` (Pi inside a
-Cloudflare Sandbox), `ctx.sandbox` (the raw Sandbox escape hatch), and `ctx.sleep` (durable sleep,
-just a number of ms). Anything else — an HTTP call, for example — is plain TypeScript wrapped inside
-a primitive.
+`workflow({ id, secrets?, trigger }).handler(fn)` defines the core primitive for repository
+automation, CI/CD-style checks, webhook automations, scheduled jobs, and agent work. The trigger is
+a required callback and the typed event is the handler's second argument. Export workflows from
+files under `.runway/workflows`; default exports, named exports, and barrel re-exports are
+supported. Handlers are fire-and-forget — they return nothing. The durable primitives are `ctx.step`
+(a memoized durable step, named by its idempotency key), `ctx.ai` (a named OpenRouter call),
+`ctx.agent` (Pi inside a Cloudflare Sandbox), `ctx.sandbox` (the raw Sandbox escape hatch), and
+`ctx.sleep` (durable sleep, just a number of ms). Anything else — an HTTP call, for example — is
+plain TypeScript wrapped inside a primitive.
 
 ## Triggers
 
@@ -85,7 +89,8 @@ predicate or rejecting schema validation is a 500 and starts no runs.
 
 ## `ctx`
 
-The handler's first argument is `{ runId, secrets, env, step, ai, agent, sandbox, sleep }`:
+The handler's first argument is the workflow context
+`{ runId, secrets, env, step, ai, agent, sandbox, sleep }`:
 
 - `ctx.runId` — the run instance id.
 - `ctx.secrets` — the declared secrets as a typed record of name → value.
@@ -119,10 +124,10 @@ The CLI discovers exported workflows from `.runway/workflows/**/*.ts`, excluding
 
 Deploy codegens one Cloudflare Worker named `runway`. That Worker is a Dynamic Workflows loader: it
 owns webhook and cron routing, uses one Cloudflare Workflow binding named `WORKFLOWS`, and loads each
-repo workflow through a Cloudflare Worker Loader binding named `LOADER`. It also owns the hidden
-Cloudflare Sandbox Durable Object/container used by `ctx.sandbox`. No wrangler config and no
-generated files on disk. The workflow `id` is the Runway routing identity; the deployed Cloudflare
-Workflow resource is the singleton `runway`.
+repository workflow through a Cloudflare Worker Loader binding named `LOADER`. It also owns the
+hidden Cloudflare Sandbox Durable Object/container used by `ctx.agent` and `ctx.sandbox`. No wrangler
+config and no generated files on disk. The workflow `id` is the Runway routing identity; the
+deployed Cloudflare Workflow resource is the singleton `runway`.
 
 Pi is intentionally invoked with `npx` inside the Sandbox rather than added as a package dependency:
 the CLI runs in the isolated execution environment, not in Runway's deploy bundle.
