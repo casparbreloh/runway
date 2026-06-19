@@ -1,12 +1,10 @@
 import path from "node:path";
 
-import { secretCandidates } from "./secret-store.ts";
 import type { RegisteredWorkflow } from "./types.ts";
 import type { Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
 
 export const COMPATIBILITY_DATE = "2026-06-06";
-export const WORKFLOW_NAME = "runway";
 export const WORKFLOW_BINDING = "WORKFLOWS";
 export const LOADER_BINDING = "LOADER";
 export const SANDBOX_BINDING = "Sandbox";
@@ -36,7 +34,7 @@ export const generateDynamicWorker = (
 ): string => {
   const ref = workflowRef(0, workflow.exportName);
   return `import * as __m0 from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, workflow.path)))};
-import { createWorkflowWorker, toEntrypoint } from "runway/worker";
+import { createWorkflowWorker, toEntrypoint } from "runway/runtime";
 
 export class ${TENANT_WORKFLOW_CLASS} extends toEntrypoint(${ref}) {}
 
@@ -62,18 +60,13 @@ export const generateWorker = (
   const routes = registry
     .map(
       (w, i) =>
-        `  { id: ${JSON.stringify(w.def.id)}, trigger: ${workflowRef(i, w.exportName)}.trigger, secretBindings: secretBindings[${JSON.stringify(w.def.id)}] },`,
+        `  { id: ${JSON.stringify(w.def.id)}, trigger: ${workflowRef(i, w.exportName)}.trigger },`,
     )
     .join("\n");
   const modules = JSON.stringify(opts.modules);
   const workflowLoaders = JSON.stringify(opts.workflowLoaders);
-  const secretBindings = JSON.stringify(
-    Object.fromEntries(
-      registry.map((w) => [
-        w.def.id,
-        Object.fromEntries(w.def.secrets.map((name) => [name, secretCandidates(w.def.id, name)])),
-      ]),
-    ),
+  const workflowSecrets = JSON.stringify(
+    Object.fromEntries(registry.map((w) => [w.def.id, w.def.secrets])),
   );
   return `${imports}
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -88,7 +81,7 @@ import {
   createRouter,
   type RouterEntry,
   type WorkflowStarter,
-} from "runway/worker";
+} from "runway/runtime";
 
 export { DynamicWorkflowBinding };
 export { Sandbox } from "@cloudflare/sandbox";
@@ -126,13 +119,13 @@ interface LoaderContext {
 
 const modules: Record<string, string> = ${modules};
 const workflowLoaders: Record<string, string> = ${workflowLoaders};
-const secretBindings: Record<string, Record<string, ReadonlyArray<string>>> = ${secretBindings};
+const workflowSecrets: Record<string, ReadonlyArray<string>> = ${workflowSecrets};
 
 const secretsFor = (parentEnv: Record<string, unknown>, workflowId: string): Record<string, unknown> =>
   Object.fromEntries(
-    Object.entries(secretBindings[workflowId] ?? {}).map(([name, candidates]) => [
+    (workflowSecrets[workflowId] ?? []).map((name) => [
       name,
-      candidates.map((candidate) => parentEnv[candidate]).find((value) => typeof value === "string"),
+      parentEnv[name],
     ]),
   );
 

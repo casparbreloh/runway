@@ -18,13 +18,13 @@ import {
   SANDBOX_IMAGE,
   SANDBOX_MIGRATION_TAG,
   WORKFLOW_BINDING,
-  WORKFLOW_NAME,
   cronsOf,
   generateDynamicWorker,
   generateWorker,
 } from "./codegen.ts";
+import { resolveScriptName } from "./naming.ts";
 import { secretNamesOf } from "./registry.ts";
-import { listScriptSecrets, secretCandidates } from "./secret-store.ts";
+import { listScriptSecrets } from "./secret-store.ts";
 import type { ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 
 type AsyncMethod<T extends (...args: never[]) => unknown> = (
@@ -135,7 +135,6 @@ const resultOf = (response: unknown): unknown =>
     ? (response as { result: unknown }).result
     : response;
 
-export const SCRIPT_NAME = "runway";
 const execFileAsync = promisify(execFile);
 
 const validateBindings = (secrets: ReadonlyArray<string>): void => {
@@ -150,16 +149,6 @@ const validateBindings = (secrets: ReadonlyArray<string>): void => {
     }
   }
 };
-
-const selectSecretBinding = (
-  remoteSecrets: ReadonlySet<string>,
-  localSecrets: ReadonlySet<string>,
-  workflowId: string,
-  name: string,
-): string | undefined =>
-  secretCandidates(workflowId, name).find((candidate) =>
-    candidate === name ? localSecrets.has(name) : remoteSecrets.has(candidate),
-  );
 
 const wranglerTokenOf = async (
   opts: DeployContext,
@@ -451,29 +440,20 @@ const build = async (
 export const deploy = async (registry: Registry, opts: DeployContext): Promise<DeployOutput> => {
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
-  const scriptName = SCRIPT_NAME;
+  const scriptName = await resolveScriptName({ cwd: opts.cwd, env });
+  const workflowName = scriptName;
   const { accountId, cf } = await resolveAuth(opts, env);
   const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
-  const localSecrets = new Set(secrets.filter((name) => env[name]));
-  const resolvedSecrets = registry.flatMap((w) =>
-    w.def.secrets.map((name) => ({
-      workflowId: w.def.id,
-      name,
-      binding: selectSecretBinding(remoteSecrets, localSecrets, w.def.id, name),
-    })),
+  const missingSecrets = registry.flatMap((w) =>
+    w.def.secrets
+      .filter((name) => !env[name] && !remoteSecrets.has(name))
+      .map((name) => `${w.def.id}.${name}`),
   );
-  const missingSecrets = resolvedSecrets
-    .filter((secret) => !secret.binding)
-    .map((secret) => `${secret.workflowId}.${secret.name}`);
   if (missingSecrets.length > 0) {
     throw new Error(`missing secret(s): ${missingSecrets.join(", ")}`);
   }
   validateBindings(secrets);
-  const localSecretBindings = [
-    ...new Set(
-      resolvedSecrets.flatMap((s) => (s.binding && localSecrets.has(s.binding) ? [s.binding] : [])),
-    ),
-  ];
+  const localSecretBindings = secrets.filter((name) => env[name]);
   const contents = await build(registry, opts, localSecretBindings);
   const migrationTag = await currentMigrationTagOf(cf, accountId, scriptName);
 
@@ -499,7 +479,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
         {
           type: "workflow" as const,
           name: WORKFLOW_BINDING,
-          workflow_name: WORKFLOW_NAME,
+          workflow_name: workflowName,
           class_name: DYNAMIC_WORKFLOW_CLASS,
         },
         {
@@ -534,7 +514,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
   });
   await deploySandboxContainer(cf, accountId, scriptName);
 
-  await cf.workflows.update(WORKFLOW_NAME, {
+  await cf.workflows.update(workflowName, {
     account_id: accountId,
     class_name: DYNAMIC_WORKFLOW_CLASS,
     script_name: scriptName,
@@ -549,7 +529,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
   for (const wf of Array.isArray(deployed)
     ? (deployed as ReadonlyArray<{ name?: string; script_name?: string }>)
     : []) {
-    if (wf.script_name === scriptName && typeof wf.name === "string" && wf.name !== WORKFLOW_NAME) {
+    if (wf.script_name === scriptName && typeof wf.name === "string" && wf.name !== workflowName) {
       await cf.workflows.delete(wf.name, { account_id: accountId });
     }
   }

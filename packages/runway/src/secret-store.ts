@@ -1,23 +1,4 @@
 import type { CloudflareApi } from "./deploy.ts";
-import { bindingOf } from "./naming.ts";
-
-export type SecretScope =
-  | { readonly type: "global" }
-  | { readonly type: "project" }
-  | { readonly type: "workflow"; readonly workflowId: string };
-
-export const scopedSecretName = (scope: SecretScope, name: string): string => {
-  if (scope.type === "global") return `RUNWAY_GLOBAL_${name}`;
-  if (scope.type === "project") return `RUNWAY_PROJECT_${name}`;
-  return `RUNWAY_WORKFLOW_${bindingOf(scope.workflowId)}_${name}`;
-};
-
-export const secretCandidates = (workflowId: string, name: string): ReadonlyArray<string> => [
-  name,
-  scopedSecretName({ type: "workflow", workflowId }, name),
-  scopedSecretName({ type: "project" }, name),
-  scopedSecretName({ type: "global" }, name),
-];
 
 const resultOf = (response: unknown): unknown =>
   response && typeof response === "object" && "result" in response

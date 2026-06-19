@@ -43,6 +43,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Fallow
+        run: pnpm fallow
+
   test:
     name: Test
     runs-on: ubuntu-latest

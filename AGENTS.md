@@ -19,7 +19,7 @@ Cloudflare Sandbox powers `ctx.agent` and `ctx.sandbox`.
   - `src/ai.ts` — `ctx.ai()` OpenRouter call helper.
   - `src/agent.ts` — `ctx.agent()` Pi-in-Sandbox helper.
   - `bin/runway.ts` — discovers workflow exports and deploys Cloudflare.
-  - `src/worker.ts` — workerd runtime adapter: `toEntrypoint(def)`, Dynamic Worker fetch starter.
+  - `src/runtime.ts` — generated Worker runtime adapter: `toEntrypoint(def)`, Dynamic Worker fetch starter.
   - `src/router.ts` — local-testable webhook/cron routing, HMAC, schema/filter gating.
   - `src/deploy.ts` — Node deploy path: validate env, codegen, esbuild, Cloudflare SDK upload.
   - `src/codegen.ts` — generated Worker module imports/classes/router.
@@ -29,15 +29,17 @@ Cloudflare Sandbox powers `ctx.agent` and `ctx.sandbox`.
 
 ## Commands
 
-- Full gate: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm test`
+- Full gate: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test`
 - Individual checks:
   - `pnpm typecheck` — `tsgo --build`, includes `example/`
   - `pnpm lint` — `oxlint`
+  - `pnpm fallow` — Fallow codebase quality check
   - `pnpm format` / `pnpm format-check` — `oxfmt`
   - `pnpm test` — Vitest
 - CLI: `runway deploy` and `runway secrets set`.
 - Live deploy needs `wrangler login` or `CLOUDFLARE_API_TOKEN`; set `CLOUDFLARE_ACCOUNT_ID` when
-  auth can see multiple accounts. All declared workflow secrets must be env vars.
+  auth can see multiple accounts. Declared workflow secrets must be exact-name env vars or existing
+  repo Worker secrets.
 
 ## Authoring Model
 
@@ -92,7 +94,7 @@ export default workflow({
 - In `trigger(ctx)`, `ctx.secrets.X` is a branded `SecretRef<"X">` name carrier.
 - In the handler, `ctx.secrets.X` is the runtime `string` value.
 - `webhook({ secret })` takes a `SecretRef`, never a raw string.
-- Deploy fails before upload when any declared secret env var is missing.
+- Deploy fails before upload when any declared secret is missing from both env and the repo Worker.
 - Non-secret config belongs in normal TypeScript, not `secrets`.
 
 ## Runtime Contract
@@ -109,11 +111,11 @@ export default workflow({
 - Only exports tagged `__kind === "workflow"` are registered.
 - Registry entries are `{ path, exportName, def }`.
 - Codegen imports workflow modules by reference so schemas and filter functions survive bundling.
-- Deploy owns the `runway` script with one Worker Loader binding (`LOADER`), one Dynamic Workflows
-  binding (`WORKFLOWS`) backed by the singleton Cloudflare Workflow named `runway`, and the hidden
-  Cloudflare Sandbox binding used by `ctx.sandbox`.
-- Deploy updates cron schedules, removes stale non-`runway` workflow resources for that script,
-  enables workers.dev, and returns webhook URLs.
+- Deploy owns one repo-scoped orchestration Worker script with one Worker Loader binding (`LOADER`),
+  one Dynamic Workflows binding (`WORKFLOWS`) backed by a matching repo-scoped Cloudflare Workflow,
+  and the hidden Cloudflare Sandbox binding used by `ctx.sandbox`.
+- Deploy updates cron schedules, removes stale workflow resources for that script, enables
+  workers.dev, and returns webhook URLs.
 
 ## Conventions
 

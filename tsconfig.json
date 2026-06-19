@@ -20,7 +20,7 @@
     "emitDeclarationOnly": true,
     "paths": {
       "runway": ["./packages/runway/src/index.ts"],
-      "runway/worker": ["./packages/runway/src/worker.ts"]
+      "runway/runtime": ["./packages/runway/src/runtime.ts"]
     }
   },
   "files": [],

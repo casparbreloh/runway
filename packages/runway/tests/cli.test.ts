@@ -167,32 +167,15 @@ test("build is not a public command", async () => {
 });
 
 test("secrets set validates command shape before auth", async () => {
-  const invalidName = await run(["secrets", "set", "not-valid", "value", "--global"]);
+  const invalidName = await run(["secrets", "set", "not-valid", "value"]);
   const missingValue = await run(["secrets", "set", "LINEAR_API_KEY"]);
-  const missingWorkflow = await run([
-    "secrets",
-    "set",
-    "LINEAR_API_KEY",
-    "value",
-    "--workflow",
-    "--global",
-  ]);
-  const invalidWorkflow = await run([
-    "secrets",
-    "set",
-    "LINEAR_API_KEY",
-    "value",
-    "--workflow",
-    "bad_name",
-  ]);
+  const extraArg = await run(["secrets", "set", "LINEAR_API_KEY", "value", "extra"]);
 
   expect(invalidName.code).toBe(1);
   expect(invalidName.output).toMatch(/runway: secrets failed/);
   expect(invalidName.output).toMatch(/invalid workflow secret "not-valid"/);
   expect(missingValue.code).toBe(1);
   expect(missingValue.output).toMatch(/usage: runway secrets set <name> <value>/);
-  expect(missingWorkflow.code).toBe(1);
-  expect(missingWorkflow.output).toMatch(/--workflow requires a workflow id/);
-  expect(invalidWorkflow.code).toBe(1);
-  expect(invalidWorkflow.output).toMatch(/invalid workflow id "bad_name"/);
+  expect(extraArg.code).toBe(1);
+  expect(extraArg.output).toMatch(/usage: runway secrets set <name> <value>/);
 });
