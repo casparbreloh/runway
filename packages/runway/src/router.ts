@@ -10,7 +10,6 @@ type RouterEnv = Record<string, string | WorkflowBinding | undefined>;
 export interface RouterEntry {
   readonly id: string;
   readonly binding?: string;
-  readonly secretBindings?: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly trigger: WorkflowTrigger;
 }
 
@@ -97,11 +96,6 @@ const bindingStarter: WorkflowStarter = {
   },
 };
 
-const secretOf = (entry: RouterEntry, env: RouterEnv, name: string): string | undefined => {
-  const candidates = entry.secretBindings?.[name] ?? [name];
-  return candidates.map((candidate) => env[candidate]).find((value) => typeof value === "string");
-};
-
 export const createRouter = (
   entries: ReadonlyArray<RouterEntry>,
   starter: WorkflowStarter = bindingStarter,
@@ -124,8 +118,8 @@ export const createRouter = (
       if (!first) return new Response("not found", { status: 404 });
       const trigger = first.trigger;
       const secretName = secretNameOf(trigger.secret);
-      const secret = secretOf(first, env as RouterEnv, secretName);
-      if (!secret) {
+      const secret = (env as RouterEnv)[secretName];
+      if (typeof secret !== "string") {
         return new Response(`no secret: ${secretName}`, { status: 500 });
       }
       const body = await req.text();

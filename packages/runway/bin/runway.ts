@@ -6,11 +6,12 @@ import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
 import { COMPATIBILITY_DATE } from "../src/codegen.ts";
-import { SCRIPT_NAME, deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
+import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
+import { resolveScriptName } from "../src/naming.ts";
 import { loadRegistry } from "../src/registry.ts";
-import { scopedSecretName, setScriptSecret, type SecretScope } from "../src/secret-store.ts";
+import { setScriptSecret } from "../src/secret-store.ts";
 import type { ProgressEvent } from "../src/types.ts";
-import { validateSecrets, validateWorkflowId } from "../src/workflow.ts";
+import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
   load: { start: "Loading", done: "Loaded" },
@@ -54,43 +55,13 @@ const spinner = () => {
   };
 };
 
-const parseSecretsSet = (
-  args: ReadonlyArray<string>,
-): { name: string; value: string; scope: SecretScope } => {
-  const positionals: string[] = [];
-  let global = false;
-  let workflowId: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    if (arg === "--global") {
-      global = true;
-      continue;
-    }
-    if (arg === "--workflow") {
-      workflowId = args[++i];
-      if (!workflowId || workflowId.startsWith("--")) {
-        throw new Error("--workflow requires a workflow id");
-      }
-      validateWorkflowId(workflowId);
-      continue;
-    }
-    positionals.push(arg);
-  }
-  if (global && workflowId) throw new Error("--global and --workflow are mutually exclusive");
-  const [name, value, ...extra] = positionals;
+const parseSecretsSet = (args: ReadonlyArray<string>): { name: string; value: string } => {
+  const [name, value, ...extra] = args;
   if (!name || !value || extra.length > 0) {
-    throw new Error("usage: runway secrets set <name> <value> [--global | --workflow <id>]");
+    throw new Error("usage: runway secrets set <name> <value>");
   }
   validateSecrets([name]);
-  return {
-    name,
-    value,
-    scope: workflowId
-      ? { type: "workflow", workflowId }
-      : global
-        ? { type: "global" }
-        : { type: "project" },
-  };
+  return { name, value };
 };
 
 const isMissingScript = (err: unknown): boolean =>
@@ -100,10 +71,11 @@ const isMissingScript = (err: unknown): boolean =>
 const createPlaceholderScript = async (
   cf: Awaited<ReturnType<typeof resolveAuth>>["cf"],
   accountId: string,
+  scriptName: string,
   binding: string,
   value: string,
 ): Promise<void> => {
-  await cf.workers.scripts.update(SCRIPT_NAME, {
+  await cf.workers.scripts.update(scriptName, {
     account_id: accountId,
     metadata: {
       main_module: "worker.js",
@@ -124,21 +96,23 @@ const createPlaceholderScript = async (
 
 const runSecrets = async (args: ReadonlyArray<string>): Promise<void> => {
   const [command, ...rest] = args;
-  if (command !== "set")
-    throw new Error("usage: runway secrets set <name> <value> [--global | --workflow <id>]");
-  const { name, value, scope } = parseSecretsSet(rest);
+  if (command !== "set") throw new Error("usage: runway secrets set <name> <value>");
+  const { name, value } = parseSecretsSet(rest);
+  const scriptName = await resolveScriptName({
+    cwd: process.cwd(),
+    env: process.env,
+  });
   const { accountId, cf } = await resolveAuth(
     { cwd: process.cwd(), env: process.env },
     process.env,
   );
-  const binding = scopedSecretName(scope, name);
   try {
-    await setScriptSecret(cf, accountId, SCRIPT_NAME, binding, value);
+    await setScriptSecret(cf, accountId, scriptName, name, value);
   } catch (err) {
     if (!isMissingScript(err)) throw err;
-    await createPlaceholderScript(cf, accountId, binding, value);
+    await createPlaceholderScript(cf, accountId, scriptName, name, value);
   }
-  console.log(`Set ${name} (${scope.type})`);
+  console.log(`Set ${name}`);
 };
 
 const secretsSet = defineCommand({

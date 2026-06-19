@@ -390,56 +390,6 @@ test("a signed but malformed json body responds 400 and starts no run", async ()
   expect(calls).toEqual([]);
 });
 
-test("verifies webhooks using scoped secret bindings", async () => {
-  const calls: unknown[] = [];
-  const hello = workflow({
-    id: "hello",
-    secrets: ["LINEAR_WEBHOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/hello",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
-        signatureHeader: "linear-signature",
-      }),
-  }).handler(async () => {});
-  const router = createRouter([
-    {
-      id: "hello",
-      binding: "HELLO",
-      trigger: hello.trigger,
-      secretBindings: {
-        LINEAR_WEBHOOK_SECRET: [
-          "LINEAR_WEBHOOK_SECRET",
-          "RUNWAY_WORKFLOW_HELLO_LINEAR_WEBHOOK_SECRET",
-          "RUNWAY_PROJECT_LINEAR_WEBHOOK_SECRET",
-          "RUNWAY_GLOBAL_LINEAR_WEBHOOK_SECRET",
-        ],
-      },
-    },
-  ]);
-  const body = JSON.stringify({ ok: true });
-
-  const res = await router.fetch(
-    new Request("https://runway.test/hello", {
-      method: "POST",
-      body,
-      headers: { "linear-signature": await hmacSha256Hex("test-secret", body) },
-    }),
-    {
-      RUNWAY_PROJECT_LINEAR_WEBHOOK_SECRET: "test-secret",
-      HELLO: {
-        create: async ({ params }: { params: unknown }) => {
-          calls.push(params);
-          return { id: "run-1" };
-        },
-      },
-    },
-  );
-
-  expect(res.status).toBe(202);
-  expect(calls).toEqual([{ ok: true }]);
-});
-
 test("rejects unsigned webhooks before parsing the body", async () => {
   const calls: unknown[] = [];
   const hello = workflow({

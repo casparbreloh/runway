@@ -17,6 +17,7 @@ catalog:
   citty: ^0.2.2
   cloudflare: ^6.3.0
   esbuild: ^0.28.0
+  fallow: 2.100.0
   oxfmt: 0.48.0
   oxlint: 1.63.0
   oxlint-tsgolint: 0.22.1
@@ -37,3 +38,12 @@ minimumReleaseAgeExclude:
   - miniflare@4.20260609.0
   - workerd@1.20260609.1
   - wrangler@4.99.0
+  - "@fallow-cli/darwin-arm64@2.100.0"
+  - "@fallow-cli/darwin-x64@2.100.0"
+  - "@fallow-cli/linux-arm64-gnu@2.100.0"
+  - "@fallow-cli/linux-arm64-musl@2.100.0"
+  - "@fallow-cli/linux-x64-gnu@2.100.0"
+  - "@fallow-cli/linux-x64-musl@2.100.0"
+  - "@fallow-cli/win32-arm64-msvc@2.100.0"
+  - "@fallow-cli/win32-x64-msvc@2.100.0"
+  - fallow@2.100.0

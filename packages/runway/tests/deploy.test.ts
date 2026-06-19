@@ -233,8 +233,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
   const calls = emptyCalls();
   const client = fakeApi(calls, {
     workflows: [
-      { name: "hello", script_name: "runway" },
-      { name: "stale-flow", script_name: "runway" },
+      { name: "hello", script_name: "runway-ship-it" },
+      { name: "stale-flow", script_name: "runway-ship-it" },
       { name: "other", script_name: "runway-other" },
     ],
   });
@@ -258,9 +258,11 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       'const workflowLoaders: Record<string, string> = {"hello":"hello-hash","daily":"daily-hash"}',
     );
     expect(generated).toContain('compatibilityFlags: ["nodejs_compat"]');
-    expect(generated).toContain("const secretBindings");
+    expect(generated).toContain(
+      'const workflowSecrets: Record<string, ReadonlyArray<string>> = {"hello":["LINEAR_WEBHOOK_SECRET","LINEAR_API_KEY"],"daily":[]}',
+    );
     expect(generated).toContain("...secretsFor(parentEnv, workflowId)");
-    expect(generated).toContain('secretBindings: secretBindings["hello"]');
+    expect(generated).not.toContain("secretBindings");
     expect(generated).toContain('export { Sandbox } from "@cloudflare/sandbox";');
     expect(generated).toContain("export { DynamicWorkflowBinding }");
     expect(generated).toContain("export class RunwaySandboxBinding");
@@ -270,8 +272,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     expect(generated).toContain("wrapWorkflowBinding({ workflowId })");
     expect(generated).not.toContain("wrapWorkflowBinding({ workflowId, loaderId })");
     expect(result).toEqual({
-      script: "runway",
-      urls: [{ id: "hello", url: "https://runway.tester.workers.dev/hello" }],
+      script: "runway-ship-it",
+      urls: [{ id: "hello", url: "https://runway-ship-it.tester.workers.dev/hello" }],
     });
     const metadata = calls.metadata as {
       compatibility_flags?: ReadonlyArray<string>;
@@ -287,7 +289,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       {
         type: "workflow",
         name: "WORKFLOWS",
-        workflow_name: "runway",
+        workflow_name: "runway-ship-it",
         class_name: "DynamicWorkflow",
       },
       { type: "durable_object_namespace", name: "Sandbox", class_name: "Sandbox" },
@@ -310,7 +312,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         {
           account_id: "account",
           body: {
-            name: "runway-Sandbox",
+            name: "runway-ship-it-Sandbox",
             scheduling_policy: "default",
             configuration: {
               image: "docker.io/cloudflare/sandbox:0.12.1",
@@ -326,14 +328,47 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       ],
     ]);
     expect(calls.workflowUpdates).toEqual([
-      ["runway", { account_id: "account", class_name: "DynamicWorkflow", script_name: "runway" }],
+      [
+        "runway-ship-it",
+        { account_id: "account", class_name: "DynamicWorkflow", script_name: "runway-ship-it" },
+      ],
     ]);
     expect(calls.workflowDeletes).toEqual([
       ["hello", { account_id: "account" }],
       ["stale-flow", { account_id: "account" }],
     ]);
-    expect(calls.subdomains).toEqual([["runway", { account_id: "account", enabled: true }]]);
+    expect(calls.subdomains).toEqual([
+      ["runway-ship-it", { account_id: "account", enabled: true }],
+    ]);
     expect(calls.schedules).toEqual([{ cron: "0 9 * * *" }]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy accepts an explicit script name override", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls);
+
+  try {
+    const result = await deploy(registry, {
+      cwd: project.cwd,
+      env: { ...deployEnv, RUNWAY_SCRIPT_NAME: "custom-runway" },
+      client: () => client,
+    });
+
+    expect(result).toEqual({
+      script: "custom-runway",
+      urls: [{ id: "hello", url: "https://custom-runway.tester.workers.dev/hello" }],
+    });
+    expect(calls.workflowUpdates).toEqual([
+      [
+        "custom-runway",
+        { account_id: "account", class_name: "DynamicWorkflow", script_name: "custom-runway" },
+      ],
+    ]);
+    expect(calls.subdomains).toEqual([["custom-runway", { account_id: "account", enabled: true }]]);
   } finally {
     await project.cleanup();
   }
@@ -343,7 +378,7 @@ test("deploy does not replay the sandbox migration after it has been applied", a
   const project = await writeProject();
   const calls = emptyCalls();
   const client = fakeApi(calls, {
-    scripts: [{ id: "runway", migration_tag: "runway-sandbox-v1" }],
+    scripts: [{ id: "runway-ship-it", migration_tag: "runway-sandbox-v1" }],
   });
 
   try {
@@ -458,14 +493,11 @@ test("deploy requires declared secrets before upload", async () => {
   }
 });
 
-test("deploy accepts remote scoped secrets", async () => {
+test("deploy accepts existing Worker secrets by plain name", async () => {
   const project = await writeProject();
   const calls = emptyCalls();
   const client = fakeApi(calls, {
-    secrets: [
-      { name: "RUNWAY_GLOBAL_LINEAR_WEBHOOK_SECRET" },
-      { name: "RUNWAY_WORKFLOW_HELLO_LINEAR_API_KEY" },
-    ],
+    secrets: [{ name: "LINEAR_WEBHOOK_SECRET" }, { name: "LINEAR_API_KEY" }],
   });
 
   try {
@@ -486,11 +518,11 @@ test("deploy accepts remote scoped secrets", async () => {
     expect(metadata.keep_bindings).toEqual(["secret_text"]);
     expect(metadata.bindings).not.toContainEqual({
       type: "secret_text",
-      name: "RUNWAY_GLOBAL_LINEAR_WEBHOOK_SECRET",
+      name: "LINEAR_WEBHOOK_SECRET",
     });
     expect(metadata.bindings).not.toContainEqual({
       type: "secret_text",
-      name: "RUNWAY_WORKFLOW_HELLO_LINEAR_API_KEY",
+      name: "LINEAR_API_KEY",
     });
   } finally {
     await project.cleanup();
@@ -518,14 +550,11 @@ test("deploy treats a missing script secret list as empty", async () => {
   }
 });
 
-test("deploy env secrets override remote scoped secrets", async () => {
+test("deploy env secrets update matching plain Worker secrets", async () => {
   const project = await writeProject();
   const calls = emptyCalls();
   const client = fakeApi(calls, {
-    secrets: [
-      { name: "RUNWAY_WORKFLOW_HELLO_LINEAR_WEBHOOK_SECRET" },
-      { name: "RUNWAY_GLOBAL_LINEAR_API_KEY" },
-    ],
+    secrets: [{ name: "LINEAR_WEBHOOK_SECRET" }, { name: "LINEAR_API_KEY" }],
   });
 
   try {
@@ -546,10 +575,6 @@ test("deploy env secrets override remote scoped secrets", async () => {
       type: "secret_text",
       name: "LINEAR_API_KEY",
       text: "key-value",
-    });
-    expect(metadata.bindings).not.toContainEqual({
-      type: "secret_text",
-      name: "RUNWAY_WORKFLOW_HELLO_LINEAR_WEBHOOK_SECRET",
     });
   } finally {
     await project.cleanup();
@@ -578,11 +603,15 @@ test("deploy can use wrangler oauth and infer a single account", async () => {
     });
 
     expect(tokens).toEqual(["oauth-token"]);
-    expect(result.script).toBe("runway");
+    expect(result.script).toBe("runway-ship-it");
     expect(calls.workflowUpdates).toEqual([
       [
-        "runway",
-        { account_id: "wrangler-account", class_name: "DynamicWorkflow", script_name: "runway" },
+        "runway-ship-it",
+        {
+          account_id: "wrangler-account",
+          class_name: "DynamicWorkflow",
+          script_name: "runway-ship-it",
+        },
       ],
     ]);
   } finally {

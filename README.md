@@ -113,21 +113,27 @@ The handler's first argument is the workflow context
 included. Secrets live in two worlds: in the trigger callback, `ctx.secrets.X` is a branded
 name reference (values don't exist at authoring time) that `webhook({ secret })` requires; in the
 handler, `ctx.secrets.X` is the `string` value. Any undeclared key is a type error in both. Deploy
-is gated on them: it fails before upload when a declared secret is missing from the deploy env, and
-values upload as `secret_text` bindings. Non-secret config doesn't belong in `secrets` — it's plain
-TypeScript in the workflow file.
+is gated on them: it fails before upload when a declared secret is missing from both the deploy env
+and the repo Worker. Env values upload as plain `secret_text` bindings with the same name. Non-secret
+config doesn't belong in `secrets` — it's plain TypeScript in the workflow file.
 
 ## Wiring
 
 The CLI discovers exported workflows from `.runway/workflows/**/*.ts`, excluding `**/*.test.ts`,
 `**/*.spec.ts`, and `**/*.d.ts`. There is no `runway.config.ts`.
 
-Deploy codegens one Cloudflare Worker named `runway`. That Worker is a Dynamic Workflows loader: it
+The package has two library entry surfaces by design: `runway` for workflow authors and
+`runway/runtime` for generated Cloudflare runtime modules. The CLI binary is the deploy surface.
+
+Deploy codegens one Cloudflare orchestration Worker per repository, not one Worker per workflow.
+The script/resource name is deterministic: `RUNWAY_SCRIPT_NAME` first, then the package name, then
+the directory basename, with repository-derived names prefixed as `runway-<repo-slug>`. That Worker
 owns webhook and cron routing, uses one Cloudflare Workflow binding named `WORKFLOWS`, and loads each
-repository workflow through a Cloudflare Worker Loader binding named `LOADER`. It also owns the
-hidden Cloudflare Sandbox Durable Object/container used by `ctx.agent` and `ctx.sandbox`. No wrangler
-config and no generated files on disk. The workflow `id` is the Runway routing identity; the
-deployed Cloudflare Workflow resource is the singleton `runway`.
+repository workflow through a Cloudflare Worker Loader binding named `LOADER` and Dynamic
+Workers/Dynamic Workflows. It also owns the hidden Cloudflare Sandbox Durable Object/container used
+by `ctx.agent` and `ctx.sandbox`. No wrangler config and no generated files on disk. The workflow
+`id` is the Runway routing identity; the deployed Cloudflare Dynamic Workflow resource uses the same
+repo-scoped name as the orchestration Worker.
 
 Pi is intentionally invoked with `npx` inside the Sandbox rather than added as a package dependency:
 the CLI runs in the isolated execution environment, not in Runway's deploy bundle.
@@ -138,11 +144,11 @@ future registry/control-plane work.
 
 ## CLI
 
-- `runway deploy` — discover workflow exports, codegen and bundle the Worker in memory, then upload
-  via the typed `cloudflare` SDK (`cf.workers.scripts.update` with `worker_loader`, Dynamic
-  Workflows, Sandbox Durable Object, container, migration, and declared `secret_text` bindings;
-  `cf.workflows.update("runway", ...)`). The Worker script name is always `runway`. Runway does not
-  shell out to `wrangler deploy`. Prints the script name and one POST URL per webhook trigger.
+- `runway deploy` — discover workflow exports, codegen and bundle the orchestration Worker in
+  memory, then upload via the typed `cloudflare` SDK (`cf.workers.scripts.update` with
+  `worker_loader`, Dynamic Workflows, Sandbox Durable Object, container, migration, and declared
+  `secret_text` bindings; `cf.workflows.update(...)`). Runway does not shell out to
+  `wrangler deploy`. Prints the script name and one POST URL per webhook trigger.
 
 ## Example
 
@@ -157,9 +163,11 @@ as a comment with `@linear/sdk`'s `createComment` inside `ctx.step`.
   `@cloudflare/vitest-pool-workers`.
 - `pnpm typecheck` includes the example workflow; deploy tests cover the codegen/bundle/upload path
   with a mocked Cloudflare SDK.
+- `pnpm fallow` runs the Fallow codebase quality check used by CI.
 
-Deploying needs every workflow-declared secret in the environment. For Cloudflare auth, use either
-Wrangler login locally or explicit env vars in CI:
+Deploying needs every workflow-declared secret either in the environment or already set on the repo
+Worker with `runway secrets set <name> <value>`. For Cloudflare auth, use either Wrangler login
+locally or explicit env vars in CI:
 
 ```sh
 wrangler login

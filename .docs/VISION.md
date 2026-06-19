@@ -13,11 +13,11 @@ Runway is built for engineers who want programmable automation close to their co
 - Product engineers who want secure webhooks and background work with durable retries and replay.
 - Agent builders who want coding agents to run inside isolated Cloudflare Sandbox environments as part of a durable workflow.
 
-Runway is not trying to hide that these are workflows. The core API remains `workflow({ id, secrets, trigger }).handler(...)`, and future capabilities should compose around that primitive rather than introduce a second authoring model.
+Runway is not trying to hide that these are workflows. The core API remains `workflow({ id, secrets?, trigger }).handler(...)`, and future capabilities should compose around that primitive rather than introduce a second authoring model.
 
 ## Primitive Model
 
-Runway workflows are code-first declarations discovered from `.runway/workflows/**/*.ts`. A workflow has an id, declared secrets, one trigger, and a handler. The handler receives typed context primitives:
+Runway workflows are code-first declarations discovered from `.runway/workflows/**/*.ts`. A workflow has an id, optional declared secrets, one trigger, and a handler. The handler receives typed context primitives:
 
 - `ctx.step` for durable, memoized work with explicit idempotency keys.
 - `ctx.ai` for durable OpenRouter chat completions.
@@ -42,13 +42,15 @@ flowchart LR
   F --> G[Cloudflare Sandbox]
 ```
 
-The active deployment path is one reconciliation command: `runway deploy`. It discovers workflows, generates a Worker named `runway`, configures webhook and cron routing, binds the singleton Cloudflare Workflow resource, loads workflow modules through Worker Loader and Dynamic Workflows, wires schedules, and provides Cloudflare Sandbox access for `ctx.agent` and `ctx.sandbox`.
+The active deployment path is one reconciliation command: `runway deploy`. It discovers workflows, generates one orchestration Worker for the repository, configures webhook and cron routing, binds a matching repo-scoped Dynamic Workflow resource, loads workflow modules through Worker Loader and Dynamic Workflows, wires schedules, and provides Cloudflare Sandbox access for `ctx.agent` and `ctx.sandbox`.
+
+Runway does not deploy one Worker per workflow. A repository's workflows share one small orchestration Worker and one Dynamic Workflow resource; individual workflow code is loaded through Cloudflare Worker Loader and Dynamic Workers.
 
 ## Agent-Native Execution
 
 Agents are a native workflow primitive, not an external sidecar. `ctx.agent` runs inside a durable workflow step, writes optional files into a Cloudflare Sandbox workspace, executes the configured Pi command, and returns stdout to the workflow. `ctx.sandbox` exposes the same isolated execution environment for custom commands.
 
-This model lets repository automation combine typed triggers, durable steps, secret scoping, and sandboxed agents in one handler. Future agent features should preserve that shape: agents should be invoked from workflows, run with explicit inputs and secrets, and remain durable through Cloudflare Workflows.
+This model lets repository automation combine typed triggers, durable steps, plain repo Worker secrets, and sandboxed agents in one handler. Future agent features should preserve that shape: agents should be invoked from workflows, run with explicit inputs and secrets, and remain durable through Cloudflare Workflows.
 
 ## CI/CD Positioning
 
