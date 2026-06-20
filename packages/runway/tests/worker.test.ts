@@ -2,7 +2,8 @@ import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { cron, webhook, workflow } from "runway";
 import { expect, test } from "vitest";
 
-import { createRouter, hmacSha256Hex } from "../src/router.ts";
+import { createRouter, evaluateWebhookGates, hmacSha256Hex } from "../src/router.ts";
+import type { WebhookRouterEntry } from "../src/router.ts";
 import { createTestWorker } from "./worker.ts";
 
 const issueCreated: StandardSchemaV1<unknown, { action: string; normalized: boolean }> = {
@@ -182,6 +183,94 @@ test("the filter predicate runs on the schema output and gates the run", async (
       params: { action: "create", urgent: true, normalized: true },
     },
   ]);
+});
+
+test("webhook gate evaluation returns fan-out decisions without starting runs", async () => {
+  const issues = workflow({
+    id: "issues",
+    secrets: ["HOOK_SECRET"],
+    trigger: (tctx) =>
+      webhook({
+        path: "/linear",
+        secret: tctx.secrets.HOOK_SECRET,
+        signatureHeader: "x-signature",
+        schema: issueCreated,
+      }),
+  }).handler(async () => {
+    throw new Error("handler should not run during gate evaluation");
+  });
+  const urgent = workflow({
+    id: "urgent",
+    secrets: ["HOOK_SECRET"],
+    trigger: (tctx) =>
+      webhook({
+        path: "/linear",
+        secret: tctx.secrets.HOOK_SECRET,
+        signatureHeader: "x-signature",
+      }).filter(
+        (event): event is { urgent: true } => (event as { urgent?: unknown }).urgent === true,
+      ),
+  }).handler(async () => {
+    throw new Error("handler should not run during gate evaluation");
+  });
+  if (issues.trigger.type !== "webhook" || urgent.trigger.type !== "webhook") {
+    throw new Error("expected webhook test fixtures");
+  }
+  const entries: WebhookRouterEntry[] = [
+    { id: "issues", trigger: issues.trigger },
+    { id: "urgent", trigger: urgent.trigger },
+  ];
+
+  const partial = await evaluateWebhookGates(entries, { action: "create", urgent: false });
+  if (partial.status !== "ok") throw partial.error;
+
+  const [issueDecision, urgentDecision] = partial.decisions;
+  expect(issueDecision?.status).toBe("passed");
+  if (issueDecision?.status !== "passed") throw new Error("expected issues to pass");
+  expect(issueDecision.event).toEqual({ action: "create", urgent: false, normalized: true });
+  expect(urgentDecision?.status).toBe("skipped");
+  if (urgentDecision?.status !== "skipped" || urgentDecision.reason !== "filter") {
+    throw new Error("expected urgent to skip on filter");
+  }
+  expect(urgentDecision.event).toEqual({ action: "create", urgent: false });
+
+  const skipped = await evaluateWebhookGates(entries, { action: "update", urgent: false });
+  if (skipped.status !== "ok") throw skipped.error;
+
+  expect(
+    skipped.decisions.map((decision) =>
+      decision.status === "skipped"
+        ? { id: decision.entry.id, status: decision.status, reason: decision.reason }
+        : { id: decision.entry.id, status: decision.status },
+    ),
+  ).toEqual([
+    { id: "issues", status: "skipped", reason: "schema" },
+    { id: "urgent", status: "skipped", reason: "filter" },
+  ]);
+});
+
+test("webhook gate evaluation returns trigger errors as data", async () => {
+  const exploding = workflow({
+    id: "exploding",
+    secrets: ["HOOK_SECRET"],
+    trigger: (tctx) =>
+      webhook({
+        path: "/linear",
+        secret: tctx.secrets.HOOK_SECRET,
+        signatureHeader: "x-signature",
+      }).filter((_event): _event is { action: "create" } => {
+        throw new Error("predicate exploded");
+      }),
+  }).handler(async () => {
+    throw new Error("handler should not run during gate evaluation");
+  });
+  if (exploding.trigger.type !== "webhook") throw new Error("expected webhook test fixture");
+
+  const evaluation = await evaluateWebhookGates([{ id: "exploding", trigger: exploding.trigger }], {
+    action: "create",
+  });
+
+  expect(evaluation.status).toBe("error");
 });
 
 test("a rejecting schema validate responds 500 and starts no run", async () => {
