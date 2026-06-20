@@ -13,6 +13,39 @@ export interface RouterEntry {
   readonly trigger: WorkflowTrigger;
 }
 
+export type WebhookRouterEntry = RouterEntry & { readonly trigger: WebhookTrigger<unknown> };
+
+export interface PassedWebhookGate {
+  readonly status: "passed";
+  readonly entry: WebhookRouterEntry;
+  readonly event: unknown;
+}
+
+export type SkippedWebhookGate =
+  | {
+      readonly status: "skipped";
+      readonly entry: WebhookRouterEntry;
+      readonly reason: "schema";
+    }
+  | {
+      readonly status: "skipped";
+      readonly entry: WebhookRouterEntry;
+      readonly reason: "filter";
+      readonly event: unknown;
+    };
+
+export type WebhookGateDecision = PassedWebhookGate | SkippedWebhookGate;
+
+export type WebhookGateEvaluation =
+  | {
+      readonly status: "ok";
+      readonly decisions: ReadonlyArray<WebhookGateDecision>;
+    }
+  | {
+      readonly status: "error";
+      readonly error: unknown;
+    };
+
 export interface WorkflowStarter {
   start(entry: RouterEntry, event: unknown, env: unknown, ctx?: unknown): Promise<{ id: string }>;
 }
@@ -85,6 +118,37 @@ const verifyTimestamp = (
   return Math.abs(Date.now() - ms) <= timestamp.toleranceMs;
 };
 
+const passedWebhookGate = (decision: WebhookGateDecision): decision is PassedWebhookGate =>
+  decision.status === "passed";
+
+export const evaluateWebhookGates = async (
+  entries: ReadonlyArray<WebhookRouterEntry>,
+  params: unknown,
+): Promise<WebhookGateEvaluation> => {
+  const decisions: WebhookGateDecision[] = [];
+  try {
+    for (const entry of entries) {
+      let event = params;
+      if (entry.trigger.schema) {
+        const result = await entry.trigger.schema["~standard"].validate(params);
+        if (result.issues) {
+          decisions.push({ status: "skipped", entry, reason: "schema" });
+          continue;
+        }
+        event = result.value;
+      }
+      if (entry.trigger.predicate && !entry.trigger.predicate(event)) {
+        decisions.push({ status: "skipped", entry, reason: "filter", event });
+        continue;
+      }
+      decisions.push({ status: "passed", entry, event });
+    }
+  } catch (error) {
+    return { status: "error", error };
+  }
+  return { status: "ok", decisions };
+};
+
 const bindingStarter: WorkflowStarter = {
   async start(entry, event, env) {
     const binding = entry.binding ?? entry.id;
@@ -101,8 +165,7 @@ export const createRouter = (
   starter: WorkflowStarter = bindingStarter,
 ): Router => {
   const webhooks = entries.filter(
-    (entry): entry is RouterEntry & { trigger: WebhookTrigger<unknown> } =>
-      entry.trigger.type === "webhook",
+    (entry): entry is WebhookRouterEntry => entry.trigger.type === "webhook",
   );
   const crons = entries.filter(
     (entry): entry is RouterEntry & { trigger: CronTrigger } => entry.trigger.type === "cron",
@@ -136,21 +199,11 @@ export const createRouter = (
       if (trigger.timestamp && !verifyTimestamp(trigger.timestamp, params, req.headers)) {
         return new Response("unauthorized", { status: 401 });
       }
-      const passing: Array<{ entry: RouterEntry; event: unknown }> = [];
-      try {
-        for (const entry of matches) {
-          let event = params;
-          if (entry.trigger.schema) {
-            const result = await entry.trigger.schema["~standard"].validate(params);
-            if (result.issues) continue;
-            event = result.value;
-          }
-          if (entry.trigger.predicate && !entry.trigger.predicate(event)) continue;
-          passing.push({ entry, event });
-        }
-      } catch {
+      const evaluation = await evaluateWebhookGates(matches, params);
+      if (evaluation.status === "error") {
         return new Response("trigger evaluation failed", { status: 500 });
       }
+      const passing = evaluation.decisions.filter(passedWebhookGate);
       if (passing.length === 0) return Response.json({ skipped: true });
       const runs: Array<{ id: string; workflow: string }> = [];
       for (const { entry, event } of passing) {
