@@ -2,9 +2,18 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const DEFAULT_SCRIPT_NAME = "runway";
+const MAX_SCRIPT_NAME_LENGTH = 63;
 const SCRIPT_NAME_ENV = "RUNWAY_SCRIPT_NAME";
 
 export const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+
+const ensureScriptNameLength = (name: string, value: string): void => {
+  if (name.length > MAX_SCRIPT_NAME_LENGTH) {
+    throw new Error(
+      `invalid Runway script name ${JSON.stringify(value)}: normalized name ${JSON.stringify(name)} exceeds ${MAX_SCRIPT_NAME_LENGTH} characters`,
+    );
+  }
+};
 
 const slugOf = (value: string): string => {
   const slug = value
@@ -16,15 +25,25 @@ const slugOf = (value: string): string => {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   if (!slug) throw new Error(`invalid Runway script name ${JSON.stringify(value)}`);
+  ensureScriptNameLength(slug, value);
   return slug;
 };
 
 const repoScriptNameOf = (identity: string): string => {
   const slug = slugOf(identity);
-  return slug === DEFAULT_SCRIPT_NAME || slug.startsWith(`${DEFAULT_SCRIPT_NAME}-`)
-    ? slug
-    : `${DEFAULT_SCRIPT_NAME}-${slug}`;
+  const name =
+    slug === DEFAULT_SCRIPT_NAME || slug.startsWith(`${DEFAULT_SCRIPT_NAME}-`)
+      ? slug
+      : `${DEFAULT_SCRIPT_NAME}-${slug}`;
+  ensureScriptNameLength(name, identity);
+  return name;
 };
+
+const isMissingFile = (err: unknown): boolean =>
+  err !== null &&
+  typeof err === "object" &&
+  "code" in err &&
+  (err as { code?: unknown }).code === "ENOENT";
 
 const packageNameOf = async (cwd: string): Promise<string | undefined> => {
   try {
@@ -32,8 +51,9 @@ const packageNameOf = async (cwd: string): Promise<string | undefined> => {
       name?: unknown;
     };
     return typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : undefined;
-  } catch {
-    return undefined;
+  } catch (err) {
+    if (isMissingFile(err)) return undefined;
+    throw err;
   }
 };
 

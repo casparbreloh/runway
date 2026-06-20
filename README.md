@@ -132,7 +132,15 @@ Script naming is deterministic:
 
 - `RUNWAY_SCRIPT_NAME`, if set.
 - Otherwise package name, then directory basename.
-- Repository-derived names are prefixed as `runway-<repo-slug>` unless already prefixed.
+- Names are normalized by trimming, lowercasing, dropping a leading package scope `@`, replacing
+  separators and punctuation with hyphens, collapsing hyphens, and rejecting an empty result or a
+  name longer than 63 characters.
+- `RUNWAY_SCRIPT_NAME` is used as that slug directly.
+- Package and directory fallback names are prefixed as `runway-<repo-slug>` unless they are already
+  `runway` or start with `runway-`.
+
+If two repository identities would normalize to the same slug, or if CI deploys from unstable
+worktree paths without a package name, set `RUNWAY_SCRIPT_NAME` explicitly.
 
 The same repo-scoped name is used for the Worker script, Dynamic Workflow resource, and workers.dev
 host. Workflow `id` values are Runway routing ids inside that deployment.
