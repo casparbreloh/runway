@@ -46,6 +46,8 @@ The active deployment path is one reconciliation command: `runway deploy`. It di
 
 Runway does not deploy one Worker per workflow. A repository's workflows share one small orchestration Worker and one Dynamic Workflow resource; individual workflow code is loaded through Cloudflare Worker Loader and Dynamic Workers.
 
+The shared resource name is deterministic from deploy inputs: `RUNWAY_SCRIPT_NAME` first, then `package.json` name, then the current directory basename. Runway normalizes names to lowercase hyphen slugs, rejects names longer than the workers.dev DNS label limit, uses explicit overrides directly, and prefixes package or directory fallback slugs as `runway-<repo-slug>` unless they are `runway` or start with `runway-`. Repositories that can collide after normalization or deploy from unstable worktree paths should pin `RUNWAY_SCRIPT_NAME`.
+
 ## Agent-Native Execution
 
 Agents are a native workflow primitive, not an external sidecar. `ctx.agent` runs inside a durable workflow step, writes optional files into a Cloudflare Sandbox workspace, executes the configured Pi command, and returns stdout to the workflow. `ctx.sandbox` exposes the same isolated execution environment for custom commands.

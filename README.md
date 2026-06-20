@@ -127,13 +127,18 @@ The package has two library entry surfaces by design: `runway` for workflow auth
 
 Deploy codegens one Cloudflare orchestration Worker per repository, not one Worker per workflow.
 The script/resource name is deterministic: `RUNWAY_SCRIPT_NAME` first, then the package name, then
-the directory basename, with repository-derived names prefixed as `runway-<repo-slug>`. That Worker
-owns webhook and cron routing, uses one Cloudflare Workflow binding named `WORKFLOWS`, and loads each
-repository workflow through a Cloudflare Worker Loader binding named `LOADER` and Dynamic
-Workers/Dynamic Workflows. It also owns the hidden Cloudflare Sandbox Durable Object/container used
-by `ctx.agent` and `ctx.sandbox`. No wrangler config and no generated files on disk. The workflow
-`id` is the Runway routing identity; the deployed Cloudflare Dynamic Workflow resource uses the same
-repo-scoped name as the orchestration Worker.
+the directory basename. Names are normalized by trimming, lowercasing, dropping a leading package
+scope `@`, replacing separators and punctuation with hyphens, collapsing hyphens, and rejecting an
+empty result or a name longer than 63 characters. `RUNWAY_SCRIPT_NAME` is used as that slug directly,
+while package and directory fallback names are prefixed as `runway-<repo-slug>` unless they are
+already `runway` or start with `runway-`. If two repository identities would normalize to the same
+slug, or if CI deploys from unstable worktree paths without a package name, set `RUNWAY_SCRIPT_NAME`
+explicitly. That Worker owns webhook and cron routing, uses one Cloudflare Workflow binding named
+`WORKFLOWS`, and loads each repository workflow through a Cloudflare Worker Loader binding named
+`LOADER` and Dynamic Workers/Dynamic Workflows. It also owns the hidden Cloudflare Sandbox Durable
+Object/container used by `ctx.agent` and `ctx.sandbox`. No wrangler config and no generated files on
+disk. The workflow `id` is the Runway routing identity; the deployed Cloudflare Dynamic Workflow
+resource uses the same repo-scoped name as the orchestration Worker.
 
 Pi is intentionally invoked with `npx` inside the Sandbox rather than added as a package dependency:
 the CLI runs in the isolated execution environment, not in Runway's deploy bundle.

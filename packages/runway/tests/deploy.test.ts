@@ -72,6 +72,7 @@ const writeWrangler = async (
 interface ApiCalls {
   metadata?: unknown;
   schedules?: unknown;
+  scriptUpdates: string[];
   workflowUpdates: unknown[];
   workflowDeletes: unknown[];
   subdomains: unknown[];
@@ -95,6 +96,7 @@ const fakeApi = (
     scripts: {
       list: async () => opts.scripts ?? [],
       update: async (...args) => {
+        calls.scriptUpdates.push(args[0]);
         calls.metadata = args[1].metadata;
       },
       secrets: {
@@ -154,6 +156,7 @@ const fakeApi = (
 });
 
 const emptyCalls = (): ApiCalls => ({
+  scriptUpdates: [],
   workflowUpdates: [],
   workflowDeletes: [],
   subdomains: [],
@@ -327,6 +330,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         },
       ],
     ]);
+    expect(calls.scriptUpdates).toEqual(["runway-ship-it"]);
     expect(calls.workflowUpdates).toEqual([
       [
         "runway-ship-it",
@@ -362,6 +366,7 @@ test("deploy accepts an explicit script name override", async () => {
       script: "custom-runway",
       urls: [{ id: "hello", url: "https://custom-runway.tester.workers.dev/hello" }],
     });
+    expect(calls.scriptUpdates).toEqual(["custom-runway"]);
     expect(calls.workflowUpdates).toEqual([
       [
         "custom-runway",
