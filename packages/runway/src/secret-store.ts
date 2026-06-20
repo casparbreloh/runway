@@ -1,26 +1,12 @@
-import type { CloudflareApi } from "./deploy.ts";
-
-const resultOf = (response: unknown): unknown =>
-  response && typeof response === "object" && "result" in response
-    ? (response as { result: unknown }).result
-    : response;
+import { collectResultItems } from "./cloudflare-api.ts";
+import type { CloudflareApi } from "./cloudflare-api.ts";
 
 const secretNamesOf = async (response: unknown): Promise<ReadonlyArray<string>> => {
-  const names: string[] = [];
-  const collect = (item: unknown): void => {
-    if (item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string") {
-      names.push((item as { name: string }).name);
-    }
-  };
-  const result = resultOf(response);
-  if (Array.isArray(result)) {
-    result.forEach(collect);
-    return names;
-  }
-  if (response && typeof response === "object" && Symbol.asyncIterator in response) {
-    for await (const item of response as AsyncIterable<unknown>) collect(item);
-  }
-  return names;
+  return collectResultItems(response, (item) =>
+    item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string"
+      ? (item as { name: string }).name
+      : undefined,
+  );
 };
 
 const isMissingScript = (err: unknown): boolean =>
