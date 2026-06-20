@@ -46,7 +46,21 @@ The active deployment path is one reconciliation command: `runway deploy`. It di
 
 Runway does not deploy one Worker per workflow. A repository's workflows share one small orchestration Worker and one Dynamic Workflow resource; individual workflow code is loaded through Cloudflare Worker Loader and Dynamic Workers.
 
-The shared resource name is deterministic from deploy inputs: `RUNWAY_SCRIPT_NAME` first, then `package.json` name, then the current directory basename. Runway normalizes names to lowercase hyphen slugs, rejects names longer than the workers.dev DNS label limit, uses explicit overrides directly, and prefixes package or directory fallback slugs as `runway-<repo-slug>` unless they are `runway` or start with `runway-`. Repositories that can collide after normalization or deploy from unstable worktree paths should pin `RUNWAY_SCRIPT_NAME`.
+## Deployment Operations
+
+The first-run path should stay boring and inspectable: write `.runway/workflows/**/*.ts`, provide Cloudflare auth with either Wrangler OAuth or `CLOUDFLARE_API_TOKEN`, set `CLOUDFLARE_ACCOUNT_ID` when auth can see multiple accounts, make declared secrets available as env vars or repo Worker secrets, then run `runway deploy`.
+
+Resource naming is repo-scoped and deterministic from deploy inputs. `RUNWAY_SCRIPT_NAME` is the explicit override; otherwise Runway derives a name from the package name, then the current directory basename. Runway normalizes names to lowercase hyphen slugs, rejects names longer than the workers.dev DNS label limit, uses explicit overrides directly, and prefixes package or directory fallback slugs as `runway-<repo-slug>` unless they are `runway` or start with `runway-`. That one name is used for the orchestration Worker script, matching Dynamic Workflow resource, workers.dev host, and Sandbox container application prefix. Workflow ids remain Runway routing ids inside the repo deployment. Repositories that can collide after normalization or deploy from unstable worktree paths should pin `RUNWAY_SCRIPT_NAME`.
+
+Deploy should report enough for operators to know what changed without exposing Cloudflare internals: the number of discovered workflows, the repo script name, and one POST URL per webhook trigger. Cron workflows are represented by the Worker schedule list, not by printed URLs.
+
+Operational limits are part of the product contract:
+
+- Declared secrets gate deploy before upload; env secrets update matching Worker `secret_text` bindings, while existing Worker secrets can satisfy deploy without being re-sent.
+- Shared webhook paths require identical verification config; each workflow owns its own schema/filter gate.
+- Deploy reconciles the repo-owned script, Dynamic Workflow, cron schedules, Sandbox resources, and stale Workflow resources attached to that script, but not unrelated Cloudflare resources.
+- Workflow resumes currently use the latest deployed workflow code and secrets. Version-pinned resumes are deferred until durable artifact storage and registry/control-plane work exist.
+- There is no second backend, no public manual-start endpoint, and no broad CI configuration layer in the current architecture.
 
 ## Agent-Native Execution
 
