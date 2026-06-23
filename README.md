@@ -3,7 +3,8 @@
 TypeScript-first workflow infrastructure for repository automation, scheduled work, webhooks, and
 agent-native execution on Cloudflare. Author workflows with `runway`, deploy them with `runway
 deploy`, and let Cloudflare own routing, replay, persistence, durable sleep, schedules, and Sandbox
-execution.
+execution. Runway is focused on AI/agentic workflow loops first; CI/CD runner primitives come later
+as workflow-composable features.
 
 For product direction and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
 
@@ -128,6 +129,10 @@ Runway deploys one Cloudflare orchestration Worker per repository, not one Worke
 Worker owns webhook routing, cron routing, one `WORKFLOWS` binding, one `LOADER` binding, and the
 Sandbox resources used by `ctx.agent` and `ctx.sandbox`.
 
+Runway is not moving execution to one account-level Worker. Per-workflow code is loaded dynamically
+through Worker Loader, Dynamic Workers, and the repo-scoped Dynamic Workflow resource owned by this
+deployment.
+
 Script naming is deterministic:
 
 - `RUNWAY_SCRIPT_NAME`, if set.
@@ -161,7 +166,11 @@ workers.dev, and removes stale Workflow resources attached to the same script.
 - `ctx.agent` invokes `npx --yes @earendil-works/pi-coding-agent@0.79.1` inside Sandbox and inherits
   Cloudflare Sandbox/Container limits.
 - Workflow resumes currently use the latest deployed workflow code and secrets. Version-pinned
-  resumes are deferred until durable artifact storage and registry/control-plane work exist.
+  resumes are deferred until later durable artifact storage work exists.
+- Shared account-level R2/session analysis and any registry/control-plane rewrite are optional
+  future data-plane work, not part of the current execution topology.
+- CI/CD runner primitives are later product work; the current surface is workflows, triggers,
+  durable steps, `ctx.ai`, `ctx.agent`, `ctx.sandbox`, and `ctx.sleep`.
 
 ## Example
 

@@ -13,7 +13,7 @@ export const SANDBOX_CLASS = "Sandbox";
 export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.1";
 export const SANDBOX_MIGRATION_TAG = "runway-sandbox-v1";
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
-export const TENANT_WORKFLOW_CLASS = "TenantWorkflow";
+export const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
 
 export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
   registry.flatMap((w) => (w.def.trigger.type === "cron" ? [w.def.trigger.expression] : []));
@@ -36,7 +36,7 @@ export const generateDynamicWorker = (
   return `import * as __m0 from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, workflow.path)))};
 import { createWorkflowWorker, toEntrypoint } from "runway/runtime";
 
-export class ${TENANT_WORKFLOW_CLASS} extends toEntrypoint(${ref}) {}
+export class ${RUNWAY_WORKFLOW_CLASS} extends toEntrypoint(${ref}) {}
 
 export default createWorkflowWorker();
 `;
@@ -162,7 +162,7 @@ export const ${DYNAMIC_WORKFLOW_CLASS} = createDynamicWorkflowEntrypoint<Env>(
   async ({ env, metadata, ctx }) => {
     const workflowId = metadata.workflowId;
     if (typeof workflowId !== "string") throw new Error("missing workflow metadata");
-    return loadWorkflow(env, workflowId, ctx as unknown as LoaderContext).getEntrypoint(${JSON.stringify(TENANT_WORKFLOW_CLASS)}) as unknown as WorkflowRunner;
+    return loadWorkflow(env, workflowId, ctx as unknown as LoaderContext).getEntrypoint(${JSON.stringify(RUNWAY_WORKFLOW_CLASS)}) as unknown as WorkflowRunner;
   },
 );
 
