@@ -1,12 +1,13 @@
 # Runway
 
-TypeScript-first workflow infrastructure for repository automation, CI/CD-style checks, custom
-triggers, scheduled work, webhooks, and agent-native execution on Cloudflare. Author workflows with
+TypeScript-first workflow infrastructure for repository automation, custom triggers, scheduled work,
+webhooks, and agent-native execution on Cloudflare. Author workflows with
 `workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
 `.runway/workflows/**/*.ts`, and let the CLI codegen + deploy the Cloudflare runtime.
 
 Runway is Cloudflare-native. Cloudflare Workflows own replay, persistence, and durable sleep, while
 Cloudflare Sandbox powers `ctx.agent` and `ctx.sandbox`.
+Runway prioritizes AI/agentic workflow loops before CI/CD runner primitives.
 
 ## Layout
 
@@ -114,6 +115,8 @@ export default workflow({
 - Deploy owns one repo-scoped orchestration Worker script with one Worker Loader binding (`LOADER`),
   one Dynamic Workflows binding (`WORKFLOWS`) backed by a matching repo-scoped Cloudflare Workflow,
   and the hidden Cloudflare Sandbox binding used by `ctx.sandbox`.
+- Runway is not pivoting to one account-level execution Worker. Shared R2/session analysis may come
+  later as optional data-plane work, not as the execution topology.
 - Deploy updates cron schedules, removes stale workflow resources for that script, enables
   workers.dev, and returns webhook URLs.
 
