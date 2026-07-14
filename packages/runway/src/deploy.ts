@@ -4,6 +4,11 @@ import type { CloudflareApi } from "./cloudflare-api.ts";
 import { resolveAuth } from "./deploy-auth.ts";
 import { buildWorkerBundle } from "./deploy-bundle.ts";
 import {
+  currentSandboxMigrationTag,
+  needsSandboxMigration,
+  reconcileSandboxContainer,
+} from "./deploy-container.ts";
+import {
   deleteStaleDynamicWorkflows,
   updateCronSchedules,
   updateDynamicWorkflow,
@@ -38,6 +43,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
   const workflowName = scriptName;
   const { accountId, cf } = await resolveAuth(opts, env);
   const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
+  const migrationTag = await currentSandboxMigrationTag(cf, accountId, scriptName);
   const missingSecrets = registry.flatMap((w) =>
     w.def.secrets
       .filter((name) => !env[name] && !remoteSecrets.has(name))
@@ -58,7 +64,9 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
     contents,
     env,
     localSecretBindings,
+    needsSandboxMigration: needsSandboxMigration(migrationTag),
   });
+  await reconcileSandboxContainer(cf, accountId, scriptName);
   await updateDynamicWorkflow(cf, accountId, workflowName, scriptName);
   await updateCronSchedules(cf, accountId, scriptName, registry);
   await deleteStaleDynamicWorkflows(cf, accountId, workflowName, scriptName);

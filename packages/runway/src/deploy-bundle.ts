@@ -30,6 +30,9 @@ const runtimeDependencyResolver: Plugin = {
         "../node_modules/@cloudflare/dynamic-workflows/dist/index.js",
       ),
     }));
+    build.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
+      path: path.resolve(import.meta.dirname, "../node_modules/@cloudflare/sandbox/dist/index.js"),
+    }));
   },
 };
 

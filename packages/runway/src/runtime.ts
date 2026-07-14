@@ -2,7 +2,14 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import { makeCtx, secretsOf } from "./ctx.ts";
+import { RUNNER_BRIDGE_BINDING } from "./runner-config.ts";
+import { ManagedRunner } from "./runner.ts";
+import type { RunnerBridge } from "./runner.ts";
 import type { Primitives, WorkflowDefinition } from "./types.ts";
+
+export { executeSandboxCommand, watchWorkflowCancellation } from "./command-output.ts";
+export { runnerIdOf } from "./runner.ts";
+export type { NormalizedExecOptions, RunnerBridge } from "./runner.ts";
 
 export { createRouter } from "./router.ts";
 export type { RouterEntry, WorkflowStarter } from "./router.ts";
@@ -13,29 +20,57 @@ interface WorkflowBinding {
 
 type DynamicWorkerEnv = Record<string, unknown> & {
   WORKFLOWS?: WorkflowBinding;
+  [RUNNER_BRIDGE_BINDING]?: RunnerBridge;
 };
 
-const primitives = (step: WorkflowStep): Primitives => ({
-  step: {
-    do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-      step.do(id, fn as () => Promise<never>) as Promise<T>,
-    sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
-  },
-});
+interface RunRuntime {
+  readonly primitives: Primitives;
+  cleanup(): Promise<void>;
+}
+
+const makeRunRuntime = (
+  step: WorkflowStep,
+  bridge: RunnerBridge | undefined,
+  runId: string,
+  secrets: ReadonlyArray<string>,
+): RunRuntime => {
+  const runner = new ManagedRunner(bridge, runId, secrets);
+  return {
+    primitives: {
+      step: {
+        do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+          step.do(id, fn as () => Promise<never>) as Promise<T>,
+        exec: (id, command) =>
+          runner.exec(id, command, (callback) =>
+            step.do(id, callback as () => Promise<never>, { rollback: () => runner.cleanup() }),
+          ),
+        sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
+      },
+    },
+    cleanup: () => runner.cleanup(),
+  };
+};
 
 export const toEntrypoint = (
   def: WorkflowDefinition,
 ): typeof WorkflowEntrypoint<unknown, unknown> =>
   class extends WorkflowEntrypoint<unknown, unknown> {
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
-      return await def.handler(
-        makeCtx(primitives(step), {
-          runId: event.instanceId,
-          secrets: secretsOf(def.secrets, this.env),
-          env: this.env,
-        }),
-        event.payload,
-      );
+      const bridge = (this.env as DynamicWorkerEnv)[RUNNER_BRIDGE_BINDING];
+      const secrets = secretsOf(def.secrets, this.env);
+      const runtime = makeRunRuntime(step, bridge, event.instanceId, Object.values(secrets));
+      try {
+        return await def.handler(
+          makeCtx(runtime.primitives, {
+            runId: event.instanceId,
+            secrets,
+            env: this.env,
+          }),
+          event.payload,
+        );
+      } finally {
+        await runtime.cleanup();
+      }
     }
   };
 

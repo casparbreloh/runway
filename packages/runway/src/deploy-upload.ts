@@ -7,6 +7,12 @@ import {
   LOADER_BINDING,
   WORKFLOW_BINDING,
 } from "./codegen.ts";
+import {
+  RUNNER_CONTAINER,
+  SANDBOX_BINDING,
+  SANDBOX_CLASS,
+  SANDBOX_MIGRATION_TAG,
+} from "./runner-config.ts";
 
 type ScriptMetadata = Parameters<CloudflareApi["workers"]["scripts"]["update"]>[1]["metadata"];
 
@@ -17,12 +23,14 @@ interface WorkerUploadOptions {
   readonly contents: Uint8Array;
   readonly env: Record<string, string | undefined>;
   readonly localSecretBindings: ReadonlyArray<string>;
+  readonly needsSandboxMigration: boolean;
 }
 
 export const validateBindings = (secrets: ReadonlyArray<string>): void => {
   const names = new Map<string, string>();
   names.set(WORKFLOW_BINDING, "Runway workflow binding");
   names.set(LOADER_BINDING, "Runway worker loader binding");
+  names.set(SANDBOX_BINDING, "Runway sandbox binding");
   for (const secret of secrets) {
     const owner = names.get(secret);
     if (owner) {
@@ -45,12 +53,26 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
         workflow_name: opts.workflowName,
         class_name: DYNAMIC_WORKFLOW_CLASS,
       },
+      {
+        type: "durable_object_namespace" as const,
+        name: SANDBOX_BINDING,
+        class_name: SANDBOX_CLASS,
+      },
       ...opts.localSecretBindings.map((name) => ({
         type: "secret_text" as const,
         name,
         text: opts.env[name]!,
       })),
     ],
+    containers: [RUNNER_CONTAINER],
+    ...(opts.needsSandboxMigration
+      ? {
+          migrations: {
+            new_tag: SANDBOX_MIGRATION_TAG,
+            new_sqlite_classes: [SANDBOX_CLASS],
+          },
+        }
+      : {}),
   }) as ScriptMetadata;
 
 export const uploadWorker = async (cf: CloudflareApi, opts: WorkerUploadOptions): Promise<void> => {

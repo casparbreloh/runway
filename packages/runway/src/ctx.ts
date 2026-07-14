@@ -25,6 +25,7 @@ export const makeCtx = (
   env: meta.env,
   step: {
     do: (id, fn) => primitives.step.do(id, () => Promise.resolve(fn({ id }))),
+    exec: (id, command) => primitives.step.exec(id, command),
     sleep: (id, durationMs) => primitives.step.sleep(id, durationMs),
   },
 });

@@ -6,5 +6,6 @@ declare namespace Cloudflare {
   interface Env {
     DAILY: Workflow;
     ISSUE_CREATED: Workflow;
+    RUNNER: Workflow;
   }
 }

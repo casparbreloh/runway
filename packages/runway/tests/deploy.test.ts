@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { build as esbuild } from "esbuild";
 import { cron, webhook, workflow } from "runway";
 import type { Registry, WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
@@ -58,7 +59,10 @@ const writeWrangler = async (
 };
 
 interface ApiCalls {
+  containerCreates: unknown[];
+  containerModifies: unknown[];
   metadata?: unknown;
+  workerContents?: string;
   schedules?: unknown;
   scriptUpdates: string[];
   workflowUpdates: unknown[];
@@ -69,8 +73,10 @@ interface ApiCalls {
 const fakeApi = (
   calls: ApiCalls,
   opts: {
+    applications?: ReadonlyArray<unknown>;
     workflows?: ReadonlyArray<{ name: string; script_name: string }>;
     accounts?: ReadonlyArray<{ id: string }>;
+    scripts?: ReadonlyArray<{ id: string; migration_tag?: string }>;
     secrets?: ReadonlyArray<{ name: string }>;
   } = {},
 ): CloudflareApi => ({
@@ -79,15 +85,33 @@ const fakeApi = (
   },
   workers: {
     scripts: {
+      list: async () => opts.scripts ?? [],
       update: async (...args) => {
         calls.scriptUpdates.push(args[0]);
         calls.metadata = args[1].metadata;
+        const file = args[1].files?.[0];
+        if (file && "text" in file) calls.workerContents = await file.text();
       },
       secrets: {
         list: async () => {
           return opts.secrets ?? [];
         },
         bulkUpdate: async () => {},
+      },
+      versions: {
+        list: async () => [{ id: "version" }],
+        get: async () => ({
+          resources: {
+            bindings: [
+              {
+                type: "durable_object_namespace",
+                name: "RunwaySandbox",
+                class_name: "Sandbox",
+                namespace_id: "sandbox-namespace",
+              },
+            ],
+          },
+        }),
       },
       schedules: {
         update: async (...args) => {
@@ -113,9 +137,22 @@ const fakeApi = (
       calls.workflowDeletes.push(args);
     },
   },
+  containers: {
+    applications: {
+      list: async () => opts.applications ?? [],
+      create: async (...args) => {
+        calls.containerCreates.push(args);
+      },
+      modify: async (...args) => {
+        calls.containerModifies.push(args);
+      },
+    },
+  },
 });
 
 const emptyCalls = (): ApiCalls => ({
+  containerCreates: [],
+  containerModifies: [],
   scriptUpdates: [],
   workflowUpdates: [],
   workflowDeletes: [],
@@ -155,6 +192,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       compatibility_flags?: ReadonlyArray<string>;
       keep_bindings?: ReadonlyArray<string>;
       bindings: ReadonlyArray<unknown>;
+      containers?: ReadonlyArray<unknown>;
+      migrations?: unknown;
     };
     expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
     expect(metadata.keep_bindings).toEqual(["secret_text"]);
@@ -166,11 +205,58 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         workflow_name: "runway-ship-it",
         class_name: "DynamicWorkflow",
       },
+      { type: "durable_object_namespace", name: "RunwaySandbox", class_name: "Sandbox" },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
       { type: "secret_text", name: "LINEAR_API_KEY", text: "key-value" },
     ]);
-    expect(metadata).not.toHaveProperty("containers");
-    expect(metadata).not.toHaveProperty("migrations");
+    expect(metadata.containers).toEqual([
+      {
+        class_name: "Sandbox",
+        image: "docker.io/cloudflare/sandbox:0.12.3",
+        instance_type: "lite",
+      },
+    ]);
+    expect(metadata.migrations).toEqual({
+      new_tag: "runway-sandbox-v1",
+      new_sqlite_classes: ["Sandbox"],
+    });
+    const workerContents = calls.workerContents;
+    if (!workerContents) throw new Error("worker bundle was not uploaded");
+    const artifact = await esbuild({
+      stdin: {
+        contents: workerContents,
+        loader: "js",
+        sourcefile: "worker.js",
+      },
+      bundle: false,
+      format: "esm",
+      metafile: true,
+      write: false,
+    });
+    const exports = Object.values(artifact.metafile!.outputs)[0]?.exports;
+    expect(exports).toEqual(
+      expect.arrayContaining(["DynamicWorkflow", "RunwayRunnerBinding", "Sandbox", "default"]),
+    );
+    expect(calls.containerCreates).toEqual([
+      [
+        {
+          account_id: "account",
+          body: {
+            name: "runway-ship-it-Sandbox",
+            scheduling_policy: "default",
+            configuration: {
+              image: "docker.io/cloudflare/sandbox:0.12.3",
+              instance_type: "lite",
+            },
+            instances: 0,
+            max_instances: 20,
+            constraints: { tiers: [1, 2] },
+            durable_objects: { namespace_id: "sandbox-namespace" },
+            rollout_active_grace_period: 0,
+          },
+        },
+      ],
+    ]);
     expect(calls.scriptUpdates).toEqual(["runway-ship-it"]);
     expect(calls.workflowUpdates).toEqual([
       [
@@ -215,6 +301,85 @@ test("deploy accepts an explicit script name override", async () => {
       ],
     ]);
     expect(calls.subdomains).toEqual([["custom-runway", { account_id: "account", enabled: true }]]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy reuses the matching container application and does not replay its migration", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    scripts: [{ id: "runway-ship-it", migration_tag: "runway-sandbox-v1" }],
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        scheduling_policy: "default",
+        configuration: {
+          image: "docker.io/cloudflare/sandbox:0.12.3",
+          instance_type: "lite",
+        },
+        instances: 0,
+        max_instances: 20,
+        constraints: { tiers: [1, 2] },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+        rollout_active_grace_period: 0,
+      },
+    ],
+  });
+
+  try {
+    await deploy(registry, {
+      cwd: project.cwd,
+      env: deployEnv,
+      client: () => client,
+    });
+
+    expect((calls.metadata as { migrations?: unknown }).migrations).toBeUndefined();
+    expect(calls.containerCreates).toEqual([]);
+    expect(calls.containerModifies).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy reconciles stale container application configuration", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        configuration: { image: "old-image", instance_type: "lite" },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+      },
+    ],
+  });
+
+  try {
+    await deploy(registry, { cwd: project.cwd, env: deployEnv, client: () => client });
+
+    expect(calls.containerModifies).toEqual([
+      [
+        "application",
+        {
+          account_id: "account",
+          body: {
+            scheduling_policy: "default",
+            configuration: {
+              image: "docker.io/cloudflare/sandbox:0.12.3",
+              instance_type: "lite",
+            },
+            instances: 0,
+            max_instances: 20,
+            constraints: { tiers: [1, 2] },
+            rollout_active_grace_period: 0,
+          },
+        },
+      ],
+    ]);
   } finally {
     await project.cleanup();
   }
