@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { RUNNER_BRIDGE_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
 import type { RegisteredWorkflow } from "./types.ts";
 import type { Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
@@ -7,11 +8,6 @@ import { validateRegistry } from "./validate.ts";
 export const COMPATIBILITY_DATE = "2026-06-06";
 export const WORKFLOW_BINDING = "WORKFLOWS";
 export const LOADER_BINDING = "LOADER";
-export const SANDBOX_BINDING = "RunwaySandbox";
-const RUNNER_BRIDGE_BINDING = "RUNWAY_RUNNER";
-export const SANDBOX_CLASS = "Sandbox";
-export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.3";
-export const SANDBOX_MIGRATION_TAG = "runway-sandbox-v1";
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
 const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
 
@@ -79,8 +75,9 @@ import {
 } from "@cloudflare/dynamic-workflows";
 import {
   createRouter,
-  executeCommand,
+  executeSandboxCommand,
   runnerIdOf,
+  watchWorkflowCancellation,
   type NormalizedExecOptions,
   type RouterEntry,
   type WorkflowStarter,
@@ -109,6 +106,7 @@ interface LoaderBinding {
 interface Env {
   ${LOADER_BINDING}: LoaderBinding;
   ${SANDBOX_BINDING}: DurableObjectNamespace;
+  ${WORKFLOW_BINDING}: Workflow;
 }
 
 interface LoaderContext {
@@ -141,14 +139,21 @@ export class RunwayRunnerBinding extends WorkerEntrypoint<Env> {
     const sandbox = getSandbox(this.env.${SANDBOX_BINDING}, await runnerIdOf(runId), {
       enableDefaultSession: false,
     });
+    let completed = false;
+    this.ctx.waitUntil(
+      watchWorkflowCancellation(
+        async () => await (await this.env.${WORKFLOW_BINDING}.get(runId)).status(),
+        sandbox,
+        () => completed,
+      ),
+    );
     try {
-      return await executeCommand(sandbox, options, secrets, (stream, chunk) => {
+      return await executeSandboxCommand(sandbox, options, secrets, (stream, chunk) => {
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
       });
-    } catch (error) {
-      await sandbox.killAllProcesses();
-      throw error;
+    } finally {
+      completed = true;
     }
   }
 

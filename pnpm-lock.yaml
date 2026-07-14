@@ -238,6 +238,9 @@ catalogs:
     fallow:
       specifier: 2.100.0
       version: 2.100.0
+    miniflare:
+      specifier: 4.20260609.0
+      version: 4.20260609.0
     oxfmt:
       specifier: 0.48.0
       version: 0.48.0
@@ -323,6 +326,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 4.20260605.1
+      miniflare:
+        specifier: 'catalog:'
+        version: 4.20260609.0
 
 packages:
 

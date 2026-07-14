@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { build as esbuild } from "esbuild";
 import { cron, webhook, workflow } from "runway";
 import type { Registry, WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
@@ -60,8 +61,8 @@ const writeWrangler = async (
 interface ApiCalls {
   containerCreates: unknown[];
   containerModifies: unknown[];
-  contents?: string;
   metadata?: unknown;
+  workerContents?: string;
   schedules?: unknown;
   scriptUpdates: string[];
   workflowUpdates: unknown[];
@@ -88,8 +89,8 @@ const fakeApi = (
       update: async (...args) => {
         calls.scriptUpdates.push(args[0]);
         calls.metadata = args[1].metadata;
-        const file = args[1].files?.[0] as Blob | undefined;
-        if (file) calls.contents = await file.text();
+        const file = args[1].files?.[0];
+        if (file && "text" in file) calls.workerContents = await file.text();
       },
       secrets: {
         list: async () => {
@@ -219,10 +220,23 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       new_tag: "runway-sandbox-v1",
       new_sqlite_classes: ["Sandbox"],
     });
-    expect(calls.contents).toMatch(/export \{[\s\S]*\n  Sandbox,/);
-    expect(calls.contents).toContain("RunwayRunnerBinding");
-    expect(calls.contents).toContain("RUNWAY_RUNNER");
-    expect(calls.contents).toContain("enableDefaultSession: false");
+    const workerContents = calls.workerContents;
+    if (!workerContents) throw new Error("worker bundle was not uploaded");
+    const artifact = await esbuild({
+      stdin: {
+        contents: workerContents,
+        loader: "js",
+        sourcefile: "worker.js",
+      },
+      bundle: false,
+      format: "esm",
+      metafile: true,
+      write: false,
+    });
+    const exports = Object.values(artifact.metafile!.outputs)[0]?.exports;
+    expect(exports).toEqual(
+      expect.arrayContaining(["DynamicWorkflow", "RunwayRunnerBinding", "Sandbox", "default"]),
+    );
     expect(calls.containerCreates).toEqual([
       [
         {

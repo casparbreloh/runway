@@ -1,15 +1,11 @@
 import { collectResultItems, resultOf } from "./cloudflare-api.ts";
 import type { CloudflareApi } from "./cloudflare-api.ts";
-import { SANDBOX_BINDING, SANDBOX_CLASS, SANDBOX_IMAGE, SANDBOX_MIGRATION_TAG } from "./codegen.ts";
-
-const desiredApplication = {
-  scheduling_policy: "default",
-  configuration: { image: SANDBOX_IMAGE, instance_type: "lite" },
-  instances: 0,
-  max_instances: 20,
-  constraints: { tiers: [1, 2] },
-  rollout_active_grace_period: 0,
-} as const;
+import {
+  RUNNER_APPLICATION,
+  SANDBOX_BINDING,
+  SANDBOX_CLASS,
+  SANDBOX_MIGRATION_TAG,
+} from "./runner-config.ts";
 
 export const currentSandboxMigrationTag = async (
   cf: CloudflareApi,
@@ -104,21 +100,21 @@ export const reconcileSandboxContainer = async (
       throw new Error(`container application ${name} is attached to a different namespace`);
     }
     const matches =
-      application.scheduling_policy === desiredApplication.scheduling_policy &&
-      application.instances === desiredApplication.instances &&
-      application.max_instances === desiredApplication.max_instances &&
-      application.configuration?.image === desiredApplication.configuration.image &&
-      application.configuration.instance_type === desiredApplication.configuration.instance_type &&
+      application.scheduling_policy === RUNNER_APPLICATION.scheduling_policy &&
+      application.instances === RUNNER_APPLICATION.instances &&
+      application.max_instances === RUNNER_APPLICATION.max_instances &&
+      application.configuration?.image === RUNNER_APPLICATION.configuration.image &&
+      application.configuration.instance_type === RUNNER_APPLICATION.configuration.instance_type &&
       JSON.stringify(application.constraints?.tiers) ===
-        JSON.stringify(desiredApplication.constraints.tiers) &&
-      application.rollout_active_grace_period === desiredApplication.rollout_active_grace_period;
+        JSON.stringify(RUNNER_APPLICATION.constraints.tiers) &&
+      application.rollout_active_grace_period === RUNNER_APPLICATION.rollout_active_grace_period;
     if (matches) return;
     if (typeof application.id !== "string") {
       throw new Error(`container application ${name} has no id`);
     }
     await cf.containers.applications.modify(application.id, {
       account_id: accountId,
-      body: desiredApplication,
+      body: RUNNER_APPLICATION,
     });
     return;
   }
@@ -127,7 +123,7 @@ export const reconcileSandboxContainer = async (
     account_id: accountId,
     body: {
       name,
-      ...desiredApplication,
+      ...RUNNER_APPLICATION,
       durable_objects: { namespace_id: namespaceId },
     },
   });

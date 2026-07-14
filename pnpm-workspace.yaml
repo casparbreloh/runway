@@ -18,6 +18,7 @@ catalog:
   cloudflare: ^6.3.0
   esbuild: ^0.28.0
   fallow: 2.100.0
+  miniflare: 4.20260609.0
   oxfmt: 0.48.0
   oxlint: 1.63.0
   oxlint-tsgolint: 0.22.1

@@ -5,12 +5,14 @@ import {
   COMPATIBILITY_DATE,
   DYNAMIC_WORKFLOW_CLASS,
   LOADER_BINDING,
-  SANDBOX_BINDING,
-  SANDBOX_CLASS,
-  SANDBOX_IMAGE,
-  SANDBOX_MIGRATION_TAG,
   WORKFLOW_BINDING,
 } from "./codegen.ts";
+import {
+  RUNNER_CONTAINER,
+  SANDBOX_BINDING,
+  SANDBOX_CLASS,
+  SANDBOX_MIGRATION_TAG,
+} from "./runner-config.ts";
 
 type ScriptMetadata = Parameters<CloudflareApi["workers"]["scripts"]["update"]>[1]["metadata"];
 
@@ -62,7 +64,7 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
         text: opts.env[name]!,
       })),
     ],
-    containers: [{ class_name: SANDBOX_CLASS, image: SANDBOX_IMAGE, instance_type: "lite" }],
+    containers: [RUNNER_CONTAINER],
     ...(opts.needsSandboxMigration
       ? {
           migrations: {

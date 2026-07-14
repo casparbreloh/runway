@@ -1,4 +1,5 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
 import { COMPATIBILITY_DATE } from "./src/codegen.ts";
@@ -12,6 +13,13 @@ export default defineConfig({
         bindings: {
           API_KEY: "test-api-key",
           HOOK_SECRET: "test-secret",
+          RUNNER_SECRET: "runner-secret",
+        },
+        serviceBindings: {
+          RUNWAY_RUNNER: {
+            name: kCurrentWorker,
+            entrypoint: "TestRunner",
+          },
         },
         workflows: {
           DAILY: {
@@ -22,13 +30,17 @@ export default defineConfig({
             name: "issue-created-test",
             className: "IssueCreatedWorkflow",
           },
+          RUNNER: {
+            name: "runner-test",
+            className: "RunnerWorkflow",
+          },
         },
       },
     }),
   ],
   test: {
     name: "runway-workers",
-    include: ["tests/worker.test.ts"],
+    include: ["tests/command-output.test.ts", "tests/runner.test.ts", "tests/worker.test.ts"],
     testTimeout: 20_000,
   },
 });
