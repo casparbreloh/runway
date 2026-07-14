@@ -7,9 +7,7 @@ import { ManagedRunner } from "./runner.ts";
 import type { RunnerBridge } from "./runner.ts";
 import type { Primitives, WorkflowDefinition } from "./types.ts";
 
-export { executeSandboxCommand, watchWorkflowCancellation } from "./command-output.ts";
-export { runnerIdOf } from "./runner.ts";
-export type { NormalizedExecOptions, RunnerBridge } from "./runner.ts";
+export { createRunnerAdapter } from "./runner-adapter.ts";
 
 export { createRouter } from "./router.ts";
 export type { RouterEntry, WorkflowStarter } from "./router.ts";
@@ -42,7 +40,9 @@ const makeRunRuntime = (
           step.do(id, fn as () => Promise<never>) as Promise<T>,
         exec: (id, command) =>
           runner.exec(id, command, (callback) =>
-            step.do(id, callback as () => Promise<never>, { rollback: () => runner.cleanup() }),
+            step.do(id, async (ctx) => await callback(ctx), {
+              rollback: () => runner.cleanup(),
+            }),
           ),
         sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
       },
@@ -59,8 +59,9 @@ export const toEntrypoint = (
       const bridge = (this.env as DynamicWorkerEnv)[RUNNER_BRIDGE_BINDING];
       const secrets = secretsOf(def.secrets, this.env);
       const runtime = makeRunRuntime(step, bridge, event.instanceId, Object.values(secrets));
+      let completed = false;
       try {
-        return await def.handler(
+        const result = await def.handler(
           makeCtx(runtime.primitives, {
             runId: event.instanceId,
             secrets,
@@ -68,8 +69,10 @@ export const toEntrypoint = (
           }),
           event.payload,
         );
+        completed = true;
+        return result;
       } finally {
-        await runtime.cleanup();
+        if (completed) await runtime.cleanup();
       }
     }
   };

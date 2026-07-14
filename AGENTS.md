@@ -68,12 +68,22 @@ export default workflow({
 - Runway maps `ctx.step.do(id, fn)` to Cloudflare `step.do(id, fn)` and
   `ctx.step.exec(id, command)` to a durable, run-scoped managed command step, and
   `ctx.step.sleep(id, ms)` to `step.sleep(id, ms)`.
+- Command steps use deterministic process identities. Workflow retries reconnect to an existing
+  running or completed process while the same Sandbox survives instead of starting it again.
+- Output is streamed incrementally and only redacted 64 KiB stdout/stderr tails are returned.
+- Timeout and termination kill the command process group. Because Cloudflare rollback was `null`
+  for a terminated active step in the live deployment smoke test, termination polling remains
+  internal to the runner adapter.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
 - Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, and one matching
   Dynamic Workflow resource.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
-  up when the run ends.
+  up when the run ends. Workspace reuse is ephemeral best effort across commands and durable sleep;
+  it is not durable across Sandbox restart.
+- Do not claim repository checkout or cache durability until a live integration test proves a
+  persistence mechanism. Sandbox backup/restore currently needs R2 credentials/configuration and
+  object lifecycle management, so Runway does not enable a partial checkpoint layer.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   and returns webhook URLs.
 - Keep Sandbox and container deployment resources internal to the managed command runner.

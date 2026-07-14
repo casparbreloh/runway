@@ -40,7 +40,7 @@ export default defineConfig({
   ],
   test: {
     name: "runway-workers",
-    include: ["tests/command-output.test.ts", "tests/runner.test.ts", "tests/worker.test.ts"],
+    include: ["tests/runner.test.ts", "tests/worker.test.ts"],
     testTimeout: 20_000,
   },
 });

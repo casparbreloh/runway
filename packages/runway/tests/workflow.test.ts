@@ -30,6 +30,12 @@ test("invalid workflow definitions fail before registration", () => {
       trigger: () => cron("* * * * *"),
     }),
   ).toThrow('duplicate workflow secret "API_KEY"');
+  expect(() =>
+    workflow({
+      id: "invalid-trigger",
+      trigger: () => ({}) as never,
+    }),
+  ).toThrow("invalid workflow trigger");
 });
 
 test("a webhook signing secret must belong to its workflow", () => {

@@ -60,8 +60,14 @@ await ctx.step.exec("test", {
 
 Commands default to `/workspace`, `CI=true`, and a 15-minute timeout. They never receive workflow
 secrets automatically. Output streams to Worker logs with declared secret values redacted. The
-returned `ExecResult` contains the exit code, duration, and bounded redacted stdout/stderr tails; a
-non-zero exit throws `ExecError`.
+returned `ExecResult` contains the exit code, duration, and at most 64 KiB each of redacted stdout
+and stderr tail; a non-zero exit throws a secret-safe `ExecError`.
+
+Each command has a deterministic process identity derived from its run and durable step. If
+Cloudflare retries an active command step while its Sandbox survives, Runway reconnects to the
+existing running or completed process instead of starting the command again. Timeout and Workflow
+termination kill that process and its children. Sandbox restart loses both workspace state and the
+process record, so cross-restart duplicate prevention is not yet part of the durability contract.
 
 ## Quickstart
 
@@ -113,8 +119,21 @@ Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal 
 Runway deploys one orchestration Worker per repository. That Worker owns webhook and cron routing,
 one Dynamic Workflows binding, one Worker Loader binding, and an internal command-runner binding.
 Per-workflow code is loaded through Worker Loader and Dynamic Workflows. The runner container starts
-lazily on the first `step.exec()` in a run, reuses that run's workspace across command steps, and is
-destroyed after workflow completion or failure.
+lazily on the first `step.exec()` in a run and is destroyed after workflow completion or failure.
+The `/workspace` filesystem is ephemeral best-effort state: commands in one run reuse it, including
+across `step.sleep()`, only while the same Sandbox container survives. A container restart loses the
+workspace. Runway does not claim cross-restart durability.
+
+Cloudflare Sandbox backup/restore is not enabled. It currently requires an R2 binding and production
+presigning credentials, expired backup objects require separate lifecycle cleanup, and restored
+mounts must themselves be restored again after a container restart. Until Runway can own that
+lifecycle internally and prove acceptable CI overhead, repository checkout and cache transport
+cannot rely on workspace persistence.
+
+Cloudflare Workflow rollback cleans up ordinary failed runs, but a live deployment smoke test
+returned `rollback: null` after terminating an active command. The internal runner adapter therefore
+performs one termination-status check per second while a command is active; there is no separate
+generated-code poller.
 
 `RUNWAY_SCRIPT_NAME` can set the deterministic repo-scoped name explicitly. Otherwise Runway uses
 the package name, then the directory basename, normalized as a Cloudflare-compatible slug. The same
@@ -128,7 +147,9 @@ script.
 ## Scope
 
 The current foundation includes workflows, triggers, secrets, routing, discovery, validation,
-deployment, durable steps, durable sleep, and managed command execution. It does not yet include
+deployment, durable steps, durable sleep, and managed command execution. A live deployment smoke
+test also covers workspace reuse across sleep, process-group timeout cleanup, and active-step
+termination. It does not yet include
 repository checkout, caching, GitHub integration, artifacts, application deployment primitives,
 AI, agents, or public Sandbox access.
 
@@ -144,7 +165,9 @@ minimal scheduled workflow using `step.do()` and `step.exec()`.
 ## Testing
 
 Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
-integration. The suite tests public SDK, runtime, CLI, and Cloudflare API boundaries.
+integration. The suite tests public SDK, Workers runtime, generated runner adapter, CLI, and
+Cloudflare API boundaries. Sandbox restart is simulated at that seam; cross-restart filesystem
+durability has not been proven live and is not part of the contract.
 
 ```sh
 pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test

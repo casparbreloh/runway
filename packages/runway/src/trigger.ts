@@ -13,6 +13,13 @@ import type {
 export const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const validateTrigger = (trigger: WorkflowTrigger): void => {
+  if (!trigger || typeof trigger !== "object" || !("type" in trigger)) {
+    throw new Error("invalid workflow trigger");
+  }
+  const type = (trigger as { type?: unknown }).type;
+  if (type !== "cron" && type !== "webhook") {
+    throw new Error(`invalid workflow trigger type: ${String(type)}`);
+  }
   if (trigger.type === "cron" && trigger.expression.trim().length === 0) {
     throw new Error("invalid workflow cron trigger: expression is required");
   }
@@ -53,17 +60,18 @@ interface WebhookData {
   readonly predicate?: (event: unknown) => boolean;
 }
 
-const webhookTrigger = <E>(data: WebhookData): WebhookTrigger<E> => ({
-  ...data,
-  filter<F extends E>(predicate: (event: E) => event is F): WebhookTrigger<F> {
-    const prev = data.predicate;
-    const next = predicate as (event: unknown) => boolean;
-    return webhookTrigger<F>({
-      ...data,
-      predicate: prev ? (event) => prev(event) && next(event) : next,
-    });
-  },
-});
+const webhookTrigger = <E>(data: WebhookData): WebhookTrigger<E> =>
+  ({
+    ...data,
+    filter<F extends E>(predicate: (event: E) => event is F): WebhookTrigger<F> {
+      const prev = data.predicate;
+      const next = predicate as (event: unknown) => boolean;
+      return webhookTrigger<F>({
+        ...data,
+        predicate: prev ? (event) => prev(event) && next(event) : next,
+      });
+    },
+  }) as WebhookTrigger<E>;
 
 export function webhook<S extends StandardSchemaV1>(
   options: WebhookOptions & { schema: S },
@@ -86,7 +94,8 @@ export function webhook(
   });
 }
 
-export const cron = (expression: string): CronTrigger => ({
-  type: "cron",
-  expression,
-});
+export const cron = (expression: string): CronTrigger =>
+  ({
+    type: "cron",
+    expression,
+  }) as CronTrigger;
