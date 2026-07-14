@@ -4,10 +4,10 @@ Runway is a TypeScript-first, general workflow framework on Cloudflare. Author w
 `workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
 `.runway/workflows/**/*.ts`, and deploy them with `runway deploy`.
 
-Repository execution and managed CI/CD are the first major use case. Runway will transport caches
-for tools such as Turborepo and Nx rather than build its own dependency graph. Cloudflare Sandbox
-will return as an internal runner implementation detail; agents are deferred. A future `step.ai()`
-may use Cloudflare AI Gateway.
+Repository execution and managed CI/CD are the first major use case. Runway executes commands in a
+managed, run-scoped workspace and will transport caches for tools such as Turborepo and Nx rather
+than build its own dependency graph. Cloudflare Sandbox remains an internal runner implementation
+detail; agents are deferred. A future `step.ai()` may use Cloudflare AI Gateway.
 
 For product direction and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
 
@@ -22,6 +22,7 @@ export default workflow({
   trigger: () => cron("0 9 * * *"),
 }).handler(async (ctx, event) => {
   const greeting = await ctx.step.do("greet", () => "hello");
+  await ctx.step.exec("runtime", "node --version");
   await ctx.step.sleep("wait", 5000);
   await ctx.step.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
 });
@@ -37,13 +38,30 @@ interface Ctx {
   readonly env: unknown;
   readonly step: {
     do<T>(id: string, fn: (ctx: StepContext) => T | Promise<T>): Promise<T>;
+    exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
     sleep(id: string, durationMs: number): Promise<void>;
   };
 }
 ```
 
-Use `step.do()` for replayable work and `step.sleep()` for durable waits. Give every operation a
-stable, explicit id, keep step bodies idempotent, and return JSON-serializable values.
+Use `step.do()` for replayable work, `step.exec()` for managed commands, and `step.sleep()` for
+durable waits. Give every operation a stable, explicit id, keep step bodies idempotent, and return
+JSON-serializable values.
+
+```ts
+await ctx.step.exec("install", "pnpm install --frozen-lockfile");
+await ctx.step.exec("test", {
+  command: "pnpm test",
+  cwd: "packages/app",
+  env: { NODE_ENV: "test" },
+  timeoutMs: 20 * 60_000,
+});
+```
+
+Commands default to `/workspace`, `CI=true`, and a 15-minute timeout. They never receive workflow
+secrets automatically. Output streams to Worker logs with declared secret values redacted. The
+returned `ExecResult` contains the exit code, duration, and bounded redacted stdout/stderr tails; a
+non-zero exit throws `ExecError`.
 
 ## Quickstart
 
@@ -88,28 +106,31 @@ trigger evaluation.
 Declare every workflow secret in `secrets`, including webhook signing secrets. In `trigger(ctx)`,
 `ctx.secrets.X` is a branded secret reference. In the handler it is the runtime string value.
 Deploy fails before upload when a declared secret is missing from both the environment and the repo
-Worker. Secret names cannot collide with the `WORKFLOWS` or `LOADER` bindings.
+Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal runner bindings.
 
 ## Deploy Model
 
 Runway deploys one orchestration Worker per repository. That Worker owns webhook and cron routing,
-one Dynamic Workflows binding, and one Worker Loader binding. Per-workflow code is loaded through
-Worker Loader and Dynamic Workflows.
+one Dynamic Workflows binding, one Worker Loader binding, and an internal command-runner binding.
+Per-workflow code is loaded through Worker Loader and Dynamic Workflows. The runner container starts
+lazily on the first `step.exec()` in a run, reuses that run's workspace across command steps, and is
+destroyed after workflow completion or failure.
 
 `RUNWAY_SCRIPT_NAME` can set the deterministic repo-scoped name explicitly. Otherwise Runway uses
 the package name, then the directory basename, normalized as a Cloudflare-compatible slug. The same
 name identifies the Worker script, Dynamic Workflow resource, and workers.dev host.
 
-`runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, updates its
-Dynamic Workflow, replaces cron schedules, enables workers.dev, and removes stale Workflow
-resources belonging to the same script.
+`runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, reconciles the
+hidden Sandbox Durable Object and container application, updates its Dynamic Workflow, replaces
+cron schedules, enables workers.dev, and removes stale Workflow resources belonging to the same
+script.
 
 ## Scope
 
 The current foundation includes workflows, triggers, secrets, routing, discovery, validation,
-deployment, durable steps, and durable sleep. It does not yet include repository runners, caching,
-GitHub integration, artifacts, application deployment primitives, AI, agents, or public Sandbox
-access.
+deployment, durable steps, durable sleep, and managed command execution. It does not yet include
+repository checkout, caching, GitHub integration, artifacts, application deployment primitives,
+AI, agents, or public Sandbox access.
 
 Cloudflare is the only backend target. Current deployments require Workers, Workflows, Dynamic
 Workflows, Worker Loader, and schedules. Workflow resumes currently use the latest deployed code
@@ -118,7 +139,7 @@ and secrets.
 ## Example
 
 See [example/.runway/workflows/daily-summary.ts](example/.runway/workflows/daily-summary.ts) for a
-minimal scheduled workflow using `step.do()`.
+minimal scheduled workflow using `step.do()` and `step.exec()`.
 
 ## Testing
 

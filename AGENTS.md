@@ -5,8 +5,8 @@ repository automation on Cloudflare. Author workflows with
 `workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })` and export them from
 `.runway/workflows/**/*.ts`.
 
-Repository execution and managed CI/CD come first. Cloudflare Sandbox will return internally behind
-the runner. Runway will transport caches for tools such as Turborepo and Nx rather than build its
+Repository execution and managed CI/CD come first. Cloudflare Sandbox stays internally behind the
+runner. Runway will transport caches for tools such as Turborepo and Nx rather than build its
 own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents are deferred.
 
 ## Layout
@@ -17,13 +17,14 @@ own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents
   - `src/workflow.ts` — `workflow()`.
   - `src/trigger.ts` — webhook and cron triggers.
   - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
+  - `src/runner.ts` — internal managed command runner.
   - `src/runtime.ts` — generated Worker runtime adapter.
   - `src/router.ts` — webhook and cron routing.
   - `src/deploy.ts` — validation, codegen, bundle, and Cloudflare upload path.
   - `src/codegen.ts` — generated orchestration and workflow Worker modules.
   - `src/validate.ts` — registry validation.
   - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
-- `example/` — minimal scheduled workflow using `ctx.step.do()`.
+- `example/` — minimal scheduled workflow using `ctx.step.do()` and `ctx.step.exec()`.
 
 ## Commands
 
@@ -38,14 +39,17 @@ export default workflow({
   trigger: () => cron("0 9 * * *"),
 }).handler(async (ctx, event) => {
   await ctx.step.do("record", () => ({ runId: ctx.runId, event }));
+  await ctx.step.exec("test", "pnpm test");
   await ctx.step.sleep("wait", 1000);
 });
 ```
 
 - Trigger is required and lives in the `workflow()` object.
 - Handler receives `(ctx, event)`. There is no `ctx.params`.
-- `ctx` is `{ runId, secrets, env, step: { do, sleep } }`.
+- `ctx` is `{ runId, secrets, env, step: { do, exec, sleep } }`.
 - Wrap HTTP and API calls in named `step.do()` calls.
+- Use `step.exec(id, command)` for managed shell commands; options can set `cwd`, `env`, and
+  `timeoutMs`.
 - Step return values must be JSON-serializable and step bodies idempotent.
 - Every sleep has a caller-provided stable id.
 
@@ -62,15 +66,17 @@ export default workflow({
 ## Runtime And Deployment
 
 - Runway maps `ctx.step.do(id, fn)` to Cloudflare `step.do(id, fn)` and
+  `ctx.step.exec(id, command)` to a durable, run-scoped managed command step, and
   `ctx.step.sleep(id, ms)` to `step.sleep(id, ms)`.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
 - Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, and one matching
   Dynamic Workflow resource.
+- Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
+  up when the run ends.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   and returns webhook URLs.
-- Do not add Sandbox or container deployment resources until the internal repository runner needs
-  them.
+- Keep Sandbox and container deployment resources internal to the managed command runner.
 
 ## Conventions
 

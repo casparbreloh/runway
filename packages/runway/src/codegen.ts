@@ -7,6 +7,11 @@ import { validateRegistry } from "./validate.ts";
 export const COMPATIBILITY_DATE = "2026-06-06";
 export const WORKFLOW_BINDING = "WORKFLOWS";
 export const LOADER_BINDING = "LOADER";
+export const SANDBOX_BINDING = "RunwaySandbox";
+const RUNNER_BRIDGE_BINDING = "RUNWAY_RUNNER";
+export const SANDBOX_CLASS = "Sandbox";
+export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.3";
+export const SANDBOX_MIGRATION_TAG = "runway-sandbox-v1";
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
 const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
 
@@ -64,6 +69,8 @@ export const generateWorker = (
     Object.fromEntries(registry.map((w) => [w.def.id, w.def.secrets])),
   );
   return `${imports}
+import { WorkerEntrypoint } from "cloudflare:workers";
+import { getSandbox } from "@cloudflare/sandbox";
 import {
   createDynamicWorkflowEntrypoint,
   DynamicWorkflowBinding,
@@ -72,11 +79,15 @@ import {
 } from "@cloudflare/dynamic-workflows";
 import {
   createRouter,
+  executeCommand,
+  runnerIdOf,
+  type NormalizedExecOptions,
   type RouterEntry,
   type WorkflowStarter,
 } from "runway/runtime";
 
 export { DynamicWorkflowBinding };
+export { Sandbox } from "@cloudflare/sandbox";
 
 interface LoaderStub {
   getEntrypoint(name?: string): { fetch(req: Request): Promise<Response>; run?: unknown };
@@ -97,6 +108,16 @@ interface LoaderBinding {
 
 interface Env {
   ${LOADER_BINDING}: LoaderBinding;
+  ${SANDBOX_BINDING}: DurableObjectNamespace;
+}
+
+interface LoaderContext {
+  exports: {
+    RunwayRunnerBinding(options: { props: Record<string, never> }): {
+      exec(runId: string, options: NormalizedExecOptions, secrets: ReadonlyArray<string>): Promise<unknown>;
+      destroy(runId: string): Promise<void>;
+    };
+  };
 }
 
 const modules: Record<string, string> = ${modules};
@@ -111,7 +132,34 @@ const secretsFor = (parentEnv: Record<string, unknown>, workflowId: string): Rec
     ]),
   );
 
-const loadWorkflow = (env: Env, workflowId: string): LoaderStub => {
+export class RunwayRunnerBinding extends WorkerEntrypoint<Env> {
+  async exec(
+    runId: string,
+    options: NormalizedExecOptions,
+    secrets: ReadonlyArray<string>,
+  ): Promise<unknown> {
+    const sandbox = getSandbox(this.env.${SANDBOX_BINDING}, await runnerIdOf(runId), {
+      enableDefaultSession: false,
+    });
+    try {
+      return await executeCommand(sandbox, options, secrets, (stream, chunk) => {
+        if (stream === "stdout") console.log(chunk);
+        else console.error(chunk);
+      });
+    } catch (error) {
+      await sandbox.killAllProcesses();
+      throw error;
+    }
+  }
+
+  async destroy(runId: string): Promise<void> {
+    await getSandbox(this.env.${SANDBOX_BINDING}, await runnerIdOf(runId), {
+      enableDefaultSession: false,
+    }).destroy();
+  }
+}
+
+const loadWorkflow = (env: Env, workflowId: string, ctx: LoaderContext): LoaderStub => {
   const loaderId = workflowLoaders[workflowId];
   if (!loaderId) throw new Error(\`unknown workflow: \${workflowId}\`);
   const code = modules[loaderId];
@@ -124,22 +172,23 @@ const loadWorkflow = (env: Env, workflowId: string): LoaderStub => {
     modules: { "index.js": code },
     env: {
       ...secretsFor(parentEnv, workflowId),
+      ${JSON.stringify(RUNNER_BRIDGE_BINDING)}: ctx.exports.RunwayRunnerBinding({ props: {} }),
       ${WORKFLOW_BINDING}: wrapWorkflowBinding({ workflowId }),
     },
   }));
 };
 
 export const ${DYNAMIC_WORKFLOW_CLASS} = createDynamicWorkflowEntrypoint<Env>(
-  async ({ env, metadata }) => {
+  async ({ env, metadata, ctx }) => {
     const workflowId = metadata.workflowId;
     if (typeof workflowId !== "string") throw new Error("missing workflow metadata");
-    return loadWorkflow(env, workflowId).getEntrypoint(${JSON.stringify(RUNWAY_WORKFLOW_CLASS)}) as unknown as WorkflowRunner;
+    return loadWorkflow(env, workflowId, ctx as unknown as LoaderContext).getEntrypoint(${JSON.stringify(RUNWAY_WORKFLOW_CLASS)}) as unknown as WorkflowRunner;
   },
 );
 
 const starter: WorkflowStarter = {
-  async start(entry: RouterEntry, event: unknown, env: unknown) {
-    const response = await loadWorkflow(env as Env, entry.id).getEntrypoint().fetch(
+  async start(entry: RouterEntry, event: unknown, env: unknown, ctx: unknown) {
+    const response = await loadWorkflow(env as Env, entry.id, ctx as LoaderContext).getEntrypoint().fetch(
       new Request("https://runway.local/", {
         method: "POST",
         headers: { "content-type": "application/json" },

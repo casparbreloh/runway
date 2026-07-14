@@ -6,14 +6,31 @@ export interface StepContext {
   readonly id: string;
 }
 
+export interface ExecOptions {
+  readonly command: string;
+  readonly cwd?: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly timeoutMs?: number;
+}
+
+export interface ExecResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly durationMs: number;
+}
+
+export interface Step {
+  do<T>(id: string, callback: (ctx: StepContext) => T | Promise<T>): Promise<T>;
+  exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
+  sleep(id: string, durationMs: number): Promise<void>;
+}
+
 export interface Ctx<S extends string = string, E = unknown> {
   readonly runId: string;
   readonly secrets: { readonly [K in S]: string };
   readonly env: E;
-  readonly step: {
-    do<T>(id: string, fn: (ctx: StepContext) => T | Promise<T>): Promise<T>;
-    sleep(id: string, durationMs: number): Promise<void>;
-  };
+  readonly step: Step;
 }
 
 export type TriggerContext<S extends string> = {
@@ -75,6 +92,7 @@ export interface WorkflowDefinition {
 export interface Primitives {
   readonly step: {
     do<T>(id: string, fn: () => Promise<T>): Promise<T>;
+    exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
     sleep(id: string, durationMs: number): Promise<void>;
   };
 }

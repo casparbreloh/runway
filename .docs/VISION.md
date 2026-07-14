@@ -6,29 +6,30 @@ durable sleep without imposing a CI-specific DSL.
 
 ## Product Direction
 
-Repository execution and managed CI/CD come first. The next execution layer should let workflows
-run repository tools reliably while Cloudflare Workflows owns replay, persistence, and durable
-waiting. Cloudflare Sandbox will return internally behind that runner; it is not part of the public
-workflow context.
+Repository execution and managed CI/CD come first. Workflows can run tools through durable
+`step.exec()` operations while Cloudflare Workflows owns replay, persistence, and durable waiting.
+Cloudflare Sandbox stays internally behind that runner; it is not part of the public workflow
+context.
 
 Runway will transport caches for existing tools such as Turborepo and Nx. It will not build its own
 dependency graph or replace those tools' scheduling and cache semantics.
 
-Agents are deferred until the repository runner exists and proves the execution model. A future
-`step.ai()` may provide model calls through Cloudflare AI Gateway, but AI is not part of the current
-foundation.
+Agents are deferred until the repository runner proves the execution model. A future `step.ai()`
+may provide model calls through Cloudflare AI Gateway, but AI is not part of the current foundation.
 
 ## Current Model
 
 ```ts
 workflow({ id, secrets?, trigger }).handler(async (ctx, event) => {
   const value = await ctx.step.do("work", async (step) => ({ id: step.id }));
+  await ctx.step.exec("test", "pnpm test");
   await ctx.step.sleep("wait", 1000);
 });
 ```
 
 The public context contains `runId`, declared runtime `secrets`, raw `env`, and a `step` object with
-`do(id, fn)` and `sleep(id, durationMs)`. Explicit ids make durable operations visible and stable.
+`do(id, fn)`, `exec(id, command)`, and `sleep(id, durationMs)`. Explicit ids make durable operations
+visible and stable. Command execution uses one lazily created, isolated workspace per workflow run.
 There are no compatibility aliases for the former callable step or top-level sleep APIs.
 
 ## Deployment Topology
@@ -38,8 +39,9 @@ Worker Loader binding. The Worker routes webhooks and schedules, while dynamical
 modules execute through Cloudflare Workflows. Runway reconciles only resources owned by that
 repo-scoped deployment.
 
-The current topology has no Sandbox durable object, container application, Sandbox bridge, R2,
-Queues, or account-level execution Worker.
+The topology also includes a hidden Sandbox durable object, a matching container application, and
+an internal runner bridge. It has no public Sandbox API, R2, Queues, or account-level execution
+Worker.
 
 ## Near-Term Non-Goals
 
@@ -48,8 +50,8 @@ Queues, or account-level execution Worker.
 - Public container or Sandbox primitives.
 - Agents or an agent runtime.
 - AI Gateway integration.
-- Repository execution, caching, GitHub integration, R2, Queues, artifacts, or deployments before
+- Repository checkout, caching, GitHub integration, R2, Queues, artifacts, or deployments before
   their respective phases are designed and implemented.
 
-The foundation should stay small enough that repository execution can be added as a deep internal
-module rather than spread across the authoring API.
+The foundation should stay small enough that repository execution remains a deep internal module
+rather than spreading across the authoring API.

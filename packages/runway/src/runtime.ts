@@ -2,7 +2,12 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import { makeCtx, secretsOf } from "./ctx.ts";
+import { ManagedRunner } from "./runner.ts";
+import type { RunnerBridge } from "./runner.ts";
 import type { Primitives, WorkflowDefinition } from "./types.ts";
+
+export { executeCommand, runnerIdOf } from "./runner.ts";
+export type { NormalizedExecOptions, RunnerBridge, SandboxExecutor } from "./runner.ts";
 
 export { createRouter } from "./router.ts";
 export type { RouterEntry, WorkflowStarter } from "./router.ts";
@@ -13,12 +18,19 @@ interface WorkflowBinding {
 
 type DynamicWorkerEnv = Record<string, unknown> & {
   WORKFLOWS?: WorkflowBinding;
+  RUNWAY_RUNNER?: RunnerBridge;
 };
 
-const primitives = (step: WorkflowStep): Primitives => ({
+const primitives = (step: WorkflowStep, runner: ManagedRunner): Primitives => ({
   step: {
     do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
       step.do(id, fn as () => Promise<never>) as Promise<T>,
+    exec: (id, command) => {
+      runner.activate();
+      return step.do(id, () => runner.exec(id, command) as Promise<never>) as ReturnType<
+        Primitives["step"]["exec"]
+      >;
+    },
     sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
   },
 });
@@ -28,14 +40,29 @@ export const toEntrypoint = (
 ): typeof WorkflowEntrypoint<unknown, unknown> =>
   class extends WorkflowEntrypoint<unknown, unknown> {
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
-      return await def.handler(
-        makeCtx(primitives(step), {
-          runId: event.instanceId,
-          secrets: secretsOf(def.secrets, this.env),
-          env: this.env,
-        }),
-        event.payload,
+      const bridge = (this.env as DynamicWorkerEnv).RUNWAY_RUNNER;
+      const runner = new ManagedRunner(
+        bridge ?? {
+          exec: async () => {
+            throw new Error("missing runner binding: RUNWAY_RUNNER");
+          },
+          destroy: async () => {},
+        },
+        event.instanceId,
+        Object.values(secretsOf(def.secrets, this.env)),
       );
+      try {
+        return await def.handler(
+          makeCtx(primitives(step, runner), {
+            runId: event.instanceId,
+            secrets: secretsOf(def.secrets, this.env),
+            env: this.env,
+          }),
+          event.payload,
+        );
+      } finally {
+        await runner.cleanup();
+      }
     }
   };
 

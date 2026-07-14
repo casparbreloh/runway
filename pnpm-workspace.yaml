@@ -8,6 +8,7 @@ allowBuilds:
   workerd: true
 
 catalog:
+  "@cloudflare/sandbox": 0.12.3
   "@cloudflare/workers-types": ^4.20260605.1
   "@cloudflare/vitest-pool-workers": ^0.16.14
   "@standard-schema/spec": ^1.1.0
