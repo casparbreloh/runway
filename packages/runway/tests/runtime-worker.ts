@@ -181,7 +181,7 @@ const runner = workflow({
   const { catchErrors, commands, pauseMs } = event as unknown as RunnerEvent;
   for (const [index, command] of commands.entries()) {
     try {
-      await ctx.step.exec(`command-${index}`, command);
+      using _result = (await ctx.step.exec(`command-${index}`, command)) as ExecResult & Disposable;
     } catch (error) {
       if (!catchErrors) throw error;
       await ctx.step.do("caught-error", () =>
