@@ -1,8 +1,5 @@
-import type { Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 
-import type { AgentOptions } from "./agent.ts";
-import type { AiOptions } from "./ai.ts";
 import type { SecretRef } from "./secrets.ts";
 
 export interface StepContext {
@@ -13,11 +10,10 @@ export interface Ctx<S extends string = string, E = unknown> {
   readonly runId: string;
   readonly secrets: { readonly [K in S]: string };
   readonly env: E;
-  step<T>(id: string, fn: (step: StepContext) => T | Promise<T>): Promise<T>;
-  ai(id: string, opts: AiOptions): Promise<string>;
-  agent(id: string, opts: AgentOptions): Promise<string>;
-  sandbox<T>(id: string, fn: (sandbox: Sandbox) => T | Promise<T>): Promise<T>;
-  sleep(ms: number): Promise<void>;
+  readonly step: {
+    do<T>(id: string, fn: (ctx: StepContext) => T | Promise<T>): Promise<T>;
+    sleep(id: string, durationMs: number): Promise<void>;
+  };
 }
 
 export type TriggerContext<S extends string> = {
@@ -68,8 +64,6 @@ export interface WebhookOptions {
 
 export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger;
 
-export type Sandbox = CloudflareSandbox;
-
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
@@ -79,9 +73,10 @@ export interface WorkflowDefinition {
 }
 
 export interface Primitives {
-  step<T>(id: string, fn: () => Promise<T>): Promise<T>;
-  sandbox(name: string): Promise<Sandbox>;
-  sleep(id: string, ms: number): Promise<void>;
+  readonly step: {
+    do<T>(id: string, fn: () => Promise<T>): Promise<T>;
+    sleep(id: string, durationMs: number): Promise<void>;
+  };
 }
 
 export interface RegisteredWorkflow {

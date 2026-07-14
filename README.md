@@ -1,10 +1,13 @@
 # Runway
 
-TypeScript-first workflow infrastructure for repository automation, scheduled work, webhooks, and
-agent-native execution on Cloudflare. Author workflows with `runway`, deploy them with `runway
-deploy`, and let Cloudflare own routing, replay, persistence, durable sleep, schedules, and Sandbox
-execution. Runway is focused on AI/agentic workflow loops first; CI/CD runner primitives come later
-as workflow-composable features.
+Runway is a TypeScript-first, general workflow framework on Cloudflare. Author workflows with
+`workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
+`.runway/workflows/**/*.ts`, and deploy them with `runway deploy`.
+
+Repository execution and managed CI/CD are the first major use case. Runway will transport caches
+for tools such as Turborepo and Nx rather than build its own dependency graph. Cloudflare Sandbox
+will return as an internal runner implementation detail; agents are deferred. A future `step.ai()`
+may use Cloudflare AI Gateway.
 
 For product direction and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
 
@@ -18,26 +21,29 @@ export default workflow({
   id: "hello",
   trigger: () => cron("0 9 * * *"),
 }).handler(async (ctx, event) => {
-  const greeting = await ctx.step("greet", () => "hello");
-  await ctx.sleep(5000);
-  await ctx.step("finish", () => `${greeting} world at ${event.scheduledTime}`);
+  const greeting = await ctx.step.do("greet", () => "hello");
+  await ctx.step.sleep("wait", 5000);
+  await ctx.step.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
 });
 ```
 
-Export workflows from `.runway/workflows/**/*.ts`. Default exports, named exports, and barrel
-re-exports are supported. The core shape is:
+Default exports, named exports, and barrel re-exports are supported. Handlers receive a typed
+trigger event and this context:
 
 ```ts
-workflow({ id, secrets?, trigger }).handler(async (ctx, event) => {});
+interface Ctx {
+  readonly runId: string;
+  readonly secrets: Record<string, string>;
+  readonly env: unknown;
+  readonly step: {
+    do<T>(id: string, fn: (ctx: StepContext) => T | Promise<T>): Promise<T>;
+    sleep(id: string, durationMs: number): Promise<void>;
+  };
+}
 ```
 
-Handlers are fire-and-forget. Use durable primitives for work Cloudflare may replay:
-
-- `ctx.step(id, fn)` for memoized work with an idempotency key.
-- `ctx.sleep(ms)` for durable waits.
-- `ctx.ai(id, opts)` for durable OpenRouter chat completions.
-- `ctx.agent(id, opts)` for Pi runs inside Cloudflare Sandbox.
-- `ctx.sandbox(id, fn)` for custom Sandbox command execution.
+Use `step.do()` for replayable work and `step.sleep()` for durable waits. Give every operation a
+stable, explicit id, keep step bodies idempotent, and return JSON-serializable values.
 
 ## Quickstart
 
@@ -46,42 +52,19 @@ wrangler login
 runway deploy
 ```
 
-In CI:
+In CI, provide `CLOUDFLARE_API_TOKEN` and, when the token can see multiple accounts,
+`CLOUDFLARE_ACCOUNT_ID`.
+
+Every declared workflow secret must exist before upload. Export it during deploy or store it on the
+repo Worker:
 
 ```sh
-export CLOUDFLARE_API_TOKEN=...
-export CLOUDFLARE_ACCOUNT_ID=... # required when the token can see multiple accounts
+runway secrets set API_KEY ...
 runway deploy
 ```
 
-Every declared workflow secret must exist before upload. Either export it during deploy or store it
-on the repo Worker:
-
-```sh
-export LINEAR_WEBHOOK_SECRET=...
-export LINEAR_API_KEY=...
-export OPENROUTER_API_KEY=...
-runway deploy
-```
-
-```sh
-runway secrets set LINEAR_WEBHOOK_SECRET ...
-runway secrets set LINEAR_API_KEY ...
-runway secrets set OPENROUTER_API_KEY ...
-runway deploy
-```
-
-`runway secrets set` uses the same repo-scoped script name as deploy. If the Worker does not exist,
-it creates a placeholder Worker so the secret can be stored; `runway deploy` replaces it.
-
-Deploy prints the repo script name and one URL per webhook trigger:
-
-```text
-Deployed 2 workflow(s) as runway-my-repo
-  issue-review: POST https://runway-my-repo.<subdomain>.workers.dev/linear
-```
-
-Cron workflows do not print URLs; deploy updates the repo Worker's Cloudflare schedules.
+Deploy prints the repo script name and one URL per webhook trigger. Cron workflows do not print
+URLs; deploy updates the repo Worker's Cloudflare schedules.
 
 ## Triggers
 
@@ -94,94 +77,54 @@ Triggers are explicit. There is no default public start endpoint.
   Validation failure returns `200 { skipped: true }` and starts no run.
 - `webhook<T>(opts)` is assertion-only typing. `webhook(opts)` gives `unknown`.
 - `.filter(typeGuard)` narrows and gates the event after schema validation.
-- Multiple workflows may share one webhook path when secret, signature header, prefix, and timestamp
-  config are identical. Each workflow still applies its own schema/filter gate.
+- Workflows may share a webhook path when their verification configuration is identical.
 
-Webhook responses are `202 { runs: [...] }` when a run starts, `200 { skipped: true }` when none do,
-`401` for auth/timestamp failure, `400` for signed malformed JSON, and `500` for throwing trigger
-evaluation.
+Webhook responses are `202` when a run starts, `200 { skipped: true }` when none do, `401` for
+authentication or timestamp failure, `400` for signed malformed JSON, and `500` for throwing
+trigger evaluation.
 
 ## Secrets
 
-Declare every workflow secret in `secrets`, including webhook signing secrets.
-
-```ts
-workflow({
-  id: "issue-review",
-  secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY", "OPENROUTER_API_KEY"],
-  trigger: (ctx) =>
-    webhook({
-      path: "/linear",
-      secret: ctx.secrets.LINEAR_WEBHOOK_SECRET,
-      signatureHeader: "linear-signature",
-    }),
-});
-```
-
-In `trigger(ctx)`, `ctx.secrets.X` is a branded secret reference. In the handler, it is the runtime
-string value. Deploy fails before upload when a declared secret is missing from both env and the repo
-Worker. Env secrets upload as `secret_text` bindings and update matching Worker secrets. Secret names
-cannot collide with Runway bindings: `WORKFLOWS`, `LOADER`, or `Sandbox`.
+Declare every workflow secret in `secrets`, including webhook signing secrets. In `trigger(ctx)`,
+`ctx.secrets.X` is a branded secret reference. In the handler it is the runtime string value.
+Deploy fails before upload when a declared secret is missing from both the environment and the repo
+Worker. Secret names cannot collide with the `WORKFLOWS` or `LOADER` bindings.
 
 ## Deploy Model
 
-Runway deploys one Cloudflare orchestration Worker per repository, not one Worker per workflow. That
-Worker owns webhook routing, cron routing, one `WORKFLOWS` binding, one `LOADER` binding, and the
-Sandbox resources used by `ctx.agent` and `ctx.sandbox`.
+Runway deploys one orchestration Worker per repository. That Worker owns webhook and cron routing,
+one Dynamic Workflows binding, and one Worker Loader binding. Per-workflow code is loaded through
+Worker Loader and Dynamic Workflows.
 
-Runway is not moving execution to one account-level Worker. Per-workflow code is loaded dynamically
-through Worker Loader, Dynamic Workers, and the repo-scoped Dynamic Workflow resource owned by this
-deployment.
+`RUNWAY_SCRIPT_NAME` can set the deterministic repo-scoped name explicitly. Otherwise Runway uses
+the package name, then the directory basename, normalized as a Cloudflare-compatible slug. The same
+name identifies the Worker script, Dynamic Workflow resource, and workers.dev host.
 
-Script naming is deterministic:
+`runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, updates its
+Dynamic Workflow, replaces cron schedules, enables workers.dev, and removes stale Workflow
+resources belonging to the same script.
 
-- `RUNWAY_SCRIPT_NAME`, if set.
-- Otherwise package name, then directory basename.
-- Names are normalized by trimming, lowercasing, dropping a leading package scope `@`, replacing
-  separators and punctuation with hyphens, collapsing hyphens, and rejecting an empty result or a
-  name longer than 63 characters.
-- `RUNWAY_SCRIPT_NAME` is used as that slug directly.
-- Package and directory fallback names are prefixed as `runway-<repo-slug>` unless they are already
-  `runway` or start with `runway-`.
+## Scope
 
-If two repository identities would normalize to the same slug, or if CI deploys from unstable
-worktree paths without a package name, set `RUNWAY_SCRIPT_NAME` explicitly.
+The current foundation includes workflows, triggers, secrets, routing, discovery, validation,
+deployment, durable steps, and durable sleep. It does not yet include repository runners, caching,
+GitHub integration, artifacts, application deployment primitives, AI, agents, or public Sandbox
+access.
 
-The same repo-scoped name is used for the Worker script, Dynamic Workflow resource, and workers.dev
-host. Workflow `id` values are Runway routing ids inside that deployment.
-
-`runway deploy` uses the typed Cloudflare SDK, not `wrangler deploy`. It bundles in memory, updates
-the Worker, updates the matching Dynamic Workflow, replaces the cron schedule list, enables
-workers.dev, and removes stale Workflow resources attached to the same script.
-
-## Operational Limits
-
-- Cloudflare is the only backend target.
-- Target accounts need Workers, Workflows, Dynamic Workflows, Worker Loader, schedules, Sandbox, and
-  Containers support.
-- Webhooks are the public entrypoint; there is no manual-start HTTP endpoint.
-- Step return values should be JSON-serializable and step bodies should be idempotent.
-- `ctx.sleep` is named positionally within a run (`sleep-0`, `sleep-1`, ...), so keep sleep order
-  stable.
-- `ctx.agent` invokes `npx --yes @earendil-works/pi-coding-agent@0.79.1` inside Sandbox and inherits
-  Cloudflare Sandbox/Container limits.
-- Workflow resumes currently use the latest deployed workflow code and secrets. Version-pinned
-  resumes are deferred until later durable artifact storage work exists.
-- Shared account-level R2/session analysis and any registry/control-plane rewrite are optional
-  future data-plane work, not part of the current execution topology.
-- CI/CD runner primitives are later product work; the current surface is workflows, triggers,
-  durable steps, `ctx.ai`, `ctx.agent`, `ctx.sandbox`, and `ctx.sleep`.
+Cloudflare is the only backend target. Current deployments require Workers, Workflows, Dynamic
+Workflows, Worker Loader, and schedules. Workflow resumes currently use the latest deployed code
+and secrets.
 
 ## Example
 
-See [example/.runway/workflows/issue-review.ts](example/.runway/workflows/issue-review.ts) for the
-dogfood Linear issue review workflow. It verifies a Linear webhook, narrows to created issues, runs
-`ctx.agent`, and posts the review back with `@linear/sdk` inside `ctx.step`.
+See [example/.runway/workflows/daily-summary.ts](example/.runway/workflows/daily-summary.ts) for a
+minimal scheduled workflow using `step.do()`.
 
 ## Testing
 
-- `pnpm typecheck`
-- `pnpm lint`
-- `pnpm format-check`
-- `pnpm fallow`
-- `pnpm test`
+Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
+integration. The suite tests public SDK, runtime, CLI, and Cloudflare API boundaries.
+
+```sh
+pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test
+```

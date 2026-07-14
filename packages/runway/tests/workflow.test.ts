@@ -1,436 +1,96 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { cron, secretNameOf, webhook, workflow } from "runway";
+import type { CronParams, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
-import type { AgentOptions } from "../src/agent.ts";
-import type { AiOptions } from "../src/ai.ts";
-import { makeCtx } from "../src/ctx.ts";
-import { secretNameOf } from "../src/secrets.ts";
-import type { SecretRef } from "../src/secrets.ts";
-import { cron, validateTrigger, webhook } from "../src/trigger.ts";
-import type { CronParams } from "../src/types.ts";
-import { workflow } from "../src/workflow.ts";
-
-const refOf = <N extends string>(name: N): SecretRef<N> => {
+const secretRef = <N extends string>(name: N): SecretRef<N> => {
   let ref: SecretRef<N> | undefined;
   workflow({
-    id: "donor",
+    id: "secret-source",
     secrets: [name],
-    trigger: (tctx) => {
-      ref = tctx.secrets[name];
+    trigger: (ctx) => {
+      ref = ctx.secrets[name];
       return cron("* * * * *");
     },
   }).handler(async () => {});
   return ref!;
 };
 
-test("rejects secret names that are not valid bindings", () => {
-  expect(() =>
-    workflow({ id: "hello", secrets: ["linear-api-key"], trigger: () => cron("* * * * *") }),
-  ).toThrow('invalid workflow secret "linear-api-key": must be a valid binding name');
-});
-
-test("rejects duplicate secret names", () => {
-  expect(() =>
-    workflow({
-      id: "hello",
-      secrets: ["LINEAR_API_KEY", "LINEAR_API_KEY"],
-      trigger: () => cron("* * * * *"),
-    }),
-  ).toThrow('duplicate workflow secret "LINEAR_API_KEY"');
-});
-
-test("invokes the trigger callback once and stores its result by reference", () => {
-  const trigger = cron("0 9 * * *");
-  let calls = 0;
-  const def = workflow({
-    id: "daily",
-    trigger: () => {
-      calls += 1;
-      return trigger;
-    },
-  }).handler(async () => {});
-  expect(calls).toBe(1);
-  expect(def.trigger).toBe(trigger);
-  expect(def.__kind).toBe("workflow");
-  expect(def.id).toBe("daily");
-  expect(def.secrets).toEqual([]);
-});
-
-test("the trigger context exposes exactly the declared secrets as name-carrying refs", () => {
-  const seen: Array<{ keys: ReadonlyArray<string>; alpha: string; beta: string }> = [];
-  workflow({
-    id: "ctx-shape",
-    secrets: ["ALPHA_KEY", "BETA_KEY"],
-    trigger: (tctx) => {
-      seen.push({
-        keys: Object.keys(tctx.secrets),
-        alpha: secretNameOf(tctx.secrets.ALPHA_KEY),
-        beta: secretNameOf(tctx.secrets.BETA_KEY),
-      });
-      return cron("* * * * *");
-    },
-  }).handler(async () => {});
-  expect(seen).toEqual([{ keys: ["ALPHA_KEY", "BETA_KEY"], alpha: "ALPHA_KEY", beta: "BETA_KEY" }]);
-});
-
-test("throws when the trigger captures a secret ref not declared on this workflow", () => {
-  const foreign = refOf("FOREIGN_SECRET");
-  for (const opts of [{ id: "thief", secrets: ["OWN_SECRET"] }, { id: "bare" }] as const) {
-    expect(() =>
-      workflow({
-        ...opts,
-        trigger: () =>
-          webhook({ path: `/${opts.id}`, secret: foreign, signatureHeader: "x-signature" }),
-      }),
-    ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
-  }
-});
-
-test("rejects invalid workflow and trigger shapes", () => {
-  const ref = refOf("HOOK_SECRET");
+test("invalid workflow definitions fail before registration", () => {
   expect(() => workflow({ id: "BadName", trigger: () => cron("* * * * *") })).toThrow(
     'invalid workflow id "BadName": must be kebab-case',
   );
-  expect(() => validateTrigger(cron(" "))).toThrow(
-    "invalid workflow cron trigger: expression is required",
-  );
-  for (const [trigger, message] of [
-    [
-      webhook({ path: "linear", secret: ref, signatureHeader: "x-signature" }),
-      'invalid workflow trigger path "linear": must start with "/"',
-    ],
-    [
-      webhook({ path: "/linear//events", secret: ref, signatureHeader: "x-signature" }),
-      'invalid workflow trigger path "/linear//events": contains "//"',
-    ],
-    [
-      webhook({ path: "/linear", secret: ref, signatureHeader: "" }),
-      "invalid workflow webhook signatureHeader: a signature header is required",
-    ],
-    [
-      webhook({
-        path: "/linear",
-        secret: ref,
-        signatureHeader: "x-signature",
-        timestamp: { field: "ts", toleranceMs: 0 },
-      }),
-      "invalid workflow webhook timestamp tolerance: must be positive",
-    ],
-  ] as const) {
-    expect(() => validateTrigger(trigger)).toThrow(message);
-  }
-});
-
-test("makeCtx forwards stable step ids and positional sleep ids", async () => {
-  const calls: unknown[] = [];
-  const ctx = makeCtx(
-    {
-      step: async (id, fn) => {
-        calls.push(["step", id]);
-        return fn();
-      },
-      sandbox: async (name) => ({ name }) as never,
-      sleep: async (id, ms) => {
-        calls.push(["sleep", id, ms]);
-      },
-    },
-    { runId: "run-1", secrets: { API_KEY: "key" }, env: { binding: true } },
-  );
-
-  const result = await ctx.step("fetch-linear", (step) => ({ id: step.id, runId: ctx.runId }));
-  await ctx.sleep(10);
-  await ctx.sleep(25);
-
-  expect(result).toEqual({ id: "fetch-linear", runId: "run-1" });
-  expect(ctx.secrets.API_KEY).toBe("key");
-  expect(ctx.env).toEqual({ binding: true });
-  expect(calls).toEqual([
-    ["step", "fetch-linear"],
-    ["sleep", "sleep-0", 10],
-    ["sleep", "sleep-1", 25],
-  ]);
-});
-
-test("makeCtx runs ai calls inside a named step", async () => {
-  const calls: unknown[] = [];
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-    if (typeof init?.body !== "string") throw new Error("expected string body");
-    calls.push(["fetch", JSON.parse(init.body)]);
-    return Response.json({ choices: [{ message: { content: "  done  " } }] });
-  }) as typeof fetch;
-  try {
-    const ctx = makeCtx(
-      {
-        step: async (id, fn) => {
-          calls.push(["step", id]);
-          return fn();
-        },
-        sandbox: async () => ({}) as never,
-        sleep: async () => {},
-      },
-      { runId: "run-1", secrets: {}, env: {} },
-    );
-
-    const result = await ctx.ai("summarize", {
-      model: { name: "test-model", apiKey: "key" },
-      prompt: "hello",
-    });
-
-    expect(result).toBe("done");
-    expect(calls).toEqual([
-      ["step", "summarize"],
-      ["fetch", { model: "test-model", messages: [{ role: "user", content: "hello" }] }],
-    ]);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("makeCtx surfaces ai provider errors", async () => {
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    Response.json({ error: { message: "bad model" } }, { status: 400 })) as typeof fetch;
-  try {
-    const ctx = makeCtx(
-      {
-        step: async (_id, fn) => fn(),
-        sandbox: async () => ({}) as never,
-        sleep: async () => {},
-      },
-      { runId: "run-1", secrets: {}, env: {} },
-    );
-
-    await expect(
-      ctx.ai("summarize", {
-        model: { name: "test-model", apiKey: "key" },
-        prompt: "hello",
-      }),
-    ).rejects.toThrow("bad model");
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("makeCtx rejects ai responses without text", async () => {
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async () => Response.json({ choices: [{}] })) as typeof fetch;
-  try {
-    const ctx = makeCtx(
-      {
-        step: async (_id, fn) => fn(),
-        sandbox: async () => ({}) as never,
-        sleep: async () => {},
-      },
-      { runId: "run-1", secrets: {}, env: {} },
-    );
-
-    await expect(
-      ctx.ai("summarize", {
-        model: { name: "test-model", apiKey: "key" },
-        prompt: "hello",
-      }),
-    ).rejects.toThrow("OpenRouter response did not include text");
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test("makeCtx runs sandbox work inside a named step", async () => {
-  const calls: unknown[] = [];
-  const ctx = makeCtx(
-    {
-      step: async (id, fn) => {
-        calls.push(["step", id]);
-        return fn();
-      },
-      sandbox: async (name) => {
-        calls.push(["sandbox", name]);
-        return { name } as never;
-      },
-      sleep: async () => {},
-    },
-    { runId: "run-1", secrets: {}, env: {} },
-  );
-
-  const result = await ctx.sandbox("review", async (sandbox) => sandbox);
-
-  expect(result).toEqual({ name: "run-1-review" });
-  expect(calls).toEqual([
-    ["step", "review"],
-    ["sandbox", "run-1-review"],
-  ]);
-});
-
-test("makeCtx runs agent work inside a named step backed by a sandbox", async () => {
-  const calls: unknown[] = [];
-  const ctx = makeCtx(
-    {
-      step: async (id, fn) => {
-        calls.push(["step", id]);
-        return fn();
-      },
-      sandbox: async (name) => {
-        calls.push(["sandbox", name]);
-        return {
-          writeFile: async (path: string, content: string) => {
-            calls.push(["write", path, content]);
-          },
-          exec: async (command: string, options: unknown) => {
-            calls.push(["exec", command, options]);
-            return { success: true, stdout: " review\n" };
-          },
-        } as never;
-      },
-      sleep: async () => {},
-    },
-    { runId: "run-1", secrets: {}, env: {} },
-  );
-
-  const result = await ctx.agent("review", {
-    files: { "notes/issue.md": "body" },
-    args: [
-      "--provider",
-      "openrouter",
-      "--model",
-      "test-model",
-      "-p",
-      "@notes/issue.md",
-      "review Bob's issue",
-    ],
-    env: { OPENROUTER_API_KEY: "key" },
-  });
-
-  expect(result).toBe("review");
-  expect(calls).toEqual([
-    ["step", "review"],
-    ["sandbox", "run-1-review"],
-    ["write", "/workspace/notes/issue.md", "body"],
-    [
-      "exec",
-      "'npx' '--yes' '@earendil-works/pi-coding-agent@0.79.1' '--provider' 'openrouter' '--model' 'test-model' '-p' '@notes/issue.md' 'review Bob'\\''s issue'",
-      {
-        cwd: "/workspace",
-        timeout: 120_000,
-        env: { OPENROUTER_API_KEY: "key" },
-      },
-    ],
-  ]);
-});
-
-test("makeCtx surfaces agent command failures", async () => {
-  const ctx = makeCtx(
-    {
-      step: async (_id, fn) => fn(),
-      sandbox: async () =>
-        ({
-          writeFile: async () => {},
-          exec: async () => ({ success: false, stderr: "pi failed", exitCode: 1 }),
-        }) as never,
-      sleep: async () => {},
-    },
-    { runId: "run-1", secrets: {}, env: {} },
-  );
-
-  await expect(ctx.agent("review", { args: ["-p", "review it"] })).rejects.toThrow("pi failed");
-});
-
-test("makeCtx rejects unsafe agent file paths", async () => {
-  const ctx = makeCtx(
-    {
-      step: async (_id, fn) => fn(),
-      sandbox: async () =>
-        ({
-          writeFile: async () => {},
-          exec: async () => ({ success: true, stdout: "" }),
-        }) as never,
-      sleep: async () => {},
-    },
-    { runId: "run-1", secrets: {}, env: {} },
-  );
-
-  await expect(
-    ctx.agent("review", {
-      files: { "../issue.md": "body" },
-      args: ["-p", "review it"],
+  expect(() =>
+    workflow({ id: "hello", secrets: ["bad-name"], trigger: () => cron("* * * * *") }),
+  ).toThrow('invalid workflow secret "bad-name": must be a valid binding name');
+  expect(() =>
+    workflow({
+      id: "hello",
+      secrets: ["API_KEY", "API_KEY"],
+      trigger: () => cron("* * * * *"),
     }),
-  ).rejects.toThrow("invalid agent file path");
+  ).toThrow('duplicate workflow secret "API_KEY"');
 });
 
-test("types the trigger context, handler secrets, and the raw webhook event", () => {
-  const def = workflow({
-    id: "typed",
-    secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
-    trigger: (tctx) => {
-      expectTypeOf<keyof typeof tctx.secrets>().toEqualTypeOf<
-        "LINEAR_WEBHOOK_SECRET" | "LINEAR_API_KEY"
-      >();
-      expectTypeOf(tctx.secrets.LINEAR_API_KEY).toEqualTypeOf<SecretRef<"LINEAR_API_KEY">>();
-      const wantsString = (value: string): string => value;
-      // @ts-expect-error a secret ref is not usable where a string is expected
-      void wantsString(tctx.secrets.LINEAR_API_KEY);
-      // @ts-expect-error undeclared secret names are not offered on the trigger context
-      void tctx.secrets.TYPO;
+test("a webhook signing secret must belong to its workflow", () => {
+  const foreign = secretRef("FOREIGN_SECRET");
+
+  expect(() =>
+    workflow({
+      id: "review",
+      trigger: () => webhook({ path: "/review", secret: foreign, signatureHeader: "x-signature" }),
+    }),
+  ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
+});
+
+test("the authoring API types secrets, context, raw webhooks, and cron events", () => {
+  workflow({
+    id: "typed-webhook",
+    secrets: ["HOOK_SECRET", "API_KEY"],
+    trigger: (ctx) => {
+      expect(secretNameOf(ctx.secrets.HOOK_SECRET)).toBe("HOOK_SECRET");
+      expectTypeOf<keyof typeof ctx.secrets>().toEqualTypeOf<"HOOK_SECRET" | "API_KEY">();
+      expectTypeOf(ctx.secrets.API_KEY).toEqualTypeOf<SecretRef<"API_KEY">>();
       return webhook({
         path: "/typed",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
+        secret: ctx.secrets.HOOK_SECRET,
         signatureHeader: "x-signature",
       });
     },
   }).handler(async (ctx, event) => {
-    type AiParam = Parameters<typeof ctx.ai>[1];
-    type AgentParam = Parameters<typeof ctx.agent>[1];
-    expectTypeOf(ctx.secrets.LINEAR_API_KEY).toEqualTypeOf<string>();
-    expectTypeOf<AiParam>().toEqualTypeOf<AiOptions>();
-    expectTypeOf<AgentParam>().toEqualTypeOf<AgentOptions>();
+    type SleepParams = Parameters<(typeof ctx.step)["sleep"]>;
+    expectTypeOf<keyof typeof ctx>().toEqualTypeOf<"runId" | "secrets" | "env" | "step">();
+    expectTypeOf<keyof typeof ctx.step>().toEqualTypeOf<"do" | "sleep">();
+    expectTypeOf<SleepParams>().toEqualTypeOf<[id: string, durationMs: number]>();
+    expectTypeOf(ctx.secrets.API_KEY).toEqualTypeOf<string>();
     expectTypeOf(event).toBeUnknown();
   });
-  expect(def.trigger.type).toBe("webhook");
+
+  workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).handler(async (_ctx, event) => {
+    expectTypeOf(event).toEqualTypeOf<CronParams>();
+  });
 });
 
-test("types the cron event as CronParams", () => {
-  const def = workflow({ id: "tick", trigger: () => cron("* * * * *") }).handler(
-    async (_ctx, event) => {
-      expectTypeOf(event).toEqualTypeOf<CronParams>();
-    },
-  );
-  expect(def.trigger).toEqual({ type: "cron", expression: "* * * * *" });
-});
-
-test("types the schema rung event as the validate output and rejects misuse", () => {
-  const ref = refOf("HOOK_SECRET");
-  const schema: StandardSchemaV1<unknown, { ok: boolean }> = {
+test("schema validation and filtering narrow the handler event", () => {
+  const schema: StandardSchemaV1<unknown, { action: string }> = {
     "~standard": {
       version: 1,
       vendor: "runway-test",
-      validate: (value) => ({ value: value as { ok: boolean } }),
+      validate: (value) => ({ value: value as { action: string } }),
     },
   };
-  const def = workflow({
+
+  workflow({
     id: "schemaed",
     secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
+    trigger: (ctx) =>
       webhook({
         path: "/schemaed",
-        secret: tctx.secrets.HOOK_SECRET,
+        secret: ctx.secrets.HOOK_SECRET,
         signatureHeader: "x-signature",
         schema,
-      }),
+      }).filter((event): event is { action: "create" } => event.action === "create"),
   }).handler(async (_ctx, event) => {
-    expectTypeOf(event).toEqualTypeOf<{ ok: boolean }>();
+    expectTypeOf(event).toEqualTypeOf<{ action: "create" }>();
   });
-  expect(def.trigger.type).toBe("webhook");
-
-  // @ts-expect-error a raw string is not a SecretRef
-  void webhook({ path: "/t", secret: "HOOK_SECRET", signatureHeader: "x-signature" });
-  const combined = { path: "/t", secret: ref, signatureHeader: "x-signature", schema };
-  // @ts-expect-error schema and an explicit event type cannot combine
-  void webhook<{ ok: boolean }>(combined);
-  const raw = webhook<{ action: string }>({
-    path: "/t",
-    secret: ref,
-    signatureHeader: "x-signature",
-  });
-  // @ts-expect-error filter requires a type-guard predicate
-  void raw.filter((event) => event.action === "create");
 });

@@ -9,8 +9,7 @@ import {
   updateDynamicWorkflow,
   workersDevWebhookUrls,
 } from "./deploy-finalize.ts";
-import { deploySandboxContainer } from "./deploy-sandbox.ts";
-import { currentWorkerMigrationTag, uploadWorker, validateBindings } from "./deploy-upload.ts";
+import { uploadWorker, validateBindings } from "./deploy-upload.ts";
 import { resolveScriptName } from "./naming.ts";
 import { secretNamesOf } from "./registry.ts";
 import { listScriptSecrets } from "./secret-store.ts";
@@ -51,8 +50,6 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
   validateBindings(secrets);
   const localSecretBindings = secrets.filter((name) => env[name]);
   const contents = await buildWorkerBundle(registry, opts);
-  const migrationTag = await currentWorkerMigrationTag(cf, accountId, scriptName);
-
   opts.onProgress?.({ step: "deploy", status: "start" });
   await uploadWorker(cf, {
     accountId,
@@ -61,9 +58,7 @@ export const deploy = async (registry: Registry, opts: DeployContext): Promise<D
     contents,
     env,
     localSecretBindings,
-    migrationTag,
   });
-  await deploySandboxContainer(cf, accountId, scriptName);
   await updateDynamicWorkflow(cf, accountId, workflowName, scriptName);
   await updateCronSchedules(cf, accountId, scriptName, registry);
   await deleteStaleDynamicWorkflows(cf, accountId, workflowName, scriptName);

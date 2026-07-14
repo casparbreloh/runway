@@ -7,7 +7,6 @@
     "deploy": "runway deploy"
   },
   "dependencies": {
-    "@linear/sdk": "catalog:",
     "runway": "workspace:*"
   },
   "devDependencies": {

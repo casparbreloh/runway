@@ -72,7 +72,7 @@ const timingSafeEqual = (left: string, right: string): boolean => {
   return diff === 0;
 };
 
-export const hmacSha256Hex = async (secret: string, body: string): Promise<string> => {
+const hmacSha256Hex = async (secret: string, body: string): Promise<string> => {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -121,7 +121,7 @@ const verifyTimestamp = (
 const passedWebhookGate = (decision: WebhookGateDecision): decision is PassedWebhookGate =>
   decision.status === "passed";
 
-export const evaluateWebhookGates = async (
+const evaluateWebhookGates = async (
   entries: ReadonlyArray<WebhookRouterEntry>,
   params: unknown,
 ): Promise<WebhookGateEvaluation> => {

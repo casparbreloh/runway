@@ -1,3 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
+  "ignoreExports": [
+    {
+      "file": "packages/runway/tests/runtime-worker.ts",
+      "exports": ["DailyWorkflow", "IssueCreatedWorkflow"],
+    },
+  ],
 }
