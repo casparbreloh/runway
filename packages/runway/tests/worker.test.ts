@@ -1,513 +1,88 @@
-import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, webhook, workflow } from "runway";
+import { createExecutionContext, introspectWorkflow } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { expect, test } from "vitest";
 
-import { createRouter, evaluateWebhookGates, hmacSha256Hex } from "../src/router.ts";
-import type { WebhookRouterEntry } from "../src/router.ts";
-import { createTestWorker } from "./worker.ts";
+import worker from "./runtime-worker.ts";
 
-const issueCreated: StandardSchemaV1<unknown, { action: string; normalized: boolean }> = {
-  "~standard": {
-    version: 1,
-    vendor: "runway-test",
-    validate: (value) => {
-      const event = value as { action?: unknown };
-      return event.action === "create"
-        ? {
-            value: { ...(value as Record<string, unknown>), action: "create", normalized: true },
-          }
-        : { issues: [{ message: "not an issue create" }] };
-    },
-  },
+const signatureOf = async (body: string): Promise<string> => {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode("test-secret"),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-test("starts webhook and cron workflows in the Workers runtime", async () => {
-  const seen: unknown[] = [];
-  const hello = workflow({
-    id: "hello",
-    secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/hello",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
-        signatureHeader: "linear-signature",
-      }),
-  }).handler(async (ctx, event) => {
-    seen.push(
-      await ctx.step.do("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: event })),
-    );
-    await ctx.step.sleep("settle", 10);
-  });
-  const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(
-    (ctx, event) => {
-      // @ts-expect-error secrets must be declared on the workflow
-      void ctx.secrets.LINEAR_API_KEY;
-      seen.push(event);
-    },
-  );
-  const worker = createTestWorker([hello, daily], {
-    secrets: { LINEAR_WEBHOOK_SECRET: "test-secret", LINEAR_API_KEY: "lin_api_test" },
+const webhook = async (body: string, signature = signatureOf(body)): Promise<Response> =>
+  exports.default.fetch("https://runway.test/issues", {
+    method: "POST",
+    headers: { "x-signature": await signature },
+    body,
   });
 
-  const res = await worker.webhook("hello", { ok: true });
-  await worker.scheduled("0 9 * * *", 42);
-  await Promise.all(worker.executions);
+test("a signed webhook runs a durable workflow in the Workers runtime", async () => {
+  const introspector = await introspectWorkflow(env.ISSUE_CREATED);
+  try {
+    const response = await webhook(JSON.stringify({ action: "create" }));
+    const payload = (await response.json()) as {
+      runs: [{ id: string; workflow: string }];
+    };
+    const [instance] = introspector.get();
 
-  expect(res.status).toBe(202);
-  expect(worker.runs).toEqual([
-    { id: "hello-1", workflowId: "hello", params: { ok: true } },
-    { id: "daily-2", workflowId: "daily", params: { cron: "0 9 * * *", scheduledTime: 42 } },
-  ]);
-  expect(seen).toEqual([
-    { key: "lin_api_test", params: { ok: true } },
-    { cron: "0 9 * * *", scheduledTime: 42 },
-  ]);
-});
-
-test("a webhook event failing schema validation responds skipped and starts no run", async () => {
-  const review = workflow({
-    id: "review",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/review",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: issueCreated,
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([review], { secrets: { HOOK_SECRET: "test-secret" } });
-
-  const res = await worker.webhook("review", { action: "update" });
-
-  expect(res.status).toBe(200);
-  expect(await res.json()).toEqual({ skipped: true });
-  expect(worker.runs).toEqual([]);
-});
-
-test("a passing webhook event starts a run whose handler event is the validate output", async () => {
-  const seen: unknown[] = [];
-  const review = workflow({
-    id: "review",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/review",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: issueCreated,
-      }),
-  }).handler(async (_ctx, event) => {
-    seen.push(event);
-  });
-  const worker = createTestWorker([review], { secrets: { HOOK_SECRET: "test-secret" } });
-
-  const res = await worker.webhook("review", { action: "create" });
-  await Promise.all(worker.executions);
-
-  expect(res.status).toBe(202);
-  expect(worker.runs).toEqual([
-    { id: "review-1", workflowId: "review", params: { action: "create", normalized: true } },
-  ]);
-  expect(seen).toEqual([{ action: "create", normalized: true }]);
-});
-
-test("an async schema validate is awaited before gating the run", async () => {
-  const asyncSchema: StandardSchemaV1<unknown, { action: string; vetted: boolean }> = {
-    "~standard": {
-      version: 1,
-      vendor: "runway-test",
-      validate: async (value) => {
-        await new Promise((resolve) => setTimeout(resolve, 1));
-        const event = value as { action?: unknown };
-        return event.action === "create"
-          ? { value: { ...(value as Record<string, unknown>), action: "create", vetted: true } }
-          : { issues: [{ message: "not an issue create" }] };
-      },
-    },
-  };
-  const review = workflow({
-    id: "review",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/review",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: asyncSchema,
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([review], { secrets: { HOOK_SECRET: "test-secret" } });
-
-  const skipped = await worker.webhook("review", { action: "update" });
-  const started = await worker.webhook("review", { action: "create" });
-
-  expect(skipped.status).toBe(200);
-  expect(await skipped.json()).toEqual({ skipped: true });
-  expect(started.status).toBe(202);
-  expect(worker.runs).toEqual([
-    { id: "review-1", workflowId: "review", params: { action: "create", vetted: true } },
-  ]);
-});
-
-test("the filter predicate runs on the schema output and gates the run", async () => {
-  const predicateSaw: unknown[] = [];
-  const review = workflow({
-    id: "review",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/review",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: issueCreated,
-      }).filter((event): event is { action: string; normalized: boolean; urgent: true } => {
-        predicateSaw.push(event);
-        return (event as { urgent?: unknown }).urgent === true;
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([review], { secrets: { HOOK_SECRET: "test-secret" } });
-
-  const skipped = await worker.webhook("review", { action: "create", urgent: false });
-  const started = await worker.webhook("review", { action: "create", urgent: true });
-
-  expect(skipped.status).toBe(200);
-  expect(await skipped.json()).toEqual({ skipped: true });
-  expect(started.status).toBe(202);
-  expect(predicateSaw).toEqual([
-    { action: "create", urgent: false, normalized: true },
-    { action: "create", urgent: true, normalized: true },
-  ]);
-  expect(worker.runs).toEqual([
-    {
-      id: "review-1",
-      workflowId: "review",
-      params: { action: "create", urgent: true, normalized: true },
-    },
-  ]);
-});
-
-test("webhook gate evaluation returns fan-out decisions without starting runs", async () => {
-  const issues = workflow({
-    id: "issues",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: issueCreated,
-      }),
-  }).handler(async () => {
-    throw new Error("handler should not run during gate evaluation");
-  });
-  const urgent = workflow({
-    id: "urgent",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-      }).filter(
-        (event): event is { urgent: true } => (event as { urgent?: unknown }).urgent === true,
-      ),
-  }).handler(async () => {
-    throw new Error("handler should not run during gate evaluation");
-  });
-  if (issues.trigger.type !== "webhook" || urgent.trigger.type !== "webhook") {
-    throw new Error("expected webhook test fixtures");
+    expect(response.status).toBe(202);
+    expect(payload.runs[0]?.workflow).toBe("issue-created");
+    expect(await instance!.waitForStepResult({ name: "record-issue" })).toEqual({
+      stepId: "record-issue",
+      runId: payload.runs[0]!.id,
+      apiKey: "test-api-key",
+      event: { action: "create", normalized: true },
+    });
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+  } finally {
+    await introspector.dispose();
   }
-  const entries: WebhookRouterEntry[] = [
-    { id: "issues", trigger: issues.trigger },
-    { id: "urgent", trigger: urgent.trigger },
-  ];
+});
 
-  const partial = await evaluateWebhookGates(entries, { action: "create", urgent: false });
-  if (partial.status !== "ok") throw partial.error;
+test("an unsigned webhook is rejected", async () => {
+  const response = await webhook(JSON.stringify({ action: "create" }), Promise.resolve("wrong"));
 
-  const [issueDecision, urgentDecision] = partial.decisions;
-  expect(issueDecision?.status).toBe("passed");
-  if (issueDecision?.status !== "passed") throw new Error("expected issues to pass");
-  expect(issueDecision.event).toEqual({ action: "create", urgent: false, normalized: true });
-  expect(urgentDecision?.status).toBe("skipped");
-  if (urgentDecision?.status !== "skipped" || urgentDecision.reason !== "filter") {
-    throw new Error("expected urgent to skip on filter");
+  expect(response.status).toBe(401);
+});
+
+test("signed malformed JSON is rejected", async () => {
+  const response = await webhook("{");
+
+  expect(response.status).toBe(400);
+});
+
+test("a webhook filtered out by its trigger starts no workflow", async () => {
+  const introspector = await introspectWorkflow(env.ISSUE_CREATED);
+  try {
+    const response = await webhook(JSON.stringify({ action: "update" }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ skipped: true });
+    expect(introspector.get()).toEqual([]);
+  } finally {
+    await introspector.dispose();
   }
-  expect(urgentDecision.event).toEqual({ action: "create", urgent: false });
-
-  const skipped = await evaluateWebhookGates(entries, { action: "update", urgent: false });
-  if (skipped.status !== "ok") throw skipped.error;
-
-  expect(
-    skipped.decisions.map((decision) =>
-      decision.status === "skipped"
-        ? { id: decision.entry.id, status: decision.status, reason: decision.reason }
-        : { id: decision.entry.id, status: decision.status },
-    ),
-  ).toEqual([
-    { id: "issues", status: "skipped", reason: "schema" },
-    { id: "urgent", status: "skipped", reason: "filter" },
-  ]);
 });
 
-test("webhook gate evaluation returns trigger errors as data", async () => {
-  const exploding = workflow({
-    id: "exploding",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-      }).filter((_event): _event is { action: "create" } => {
-        throw new Error("predicate exploded");
-      }),
-  }).handler(async () => {
-    throw new Error("handler should not run during gate evaluation");
-  });
-  if (exploding.trigger.type !== "webhook") throw new Error("expected webhook test fixture");
+test("a scheduled event runs its matching durable workflow", async () => {
+  const introspector = await introspectWorkflow(env.DAILY);
+  try {
+    await worker.scheduled({ cron: "0 9 * * *", scheduledTime: 42 }, env, createExecutionContext());
+    const [instance] = introspector.get();
 
-  const evaluation = await evaluateWebhookGates([{ id: "exploding", trigger: exploding.trigger }], {
-    action: "create",
-  });
-
-  expect(evaluation.status).toBe("error");
-});
-
-test("a rejecting schema validate responds 500 and starts no run", async () => {
-  const broken: StandardSchemaV1<unknown, unknown> = {
-    "~standard": {
-      version: 1,
-      vendor: "runway-test",
-      validate: () => Promise.reject(new Error("schema exploded")),
-    },
-  };
-  const review = workflow({
-    id: "review",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/review",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: broken,
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([review], { secrets: { HOOK_SECRET: "test-secret" } });
-
-  const res = await worker.webhook("review", { action: "create" });
-
-  expect(res.status).toBe(500);
-  expect(worker.runs).toEqual([]);
-});
-
-test("a throwing entry on a shared path responds 500 and starts no runs at all", async () => {
-  const passing = workflow({
-    id: "passing",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-      }),
-  }).handler(async () => {});
-  const exploding = workflow({
-    id: "exploding",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-      }).filter((_event): _event is { action: "create" } => {
-        throw new Error("predicate exploded");
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([passing, exploding], {
-    secrets: { HOOK_SECRET: "test-secret" },
-  });
-
-  const res = await worker.webhook("passing", { action: "create" });
-
-  expect(res.status).toBe(500);
-  expect(worker.runs).toEqual([]);
-});
-
-test("two workflows sharing one path verify once and fan out per-entry", async () => {
-  const issues = workflow({
-    id: "issues",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-        schema: issueCreated,
-      }),
-  }).handler(async () => {});
-  const urgent = workflow({
-    id: "urgent",
-    secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/linear",
-        secret: tctx.secrets.HOOK_SECRET,
-        signatureHeader: "x-signature",
-      }).filter(
-        (event): event is { urgent: true } => (event as { urgent?: unknown }).urgent === true,
-      ),
-  }).handler(async () => {});
-  const worker = createTestWorker([issues, urgent], {
-    secrets: { HOOK_SECRET: "test-secret" },
-  });
-
-  const both = await worker.webhook("issues", { action: "create", urgent: true });
-  const one = await worker.webhook("issues", { action: "create", urgent: false });
-  const none = await worker.webhook("issues", { action: "update", urgent: false });
-
-  expect(both.status).toBe(202);
-  expect(await both.json()).toEqual({
-    runs: [
-      { id: "issues-1", workflow: "issues" },
-      { id: "urgent-2", workflow: "urgent" },
-    ],
-  });
-  expect(one.status).toBe(202);
-  expect(await one.json()).toEqual({ runs: [{ id: "issues-3", workflow: "issues" }] });
-  expect(none.status).toBe(200);
-  expect(await none.json()).toEqual({ skipped: true });
-  expect(worker.runs).toEqual([
-    {
-      id: "issues-1",
-      workflowId: "issues",
-      params: { action: "create", urgent: true, normalized: true },
-    },
-    { id: "urgent-2", workflowId: "urgent", params: { action: "create", urgent: true } },
-    {
-      id: "issues-3",
-      workflowId: "issues",
-      params: { action: "create", urgent: false, normalized: true },
-    },
-  ]);
-});
-
-test("verifies prefixed signatures and header timestamps in unix seconds", async () => {
-  const stamped = workflow({
-    id: "stamped",
-    secrets: ["GITHUB_WEBHOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/stamped",
-        secret: tctx.secrets.GITHUB_WEBHOOK_SECRET,
-        signatureHeader: "x-hub-signature-256",
-        prefix: "sha256=",
-        timestamp: { source: "header", field: "x-runway-timestamp", toleranceMs: 60_000 },
-      }),
-  }).handler(async () => {});
-  const worker = createTestWorker([stamped], {
-    secrets: { GITHUB_WEBHOOK_SECRET: "test-secret" },
-  });
-
-  const fresh = await worker.webhook("stamped", {}, { timestamp: Math.floor(Date.now() / 1000) });
-  const stale = await worker.webhook(
-    "stamped",
-    {},
-    { timestamp: Math.floor(Date.now() / 1000) - 120 },
-  );
-
-  expect(fresh.status).toBe(202);
-  expect(stale.status).toBe(401);
-  expect(worker.runs).toHaveLength(1);
-});
-
-test("accepts the webhook but fails the run when a declared secret is missing", async () => {
-  const needy = workflow({
-    id: "needy",
-    secrets: ["NEEDY_WEBHOOK_SECRET", "NEEDY_API_KEY"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/needy",
-        secret: tctx.secrets.NEEDY_WEBHOOK_SECRET,
-        signatureHeader: "x-signature",
-      }),
-  }).handler(async (ctx) => {
-    void ctx.secrets.NEEDY_API_KEY;
-  });
-  const worker = createTestWorker([needy], {
-    secrets: { NEEDY_WEBHOOK_SECRET: "test-secret" },
-  });
-
-  const res = await worker.webhook("needy");
-
-  expect(res.status).toBe(202);
-  await expect(worker.executions[0]).rejects.toThrow("missing secret: NEEDY_API_KEY");
-});
-
-test("a signed but malformed json body responds 400 and starts no run", async () => {
-  const calls: unknown[] = [];
-  const hello = workflow({
-    id: "hello",
-    secrets: ["LINEAR_WEBHOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/hello",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
-        signatureHeader: "linear-signature",
-      }),
-  }).handler(async () => {});
-  const router = createRouter([{ id: "hello", binding: "HELLO", trigger: hello.trigger }]);
-  const body = "{";
-
-  const res = await router.fetch(
-    new Request("https://runway.test/hello", {
-      method: "POST",
-      body,
-      headers: { "linear-signature": await hmacSha256Hex("test-secret", body) },
-    }),
-    {
-      LINEAR_WEBHOOK_SECRET: "test-secret",
-      HELLO: {
-        create: async ({ params }: { params: unknown }) => {
-          calls.push(params);
-          return { id: "run-1" };
-        },
-      },
-    },
-  );
-
-  expect(res.status).toBe(400);
-  expect(calls).toEqual([]);
-});
-
-test("rejects unsigned webhooks before parsing the body", async () => {
-  const calls: unknown[] = [];
-  const hello = workflow({
-    id: "hello",
-    secrets: ["LINEAR_WEBHOOK_SECRET"],
-    trigger: (tctx) =>
-      webhook({
-        path: "/hello",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
-        signatureHeader: "linear-signature",
-      }),
-  }).handler(async () => {});
-  const router = createRouter([{ id: "hello", binding: "HELLO", trigger: hello.trigger }]);
-
-  const res = await router.fetch(
-    new Request("https://runway.test/hello", { method: "POST", body: "{" }),
-    {
-      LINEAR_WEBHOOK_SECRET: "test-secret",
-      HELLO: {
-        create: async ({ params }: { params: unknown }) => {
-          calls.push(params);
-          return { id: "run-1" };
-        },
-      },
-    },
-  );
-
-  expect(res.status).toBe(401);
-  expect(calls).toEqual([]);
+    expect(await instance!.waitForStepResult({ name: "record-schedule" })).toEqual({
+      cron: "0 9 * * *",
+      scheduledTime: 42,
+    });
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+  } finally {
+    await introspector.dispose();
+  }
 });

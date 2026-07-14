@@ -122,6 +122,9 @@ minimal scheduled workflow using `step.do()`.
 
 ## Testing
 
+Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
+integration. The suite tests public SDK, runtime, CLI, and Cloudflare API boundaries.
+
 ```sh
 pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test
 ```

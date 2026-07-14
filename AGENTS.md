@@ -22,7 +22,7 @@ own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents
   - `src/deploy.ts` — validation, codegen, bundle, and Cloudflare upload path.
   - `src/codegen.ts` — generated orchestration and workflow Worker modules.
   - `src/validate.ts` — registry validation.
-  - `tests/worker.ts` — no-account integration helper.
+  - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
 - `example/` — minimal scheduled workflow using `ctx.step.do()`.
 
 ## Commands
@@ -75,6 +75,8 @@ export default workflow({
 ## Conventions
 
 - Keep `example/` typechecking.
+- Test behavior at the SDK, Workers runtime, CLI, and Cloudflare API seams. Do not test internal
+  helpers or generated source strings directly.
 - Code is effectively comment-free; add comments only for non-obvious rationale.
 - Touch only the requested surface.
 - Add catalog dependencies in `pnpm-workspace.yaml`; use `"catalog:"` in packages.

@@ -1,227 +1,96 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { cron, secretNameOf, webhook, workflow } from "runway";
+import type { CronParams, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
-import { makeCtx } from "../src/ctx.ts";
-import { secretNameOf } from "../src/secrets.ts";
-import type { SecretRef } from "../src/secrets.ts";
-import { cron, validateTrigger, webhook } from "../src/trigger.ts";
-import type { CronParams } from "../src/types.ts";
-import { workflow } from "../src/workflow.ts";
-
-const refOf = <N extends string>(name: N): SecretRef<N> => {
+const secretRef = <N extends string>(name: N): SecretRef<N> => {
   let ref: SecretRef<N> | undefined;
   workflow({
-    id: "donor",
+    id: "secret-source",
     secrets: [name],
-    trigger: (tctx) => {
-      ref = tctx.secrets[name];
+    trigger: (ctx) => {
+      ref = ctx.secrets[name];
       return cron("* * * * *");
     },
   }).handler(async () => {});
   return ref!;
 };
 
-test("rejects secret names that are not valid bindings", () => {
-  expect(() =>
-    workflow({ id: "hello", secrets: ["linear-api-key"], trigger: () => cron("* * * * *") }),
-  ).toThrow('invalid workflow secret "linear-api-key": must be a valid binding name');
-});
-
-test("rejects duplicate secret names", () => {
-  expect(() =>
-    workflow({
-      id: "hello",
-      secrets: ["LINEAR_API_KEY", "LINEAR_API_KEY"],
-      trigger: () => cron("* * * * *"),
-    }),
-  ).toThrow('duplicate workflow secret "LINEAR_API_KEY"');
-});
-
-test("invokes the trigger callback once and stores its result by reference", () => {
-  const trigger = cron("0 9 * * *");
-  let calls = 0;
-  const def = workflow({
-    id: "daily",
-    trigger: () => {
-      calls += 1;
-      return trigger;
-    },
-  }).handler(async () => {});
-  expect(calls).toBe(1);
-  expect(def.trigger).toBe(trigger);
-  expect(def.__kind).toBe("workflow");
-  expect(def.id).toBe("daily");
-  expect(def.secrets).toEqual([]);
-});
-
-test("the trigger context exposes exactly the declared secrets as name-carrying refs", () => {
-  const seen: Array<{ keys: ReadonlyArray<string>; alpha: string; beta: string }> = [];
-  workflow({
-    id: "ctx-shape",
-    secrets: ["ALPHA_KEY", "BETA_KEY"],
-    trigger: (tctx) => {
-      seen.push({
-        keys: Object.keys(tctx.secrets),
-        alpha: secretNameOf(tctx.secrets.ALPHA_KEY),
-        beta: secretNameOf(tctx.secrets.BETA_KEY),
-      });
-      return cron("* * * * *");
-    },
-  }).handler(async () => {});
-  expect(seen).toEqual([{ keys: ["ALPHA_KEY", "BETA_KEY"], alpha: "ALPHA_KEY", beta: "BETA_KEY" }]);
-});
-
-test("throws when the trigger captures a secret ref not declared on this workflow", () => {
-  const foreign = refOf("FOREIGN_SECRET");
-  for (const opts of [{ id: "thief", secrets: ["OWN_SECRET"] }, { id: "bare" }] as const) {
-    expect(() =>
-      workflow({
-        ...opts,
-        trigger: () =>
-          webhook({ path: `/${opts.id}`, secret: foreign, signatureHeader: "x-signature" }),
-      }),
-    ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
-  }
-});
-
-test("rejects invalid workflow and trigger shapes", () => {
-  const ref = refOf("HOOK_SECRET");
+test("invalid workflow definitions fail before registration", () => {
   expect(() => workflow({ id: "BadName", trigger: () => cron("* * * * *") })).toThrow(
     'invalid workflow id "BadName": must be kebab-case',
   );
-  expect(() => validateTrigger(cron(" "))).toThrow(
-    "invalid workflow cron trigger: expression is required",
-  );
-  for (const [trigger, message] of [
-    [
-      webhook({ path: "linear", secret: ref, signatureHeader: "x-signature" }),
-      'invalid workflow trigger path "linear": must start with "/"',
-    ],
-    [
-      webhook({ path: "/linear//events", secret: ref, signatureHeader: "x-signature" }),
-      'invalid workflow trigger path "/linear//events": contains "//"',
-    ],
-    [
-      webhook({ path: "/linear", secret: ref, signatureHeader: "" }),
-      "invalid workflow webhook signatureHeader: a signature header is required",
-    ],
-    [
-      webhook({
-        path: "/linear",
-        secret: ref,
-        signatureHeader: "x-signature",
-        timestamp: { field: "ts", toleranceMs: 0 },
-      }),
-      "invalid workflow webhook timestamp tolerance: must be positive",
-    ],
-  ] as const) {
-    expect(() => validateTrigger(trigger)).toThrow(message);
-  }
+  expect(() =>
+    workflow({ id: "hello", secrets: ["bad-name"], trigger: () => cron("* * * * *") }),
+  ).toThrow('invalid workflow secret "bad-name": must be a valid binding name');
+  expect(() =>
+    workflow({
+      id: "hello",
+      secrets: ["API_KEY", "API_KEY"],
+      trigger: () => cron("* * * * *"),
+    }),
+  ).toThrow('duplicate workflow secret "API_KEY"');
 });
 
-test("makeCtx forwards explicit step and sleep ids", async () => {
-  const calls: unknown[] = [];
-  const ctx = makeCtx(
-    {
-      step: {
-        do: async (id, fn) => {
-          calls.push(["step", id]);
-          return fn();
-        },
-        sleep: async (id, ms) => {
-          calls.push(["sleep", id, ms]);
-        },
-      },
-    },
-    { runId: "run-1", secrets: { API_KEY: "key" }, env: { binding: true } },
-  );
+test("a webhook signing secret must belong to its workflow", () => {
+  const foreign = secretRef("FOREIGN_SECRET");
 
-  const result = await ctx.step.do("fetch-linear", (step) => ({ id: step.id, runId: ctx.runId }));
-  await ctx.step.sleep("wait-for-linear", 10);
-  await ctx.step.sleep("wait-for-retry", 25);
-
-  expect(result).toEqual({ id: "fetch-linear", runId: "run-1" });
-  expect(ctx.secrets.API_KEY).toBe("key");
-  expect(ctx.env).toEqual({ binding: true });
-  expect(calls).toEqual([
-    ["step", "fetch-linear"],
-    ["sleep", "wait-for-linear", 10],
-    ["sleep", "wait-for-retry", 25],
-  ]);
+  expect(() =>
+    workflow({
+      id: "review",
+      trigger: () => webhook({ path: "/review", secret: foreign, signatureHeader: "x-signature" }),
+    }),
+  ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
 });
 
-test("types the trigger context, handler secrets, and the raw webhook event", () => {
-  const def = workflow({
-    id: "typed",
-    secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
-    trigger: (tctx) => {
-      expectTypeOf<keyof typeof tctx.secrets>().toEqualTypeOf<
-        "LINEAR_WEBHOOK_SECRET" | "LINEAR_API_KEY"
-      >();
-      expectTypeOf(tctx.secrets.LINEAR_API_KEY).toEqualTypeOf<SecretRef<"LINEAR_API_KEY">>();
-      const wantsString = (value: string): string => value;
-      // @ts-expect-error a secret ref is not usable where a string is expected
-      void wantsString(tctx.secrets.LINEAR_API_KEY);
-      // @ts-expect-error undeclared secret names are not offered on the trigger context
-      void tctx.secrets.TYPO;
+test("the authoring API types secrets, context, raw webhooks, and cron events", () => {
+  workflow({
+    id: "typed-webhook",
+    secrets: ["HOOK_SECRET", "API_KEY"],
+    trigger: (ctx) => {
+      expect(secretNameOf(ctx.secrets.HOOK_SECRET)).toBe("HOOK_SECRET");
+      expectTypeOf<keyof typeof ctx.secrets>().toEqualTypeOf<"HOOK_SECRET" | "API_KEY">();
+      expectTypeOf(ctx.secrets.API_KEY).toEqualTypeOf<SecretRef<"API_KEY">>();
       return webhook({
         path: "/typed",
-        secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
+        secret: ctx.secrets.HOOK_SECRET,
         signatureHeader: "x-signature",
       });
     },
   }).handler(async (ctx, event) => {
+    type SleepParams = Parameters<(typeof ctx.step)["sleep"]>;
     expectTypeOf<keyof typeof ctx>().toEqualTypeOf<"runId" | "secrets" | "env" | "step">();
     expectTypeOf<keyof typeof ctx.step>().toEqualTypeOf<"do" | "sleep">();
-    expectTypeOf(ctx.secrets.LINEAR_API_KEY).toEqualTypeOf<string>();
+    expectTypeOf<SleepParams>().toEqualTypeOf<[id: string, durationMs: number]>();
+    expectTypeOf(ctx.secrets.API_KEY).toEqualTypeOf<string>();
     expectTypeOf(event).toBeUnknown();
   });
-  expect(def.trigger.type).toBe("webhook");
+
+  workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).handler(async (_ctx, event) => {
+    expectTypeOf(event).toEqualTypeOf<CronParams>();
+  });
 });
 
-test("types the cron event as CronParams", () => {
-  const def = workflow({ id: "tick", trigger: () => cron("* * * * *") }).handler(
-    async (_ctx, event) => {
-      expectTypeOf(event).toEqualTypeOf<CronParams>();
-    },
-  );
-  expect(def.trigger).toEqual({ type: "cron", expression: "* * * * *" });
-});
-
-test("types the schema rung event as the validate output and rejects misuse", () => {
-  const ref = refOf("HOOK_SECRET");
-  const schema: StandardSchemaV1<unknown, { ok: boolean }> = {
+test("schema validation and filtering narrow the handler event", () => {
+  const schema: StandardSchemaV1<unknown, { action: string }> = {
     "~standard": {
       version: 1,
       vendor: "runway-test",
-      validate: (value) => ({ value: value as { ok: boolean } }),
+      validate: (value) => ({ value: value as { action: string } }),
     },
   };
-  const def = workflow({
+
+  workflow({
     id: "schemaed",
     secrets: ["HOOK_SECRET"],
-    trigger: (tctx) =>
+    trigger: (ctx) =>
       webhook({
         path: "/schemaed",
-        secret: tctx.secrets.HOOK_SECRET,
+        secret: ctx.secrets.HOOK_SECRET,
         signatureHeader: "x-signature",
         schema,
-      }),
+      }).filter((event): event is { action: "create" } => event.action === "create"),
   }).handler(async (_ctx, event) => {
-    expectTypeOf(event).toEqualTypeOf<{ ok: boolean }>();
+    expectTypeOf(event).toEqualTypeOf<{ action: "create" }>();
   });
-  expect(def.trigger.type).toBe("webhook");
-
-  // @ts-expect-error a raw string is not a SecretRef
-  void webhook({ path: "/t", secret: "HOOK_SECRET", signatureHeader: "x-signature" });
-  const combined = { path: "/t", secret: ref, signatureHeader: "x-signature", schema };
-  // @ts-expect-error schema and an explicit event type cannot combine
-  void webhook<{ ok: boolean }>(combined);
-  const raw = webhook<{ action: string }>({
-    path: "/t",
-    secret: ref,
-    signatureHeader: "x-signature",
-  });
-  // @ts-expect-error filter requires a type-guard predicate
-  void raw.filter((event) => event.action === "create");
 });

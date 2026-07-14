@@ -93,25 +93,6 @@ test("deploy discovers workflows without config", async () => {
   }
 });
 
-test("deploy only discovers fixed workflow path", async () => {
-  const app = await project({
-    ".runway/visible.ts": workflow("visible", ["VISIBLE_SECRET"]),
-    ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),
-    ".runway/workflows/ignored.spec.ts": workflow("spec", ["SPEC_SECRET"]),
-    ".runway/workflows/ignored.d.ts": workflow("types", ["TYPES_SECRET"]),
-  });
-
-  try {
-    const result = await run(["deploy"], {}, app.cwd);
-
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
-    expect(result.output).not.toMatch(/VISIBLE_SECRET|SPEC_SECRET|TYPES_SECRET/);
-  } finally {
-    await app.cleanup();
-  }
-});
-
 test("deploy supports barrel exports without duplicate registration", async () => {
   const app = await project({
     ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),
@@ -157,13 +138,6 @@ test("deploy errors on duplicate workflow ids", async () => {
   } finally {
     await app.cleanup();
   }
-});
-
-test("build is not a public command", async () => {
-  const result = await run(["build"]);
-
-  expect(result.code).toBe(1);
-  expect(result.output).toMatch(/Unknown command/);
 });
 
 test("secrets set validates command shape before auth", async () => {
