@@ -75,10 +75,7 @@ import {
 } from "@cloudflare/dynamic-workflows";
 import {
   createRouter,
-  executeSandboxCommand,
-  runnerIdOf,
-  watchWorkflowCancellation,
-  type NormalizedExecOptions,
+  createRunnerAdapter,
   type RouterEntry,
   type WorkflowStarter,
 } from "runway/runtime";
@@ -112,8 +109,8 @@ interface Env {
 interface LoaderContext {
   exports: {
     RunwayRunnerBinding(options: { props: Record<string, never> }): {
-      exec(runId: string, options: NormalizedExecOptions, secrets: ReadonlyArray<string>): Promise<unknown>;
-      destroy(runId: string): Promise<void>;
+      exec(request: Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0]): Promise<unknown>;
+      destroy(...args: Parameters<ReturnType<typeof createRunnerAdapter>["destroy"]>): Promise<void>;
     };
   };
 }
@@ -131,36 +128,26 @@ const secretsFor = (parentEnv: Record<string, unknown>, workflowId: string): Rec
   );
 
 export class RunwayRunnerBinding extends WorkerEntrypoint<Env> {
-  async exec(
-    runId: string,
-    options: NormalizedExecOptions,
-    secrets: ReadonlyArray<string>,
-  ): Promise<unknown> {
-    const sandbox = getSandbox(this.env.${SANDBOX_BINDING}, await runnerIdOf(runId), {
-      enableDefaultSession: false,
-    });
-    let completed = false;
-    this.ctx.waitUntil(
-      watchWorkflowCancellation(
-        async () => await (await this.env.${WORKFLOW_BINDING}.get(runId)).status(),
-        sandbox,
-        () => completed,
-      ),
-    );
-    try {
-      return await executeSandboxCommand(sandbox, options, secrets, (stream, chunk) => {
+  private adapter(): ReturnType<typeof createRunnerAdapter> {
+    return createRunnerAdapter({
+      sandbox: (runnerId) => getSandbox(this.env.${SANDBOX_BINDING}, runnerId, {
+        enableDefaultSession: false,
+      }),
+      status: async (runId) => await (await this.env.${WORKFLOW_BINDING}.get(runId)).status(),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+      log: ({ stream, chunk }) => {
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
-      });
-    } finally {
-      completed = true;
-    }
+      },
+    });
   }
 
-  async destroy(runId: string): Promise<void> {
-    await getSandbox(this.env.${SANDBOX_BINDING}, await runnerIdOf(runId), {
-      enableDefaultSession: false,
-    }).destroy();
+  async exec(request: Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0]): Promise<unknown> {
+    return await this.adapter().exec(request);
+  }
+
+  async destroy(...args: Parameters<ReturnType<typeof createRunnerAdapter>["destroy"]>): Promise<void> {
+    await this.adapter().destroy(...args);
   }
 }
 

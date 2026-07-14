@@ -29,8 +29,17 @@ workflow({ id, secrets?, trigger }).handler(async (ctx, event) => {
 
 The public context contains `runId`, declared runtime `secrets`, raw `env`, and a `step` object with
 `do(id, fn)`, `exec(id, command)`, and `sleep(id, durationMs)`. Explicit ids make durable operations
-visible and stable. Command execution uses one lazily created, isolated workspace per workflow run.
-There are no compatibility aliases for the former callable step or top-level sleep APIs.
+visible and stable. Command execution uses deterministic processes inside one lazily created,
+isolated runner per workflow run. A retried step reconnects to its process while the Sandbox
+survives, streamed output is redacted and bounded, and timeout or termination kills the process
+tree. There are no compatibility aliases for the former callable step or top-level sleep APIs.
+
+The workspace is ephemeral best-effort state. It is reused by commands while the Sandbox container
+survives, including across durable sleep, but is lost on container restart. Sandbox backups are not
+part of the current topology: they require R2 configuration and credentials, explicit object
+lifecycle cleanup, and repeat restore after restart. Cross-restart durability remains a blocker for
+repository checkout and cache transport until a live integration proves a simple, bounded-cost
+mechanism.
 
 ## Deployment Topology
 
@@ -41,7 +50,9 @@ repo-scoped deployment.
 
 The topology also includes a hidden Sandbox durable object, a matching container application, and
 an internal runner bridge. It has no public Sandbox API, R2, Queues, or account-level execution
-Worker.
+Worker. The runner adapter owns process recovery, redaction, streaming tails, and the active-command
+termination monitor. Polling remains because a live Workflow run reported `rollback: null` when an
+active step was terminated.
 
 ## Near-Term Non-Goals
 

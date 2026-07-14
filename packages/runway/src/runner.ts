@@ -1,16 +1,9 @@
 import { ExecError } from "./exec-error.ts";
+import { redactSecrets } from "./secret-redaction.ts";
 import type { ExecOptions, ExecResult } from "./types.ts";
 
 const DEFAULT_EXEC_CWD = "/workspace";
 const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;
-
-export const runnerIdOf = async (runId: string): Promise<string> => {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(runId));
-  const hash = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  return `runway-${hash.slice(0, 32)}`;
-};
 
 export interface NormalizedExecOptions {
   readonly command: string;
@@ -20,15 +13,21 @@ export interface NormalizedExecOptions {
 }
 
 export interface RunnerBridge {
-  exec(
-    runId: string,
-    options: NormalizedExecOptions,
-    secrets: ReadonlyArray<string>,
-  ): Promise<ExecResult>;
-  destroy(runId: string): Promise<void>;
+  exec(request: {
+    readonly runId: string;
+    readonly step: { readonly id: string; readonly count: number; readonly attempt: number };
+    readonly options: NormalizedExecOptions;
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<ExecResult>;
+  destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
 }
 
-type DurableExec = (callback: () => Promise<ExecResult>) => Promise<ExecResult>;
+type DurableExec = (
+  callback: (step: {
+    readonly step: { readonly count: number };
+    readonly attempt: number;
+  }) => Promise<ExecResult>,
+) => Promise<ExecResult>;
 
 const normalize = (command: string | ExecOptions): NormalizedExecOptions => {
   const options = typeof command === "string" ? { command } : command;
@@ -62,16 +61,28 @@ export class ManagedRunner {
     const bridge = this.bridge;
     if (!bridge) throw new Error("missing runner binding: RUNWAY_RUNNER");
     this.started = true;
-    const result = await durable(async () => await bridge.exec(this.runId, options, this.secrets));
+    const result = await durable(
+      async (step) =>
+        await bridge.exec({
+          runId: this.runId,
+          step: { id, count: step.step.count, attempt: step.attempt },
+          options,
+          secrets: this.secrets,
+        }),
+    );
     if (result.exitCode !== 0) {
-      throw new ExecError(id, options.command, result);
+      throw new ExecError(id, redactSecrets(options.command, this.secrets), {
+        ...result,
+        stdout: redactSecrets(result.stdout, this.secrets),
+        stderr: redactSecrets(result.stderr, this.secrets),
+      });
     }
     return result;
   }
 
   async cleanup(): Promise<void> {
     if (!this.started || this.cleaned || !this.bridge) return;
-    await this.bridge.destroy(this.runId);
+    await this.bridge.destroy(this.runId, this.secrets);
     this.cleaned = true;
   }
 }

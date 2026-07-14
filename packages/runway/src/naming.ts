@@ -5,8 +5,6 @@ const DEFAULT_SCRIPT_NAME = "runway";
 const MAX_SCRIPT_NAME_LENGTH = 63;
 const SCRIPT_NAME_ENV = "RUNWAY_SCRIPT_NAME";
 
-export const bindingOf = (id: string): string => id.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-
 const ensureScriptNameLength = (name: string, value: string): void => {
   if (name.length > MAX_SCRIPT_NAME_LENGTH) {
     throw new Error(

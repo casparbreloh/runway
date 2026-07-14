@@ -40,7 +40,7 @@ export type TriggerContext<S extends string> = {
 declare const EVENT: unique symbol;
 
 export interface Trigger<E> {
-  readonly [EVENT]?: E;
+  readonly [EVENT]: E;
 }
 
 export interface WebhookTimestamp {
