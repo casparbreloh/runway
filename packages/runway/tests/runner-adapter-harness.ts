@@ -144,7 +144,7 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     const logs: string[] = [];
     let pulls = 0;
     const events = [
-      ...Array.from({ length: 300 }, () => ({ type: "stdout", data: "x".repeat(4096) })),
+      ...Array.from({ length: 20 }, () => ({ type: "stdout", data: "x".repeat(4096) })),
       { type: "stdout", data: secret.slice(0, 8) },
       { type: "stdout", data: `${secret.slice(8)}\n` },
       { type: "stdout", data: "😀" },

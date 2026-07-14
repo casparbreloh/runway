@@ -43,6 +43,25 @@ interface RunnerLog {
   readonly chunk: string;
 }
 
+interface ProcessLogEvent {
+  readonly type: "stdout" | "stderr" | "exit" | "complete" | "error";
+  readonly data?: string;
+  readonly exitCode?: number;
+}
+
+type OutputStream = "stdout" | "stderr";
+
+const outputStreams: Partial<Record<ProcessLogEvent["type"], OutputStream>> = {
+  stdout: "stdout",
+  stderr: "stderr",
+};
+
+interface OutputCollector {
+  push(stream: OutputStream, chunk: string): void;
+  flush(): void;
+  result(): Pick<ExecResult, "stdout" | "stderr">;
+}
+
 interface RunnerAdapterOptions {
   readonly sandbox: (runnerId: string) => RunnerSandbox | Promise<RunnerSandbox>;
   readonly log: (entry: RunnerLog) => void;
@@ -117,19 +136,16 @@ const watchTermination = async (
   }
 };
 
-const collectResult = async (
-  sandbox: RunnerSandbox,
-  process: SandboxProcess,
+const createOutputCollector = (
   request: RunnerRequest,
   log: RunnerAdapterOptions["log"],
-): Promise<ExecResult> => {
+): OutputCollector => {
   const redactors = {
     stdout: new StreamingRedactor(request.secrets),
     stderr: new StreamingRedactor(request.secrets),
   };
   let stdout = "";
   let stderr = "";
-  let exitCode = process.exitCode;
   const write = (stream: "stdout" | "stderr", chunk: string): void => {
     if (!chunk) return;
     log({
@@ -142,32 +158,69 @@ const collectResult = async (
     if (stream === "stdout") stdout = appendTail(stdout, chunk);
     else stderr = appendTail(stderr, chunk);
   };
+  return {
+    push: (stream, chunk) => write(stream, redactors[stream].push(chunk)),
+    flush: () => {
+      write("stdout", redactors.stdout.flush());
+      write("stderr", redactors.stderr.flush());
+    },
+    result: () => ({ stdout, stderr }),
+  };
+};
+
+const handleProcessEvent = (
+  event: ProcessLogEvent,
+  output: OutputCollector,
+  exitCode: number | undefined,
+): number | undefined => {
+  const stream = outputStreams[event.type];
+  if (stream) {
+    output.push(stream, eventData(event, ""));
+    return exitCode;
+  }
+  if (event.type === "error") throw new Error(eventData(event, "process log stream failed"));
+  return streamExitCode(event.exitCode, exitCode);
+};
+
+const eventData = (event: ProcessLogEvent, fallback: string): string =>
+  event.data === undefined ? fallback : event.data;
+
+const streamExitCode = (
+  eventExitCode: number | undefined,
+  exitCode: number | undefined,
+): number => {
+  if (eventExitCode !== undefined) return eventExitCode;
+  return exitCode === undefined ? 1 : exitCode;
+};
+
+const resolveExitCode = async (
+  sandbox: RunnerSandbox,
+  process: SandboxProcess,
+  exitCode: number | undefined,
+): Promise<number> => {
+  if (exitCode !== undefined) return exitCode;
+  const refreshed = await sandbox.getProcess(process.id);
+  if (refreshed?.exitCode === undefined)
+    throw new Error(`process ${process.id} ended without an exit code`);
+  return refreshed.exitCode;
+};
+
+const collectResult = async (
+  sandbox: RunnerSandbox,
+  process: SandboxProcess,
+  request: RunnerRequest,
+  log: RunnerAdapterOptions["log"],
+): Promise<ExecResult> => {
+  const output = createOutputCollector(request, log);
+  let exitCode = process.exitCode;
   const stream = await sandbox.streamProcessLogs(process.id);
-  for await (const event of parseSSEStream<{
-    type: "stdout" | "stderr" | "exit" | "complete" | "error";
-    data?: string;
-    exitCode?: number;
-  }>(stream)) {
-    if (event.type === "stdout" || event.type === "stderr") {
-      write(event.type, redactors[event.type].push(event.data ?? ""));
-    } else if (event.type === "exit" || event.type === "complete") {
-      exitCode = event.exitCode ?? exitCode ?? 1;
-    } else if (event.type === "error") {
-      throw new Error(event.data ?? "process log stream failed");
-    }
-  }
-  write("stdout", redactors.stdout.flush());
-  write("stderr", redactors.stderr.flush());
-  if (exitCode === undefined) {
-    const refreshed = await sandbox.getProcess(process.id);
-    exitCode = refreshed?.exitCode;
-  }
-  if (exitCode === undefined) throw new Error(`process ${process.id} ended without an exit code`);
+  for await (const event of parseSSEStream<ProcessLogEvent>(stream))
+    exitCode = handleProcessEvent(event, output, exitCode);
+  output.flush();
   const endTime = process.endTime?.getTime() ?? Date.now();
   return {
-    exitCode,
-    stdout,
-    stderr,
+    exitCode: await resolveExitCode(sandbox, process, exitCode),
+    ...output.result(),
     durationMs: Math.max(0, endTime - process.startTime.getTime()),
   };
 };
