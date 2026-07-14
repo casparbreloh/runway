@@ -33,8 +33,10 @@ test("starts webhook and cron workflows in the Workers runtime", async () => {
         signatureHeader: "linear-signature",
       }),
   }).handler(async (ctx, event) => {
-    seen.push(await ctx.step("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: event })));
-    await ctx.sleep(10);
+    seen.push(
+      await ctx.step.do("record", () => ({ key: ctx.secrets.LINEAR_API_KEY, params: event })),
+    );
+    await ctx.step.sleep("settle", 10);
   });
   const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(
     (ctx, event) => {

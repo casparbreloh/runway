@@ -39,11 +39,7 @@ const generateTestWorker = (
 ): string => generateWorker(testRegistry, { cwd, modules, workflowLoaders });
 
 const moduleOf = (name: string, def: WorkflowDefinition): string =>
-  `import { LinearClient } from "@linear/sdk";
-export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {
-  void LinearClient;
-} };
-`;
+  `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
 
 const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
   const cwd = await mkdtemp(
@@ -76,7 +72,6 @@ interface ApiCalls {
   workflowUpdates: unknown[];
   workflowDeletes: unknown[];
   subdomains: unknown[];
-  containerCreates: unknown[];
 }
 
 const fakeApi = (
@@ -84,7 +79,6 @@ const fakeApi = (
   opts: {
     workflows?: ReadonlyArray<{ name: string; script_name: string }>;
     accounts?: ReadonlyArray<{ id: string }>;
-    scripts?: ReadonlyArray<{ id: string; migration_tag?: string }>;
     secrets?: ReadonlyArray<{ name: string }>;
     secretsError?: unknown;
   } = {},
@@ -94,7 +88,6 @@ const fakeApi = (
   },
   workers: {
     scripts: {
-      list: async () => opts.scripts ?? [],
       update: async (...args) => {
         calls.scriptUpdates.push(args[0]);
         calls.metadata = args[1].metadata;
@@ -105,21 +98,6 @@ const fakeApi = (
           return opts.secrets ?? [];
         },
         bulkUpdate: async () => {},
-      },
-      versions: {
-        list: async () => [{ id: "version" }],
-        get: async () => ({
-          resources: {
-            bindings: [
-              {
-                type: "durable_object_namespace",
-                name: "Sandbox",
-                class_name: "Sandbox",
-                namespace_id: "sandbox-namespace",
-              },
-            ],
-          },
-        }),
       },
       schedules: {
         update: async (...args) => {
@@ -145,14 +123,6 @@ const fakeApi = (
       calls.workflowDeletes.push(args);
     },
   },
-  containers: {
-    applications: {
-      list: async () => [],
-      create: async (...args) => {
-        calls.containerCreates.push(args);
-      },
-    },
-  },
 });
 
 const emptyCalls = (): ApiCalls => ({
@@ -160,7 +130,6 @@ const emptyCalls = (): ApiCalls => ({
   workflowUpdates: [],
   workflowDeletes: [],
   subdomains: [],
-  containerCreates: [],
 });
 
 const deployEnv = {
@@ -266,12 +235,8 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
     );
     expect(generated).toContain("...secretsFor(parentEnv, workflowId)");
     expect(generated).not.toContain("secretBindings");
-    expect(generated).toContain('export { Sandbox } from "@cloudflare/sandbox";');
+    expect(generated).not.toContain("Sandbox");
     expect(generated).toContain("export { DynamicWorkflowBinding }");
-    expect(generated).toContain("export class RunwaySandboxBinding");
-    expect(generated).toContain(
-      '"RUNWAY_SANDBOX": ctx.exports.RunwaySandboxBinding({ props: {} })',
-    );
     expect(generated).toContain("wrapWorkflowBinding({ workflowId })");
     expect(generated).not.toContain("wrapWorkflowBinding({ workflowId, loaderId })");
     expect(result).toEqual({
@@ -282,8 +247,6 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       compatibility_flags?: ReadonlyArray<string>;
       keep_bindings?: ReadonlyArray<string>;
       bindings: ReadonlyArray<unknown>;
-      containers?: ReadonlyArray<unknown>;
-      migrations?: unknown;
     };
     expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
     expect(metadata.keep_bindings).toEqual(["secret_text"]);
@@ -295,41 +258,11 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         workflow_name: "runway-ship-it",
         class_name: "DynamicWorkflow",
       },
-      { type: "durable_object_namespace", name: "Sandbox", class_name: "Sandbox" },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
       { type: "secret_text", name: "LINEAR_API_KEY", text: "key-value" },
     ]);
-    expect(metadata.containers).toEqual([
-      {
-        class_name: "Sandbox",
-        image: "docker.io/cloudflare/sandbox:0.12.1",
-        instance_type: "lite",
-      },
-    ]);
-    expect(metadata.migrations).toEqual({
-      new_tag: "runway-sandbox-v1",
-      new_sqlite_classes: ["Sandbox"],
-    });
-    expect(calls.containerCreates).toEqual([
-      [
-        {
-          account_id: "account",
-          body: {
-            name: "runway-ship-it-Sandbox",
-            scheduling_policy: "default",
-            configuration: {
-              image: "docker.io/cloudflare/sandbox:0.12.1",
-              instance_type: "lite",
-            },
-            instances: 0,
-            max_instances: 20,
-            constraints: { tiers: [1, 2] },
-            durable_objects: { namespace_id: "sandbox-namespace" },
-            rollout_active_grace_period: 0,
-          },
-        },
-      ],
-    ]);
+    expect(metadata).not.toHaveProperty("containers");
+    expect(metadata).not.toHaveProperty("migrations");
     expect(calls.scriptUpdates).toEqual(["runway-ship-it"]);
     expect(calls.workflowUpdates).toEqual([
       [
@@ -379,27 +312,6 @@ test("deploy accepts an explicit script name override", async () => {
   }
 });
 
-test("deploy does not replay the sandbox migration after it has been applied", async () => {
-  const project = await writeProject();
-  const calls = emptyCalls();
-  const client = fakeApi(calls, {
-    scripts: [{ id: "runway-ship-it", migration_tag: "runway-sandbox-v1" }],
-  });
-
-  try {
-    await deploy(registry, {
-      cwd: project.cwd,
-      env: deployEnv,
-      client: () => client,
-    });
-
-    const metadata = calls.metadata as { migrations?: unknown };
-    expect(metadata.migrations).toBeUndefined();
-  } finally {
-    await project.cleanup();
-  }
-});
-
 test("deploy rejects a secret that collides with a runway binding", async () => {
   const colliding: Registry = [
     {
@@ -434,41 +346,6 @@ test("deploy rejects a secret that collides with a runway binding", async () => 
         wranglerAuth: false,
       }),
     ).rejects.toThrow('binding "WORKFLOWS" is used by Runway workflow binding and a secret');
-    expect(calls.metadata).toBeUndefined();
-  } finally {
-    await project.cleanup();
-  }
-});
-
-test("deploy rejects a secret that collides with the sandbox binding", async () => {
-  const colliding: Registry = [
-    {
-      path: ".runway/workflows/colliding.ts",
-      exportName: "default",
-      def: workflow({
-        id: "colliding",
-        secrets: ["Sandbox"],
-        trigger: () => cron("0 9 * * *"),
-      }).handler(async () => {}),
-    },
-  ];
-  const project = await writeProject();
-  const calls = emptyCalls();
-  const client = fakeApi(calls);
-
-  try {
-    await expect(
-      deploy(colliding, {
-        cwd: project.cwd,
-        env: {
-          CLOUDFLARE_API_TOKEN: "token",
-          CLOUDFLARE_ACCOUNT_ID: "account",
-          Sandbox: "secret-value",
-        },
-        client: () => client,
-        wranglerAuth: false,
-      }),
-    ).rejects.toThrow('binding "Sandbox" is used by Runway sandbox binding and a secret');
     expect(calls.metadata).toBeUndefined();
   } finally {
     await project.cleanup();

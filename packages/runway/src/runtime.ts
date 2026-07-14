@@ -1,5 +1,3 @@
-import { getSandbox } from "@cloudflare/sandbox";
-import type { Sandbox } from "@cloudflare/sandbox";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
@@ -15,30 +13,14 @@ interface WorkflowBinding {
 
 type DynamicWorkerEnv = Record<string, unknown> & {
   WORKFLOWS?: WorkflowBinding;
-  Sandbox?: DurableObjectNamespace<Sandbox>;
-  RUNWAY_SANDBOX?: {
-    exec(name: string, command: string, options?: unknown): Promise<unknown>;
-    writeFile(name: string, path: string, content: unknown, options?: unknown): Promise<unknown>;
-  };
 };
 
-const primitives = (step: WorkflowStep, env: unknown): Primitives => ({
-  step: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-    step.do(id, fn as () => Promise<never>) as Promise<T>,
-  sandbox: async (name) => {
-    const runtime = env as DynamicWorkerEnv;
-    const bridge = runtime.RUNWAY_SANDBOX;
-    if (bridge) {
-      return {
-        exec: (command: string, options?: unknown) => bridge.exec(name, command, options),
-        writeFile: (path: string, content: unknown, options?: unknown) =>
-          bridge.writeFile(name, path, content, options),
-      } as Sandbox;
-    }
-    if (!runtime.Sandbox) throw new Error("missing sandbox binding: Sandbox");
-    return getSandbox(runtime.Sandbox, name);
+const primitives = (step: WorkflowStep): Primitives => ({
+  step: {
+    do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+      step.do(id, fn as () => Promise<never>) as Promise<T>,
+    sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
   },
-  sleep: (id: string, ms: number): Promise<void> => step.sleep(id, ms),
 });
 
 export const toEntrypoint = (
@@ -47,7 +29,7 @@ export const toEntrypoint = (
   class extends WorkflowEntrypoint<unknown, unknown> {
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       return await def.handler(
-        makeCtx(primitives(step, this.env), {
+        makeCtx(primitives(step), {
           runId: event.instanceId,
           secrets: secretsOf(def.secrets, this.env),
           env: this.env,

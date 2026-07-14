@@ -4,7 +4,7 @@ import type { Ctx, Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger 
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
-export const validateWorkflowId = (id: string): void => {
+const validateWorkflowId = (id: string): void => {
   if (!ID.test(id)) {
     throw new Error(`invalid workflow id ${JSON.stringify(id)}: must be kebab-case`);
   }

@@ -29,11 +29,10 @@ export interface TestWebhookOptions {
 }
 
 const primitives: Primitives = {
-  step: (_id, fn) => fn(),
-  sandbox: () => {
-    throw new Error("test sandbox is not configured");
+  step: {
+    do: (_id, fn) => fn(),
+    sleep: () => Promise.resolve(),
   },
-  sleep: () => Promise.resolve(),
 };
 
 export const createTestWorker = (
