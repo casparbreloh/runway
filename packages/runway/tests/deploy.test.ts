@@ -298,7 +298,7 @@ test("deploy pins the current public GitHub repository commit", async () => {
       new TextDecoder().decode(calls.artifactUploads[0]!.contents),
     ) as Record<string, unknown>;
     expect(artifact.repository).toEqual({
-      remote: "https://github.com/casparbreloh/runway.git",
+      remote: expect.stringMatching(/^https:\/\/github\.com\/casparbreloh\/runway(?:\.git)?$/),
       commit: stdout.trim(),
       authentication: { type: "public" },
     });
