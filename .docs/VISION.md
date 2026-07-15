@@ -42,6 +42,8 @@ over 30 seconds before reporting success.
 The managed runner currently provides:
 
 - One lazy, isolated Sandbox workspace per workflow run.
+- Exact public-repository checkout in `/workspace` before the first command and transparent
+  reconstruction after Sandbox replacement.
 - Deterministic process ids and reconnection when a command step retries on the same container.
 - Bounded stdout and stderr tails with declared-secret redaction.
 - Typed non-zero failures, process-tree timeout cleanup, and active termination monitoring.
@@ -98,7 +100,7 @@ generated workspace state only if measured restore cost is materially better tha
 
 ### Phase 1: Repository Bootstrap And Recovery
 
-This is the next implementation phase.
+The core public-repository implementation shipped on 2026-07-15:
 
 - Introduce an internal repository source descriptor containing the remote, exact commit SHA, and
   an internal authentication capability. Do not add a public checkout DSL.
@@ -106,9 +108,14 @@ This is the next implementation phase.
 - Detect a fresh Sandbox placement or missing prepared workspace before later commands and
   reconstruct the same commit exactly once for that placement.
 - Keep command ergonomics unchanged: ordinary workflows continue to call `step.exec()`.
-- Support public repositories first, then private repositories through short-lived GitHub App
-  credentials without exposing credentials to command output.
-- Add seam tests and a repeatable live smoke test that forces `Sandbox.destroy()` between commands.
+- Support public repositories.
+- Add deployment, artifact-runtime, and managed-runner seam tests.
+
+The remaining Phase 1 work is operational validation and private-repository access:
+
+- Support private repositories through short-lived GitHub App credentials without exposing
+  credentials to command output.
+- Add a repeatable live smoke test that forces `Sandbox.destroy()` between commands.
 - Measure cold container start, checkout time, transferred bytes, and recovery overhead.
 
 Phase 1 is complete when a workflow can check out an exact commit, lose its Sandbox, transparently
