@@ -9,6 +9,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
 const REPOSITORY_GENERATION = "/tmp/runway-checkout-generation";
 const REPOSITORY_MARKER = "/tmp/runway-repository";
+const REPOSITORY_METRICS = "/tmp/runway-repository-metrics";
 const REPOSITORY_GIT_DIRECTORY = "/workspace/.git";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -110,7 +111,7 @@ const checkoutCommand = (repository: RepositorySource, generation: number): stri
   const remote = shellQuote(repository.remote);
   const commit = shellQuote(repository.commit);
   const marker = shellQuote(repositoryMarker(repository));
-  return `set -eu; rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; git -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
+  return `set -eu; started_at=$(date +%s%3N); rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; fetch_started_at=$(date +%s%3N); git -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; fetch_completed_at=$(date +%s%3N); git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; completed_at=$(date +%s%3N); pack_bytes=$(find /workspace/.git/objects/pack -type f -name '*.pack' -exec wc -c {} + | awk '{ total += $1 } END { print total + 0 }'); printf '{"commit":"%s","generation":%s,"prepareStartedAtMs":%s,"sandboxReadyAtMs":%s,"startedAtMs":%s,"fetchMs":%s,"checkoutMs":%s,"packBytes":%s}' ${commit} ${generation} "$RUNWAY_PREPARE_STARTED_AT_MS" "$RUNWAY_SANDBOX_READY_AT_MS" "$started_at" "$((fetch_completed_at - fetch_started_at))" "$((completed_at - started_at))" "$pack_bytes" > ${REPOSITORY_METRICS}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
 };
 
 const killProcessGroup = async (sandbox: RunnerSandbox, process: SandboxProcess): Promise<void> => {
@@ -256,7 +257,9 @@ const prepareRepository = async (
   repository: RepositorySource,
   log: RunnerAdapterOptions["log"],
 ): Promise<void> => {
+  const prepareStartedAtMs = Date.now();
   const marker = await sandbox.exists(REPOSITORY_MARKER);
+  const sandboxReadyAtMs = Date.now();
   if (marker.exists) {
     const stored = await sandbox.readFile(REPOSITORY_MARKER);
     const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
@@ -277,7 +280,11 @@ const prepareRepository = async (
         processId,
         autoCleanup: false,
         cwd: "/",
-        env: { CI: "true" },
+        env: {
+          CI: "true",
+          RUNWAY_PREPARE_STARTED_AT_MS: String(prepareStartedAtMs),
+          RUNWAY_SANDBOX_READY_AT_MS: String(sandboxReadyAtMs),
+        },
       });
     } catch (error) {
       process = await sandbox.getProcess(processId);
