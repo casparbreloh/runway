@@ -8,7 +8,6 @@
     "format-check": "oxfmt --check",
     "fallow": "fallow --ci --no-cache",
     "lint": "oxlint",
-    "smoke:repository-recovery": "node packages/runway/tests/live-repository-recovery-smoke.ts",
     "test": "vitest run",
     "typecheck": "tsgo --build"
   },
