@@ -10,6 +10,7 @@ import { expect, test } from "vitest";
 
 import { deploy, deployWithAdapters } from "../src/deploy.ts";
 import type { CloudflareApi } from "../src/deploy.ts";
+import { repositoryFixture } from "./repository-fixture.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -200,12 +201,6 @@ const deployEnv = {
   LINEAR_API_KEY: "key-value",
 };
 
-const repository = {
-  remote: "https://github.com/casparbreloh/runway.git",
-  commit: "1328fb0d0e8629a84abc11d820715cb5c78b629c",
-  authentication: { type: "public" as const },
-};
-
 const deployReady = async (
   calls: ApiCalls,
   opts: Parameters<typeof deploy>[1] & {
@@ -215,7 +210,7 @@ const deployReady = async (
   const { client, ...context } = opts;
   return await deployWithAdapters(registry, context, {
     client,
-    repository,
+    repository: repositoryFixture,
     reachable: async () => {},
     ready: async ({ deploymentId }) => {
       expect(calls.metadata).toBeDefined();
@@ -267,14 +262,14 @@ test("deploy stores immutable workflow artifacts before uploading the host Worke
         scriptName: "runway-ship-it",
         workflowId: "hello",
         secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
-        repository,
+        repository: repositoryFixture,
         source: "string",
       },
       {
         scriptName: "runway-ship-it",
         workflowId: "daily",
         secrets: [],
-        repository,
+        repository: repositoryFixture,
         source: "string",
       },
     ]);
@@ -324,14 +319,16 @@ test("deploy rejects a commit that the repository remote cannot reconstruct", as
         { cwd: project.cwd, env: deployEnv },
         {
           client: () => client,
-          repository,
+          repository: repositoryFixture,
           reachable: async () => {
-            throw new Error(`repository remote does not contain commit ${repository.commit}`);
+            throw new Error(
+              `repository remote does not contain commit ${repositoryFixture.commit}`,
+            );
           },
           ready: async () => {},
         },
       ),
-    ).rejects.toThrow(`repository remote does not contain commit ${repository.commit}`);
+    ).rejects.toThrow(`repository remote does not contain commit ${repositoryFixture.commit}`);
     expect(calls.artifactUploads).toEqual([]);
     expect(calls.scriptUpdates).toEqual([]);
   } finally {
@@ -448,6 +445,8 @@ test("deploy emits final progress and returns webhook urls only after readiness"
       },
       {
         client: () => fakeApi(calls),
+        repository: repositoryFixture,
+        reachable: async () => {},
         ready: async () => {
           observations += 1;
           expect(progress.filter((event) => event.step === "deploy")).toEqual([

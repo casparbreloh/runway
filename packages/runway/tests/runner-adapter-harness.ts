@@ -1,12 +1,11 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { createRunnerAdapter } from "../src/runner-adapter.ts";
+import { repositoryFixture } from "./repository-fixture.ts";
 
-const repository = {
-  remote: "https://github.com/casparbreloh/runway.git",
-  commit: "1328fb0d0e8629a84abc11d820715cb5c78b629c",
-  authentication: { type: "public" as const },
-};
+const repository = repositoryFixture;
+const repositoryMarker = "/tmp/runway-repository";
+const repositoryHead = "/workspace/.git/HEAD";
 
 interface HarnessProcess {
   id: string;
@@ -94,9 +93,7 @@ class TestSandbox {
   }
 
   async exists(path: string): Promise<{ exists: boolean }> {
-    return this.hooks.exists
-      ? await this.hooks.exists(path, this)
-      : { exists: this.files.has(path) };
+    return this.hooks.exists ? await this.hooks.exists(path, this) : { exists: this.hasPath(path) };
   }
 
   async readFile(path: string): Promise<{ success: boolean; content: string }> {
@@ -107,6 +104,12 @@ class TestSandbox {
   replace(): void {
     this.process = null;
     this.files.clear();
+  }
+
+  hasPath(path: string): boolean {
+    return (
+      this.files.has(path) || [...this.files.keys()].some((file) => file.startsWith(`${path}/`))
+    );
   }
 }
 
@@ -136,7 +139,10 @@ const adapterOf = (
   log: (chunk: string) => void = () => {},
   prepared = true,
 ) => {
-  if (prepared) sandbox.files.set("/workspace/.runway-checkout", JSON.stringify(repository));
+  if (prepared) {
+    sandbox.files.set(repositoryMarker, JSON.stringify(repository));
+    sandbox.files.set(repositoryHead, repository.commit);
+  }
   return createRunnerAdapter({
     sandbox: async () => sandbox,
     repository,
@@ -154,7 +160,10 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     const checkoutProcesses = new Map<string, HarnessProcess>();
     const sandbox = new TestSandbox({
       exists: async (path) => {
-        if (path !== "/workspace/.runway-checkout") return { exists: false };
+        if (path !== repositoryMarker) {
+          return { exists: sandbox.hasPath(path) };
+        }
+        if (sandbox.files.has(path)) return { exists: true };
         markerChecks += 1;
         if (markerChecks === 2) release();
         await checked;
@@ -164,7 +173,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
         if (options.processId.startsWith("checkout-")) {
           if (checkoutProcesses.has(options.processId)) throw new Error("duplicate process");
           checkoutRuns += 1;
-          current.files.set("/workspace/.runway-checkout", JSON.stringify(repository));
+          current.files.set(repositoryMarker, JSON.stringify(repository));
+          current.files.set(repositoryHead, repository.commit);
           current.files.set("/tmp/runway-checkout-generation", "1");
         } else {
           commandRuns += 1;
@@ -198,14 +208,17 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
   async repositoryRecovery(): Promise<unknown> {
     let checkoutRuns = 0;
     let commandRuns = 0;
+    const commitsSeen: Array<string | undefined> = [];
     const sandbox = new TestSandbox({
       startProcess: async (command, options, current) => {
         if (options.processId.startsWith("checkout-")) {
           checkoutRuns += 1;
-          current.files.set("/workspace/.runway-checkout", JSON.stringify(repository));
+          current.files.set(repositoryMarker, JSON.stringify(repository));
+          current.files.set(repositoryHead, repository.commit);
           current.files.set("/tmp/runway-checkout-generation", "1");
         } else {
           commandRuns += 1;
+          commitsSeen.push(current.files.get(repositoryHead));
         }
         return {
           id: options.processId,
@@ -224,7 +237,12 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     sandbox.replace();
     await adapter.exec(requestOf("third", { runId: "run-repository", stepId: "third" }));
 
-    return { checkoutRuns, commandRuns };
+    return {
+      checkoutRuns,
+      commandRuns,
+      commitsSeen,
+      repositoryFiles: [...sandbox.files.keys()].filter((path) => path.startsWith("/workspace/")),
+    };
   }
 
   async retry(): Promise<unknown> {
@@ -305,7 +323,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
           throw new Error(`startProcess exposed ${secret}`);
         },
       });
-      sandbox.files.set("/workspace/.runway-checkout", JSON.stringify(repository));
+      sandbox.files.set(repositoryMarker, JSON.stringify(repository));
+      sandbox.files.set(repositoryHead, repository.commit);
       try {
         await createRunnerAdapter({
           sandbox: async () => {
@@ -378,7 +397,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       },
       destroy: async () => Promise.reject(new Error("termination exposed termination-secret")),
     });
-    sandbox.files.set("/workspace/.runway-checkout", JSON.stringify(repository));
+    sandbox.files.set(repositoryMarker, JSON.stringify(repository));
+    sandbox.files.set(repositoryHead, repository.commit);
     const result = await createRunnerAdapter({
       sandbox: async () => sandbox,
       repository,

@@ -8,7 +8,8 @@ import type { ExecResult } from "./types.ts";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
 const REPOSITORY_GENERATION = "/tmp/runway-checkout-generation";
-const REPOSITORY_MARKER = "/workspace/.runway-checkout";
+const REPOSITORY_MARKER = "/tmp/runway-repository";
+const REPOSITORY_GIT_DIRECTORY = "/workspace/.git";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -258,7 +259,9 @@ const prepareRepository = async (
   const marker = await sandbox.exists(REPOSITORY_MARKER);
   if (marker.exists) {
     const stored = await sandbox.readFile(REPOSITORY_MARKER);
-    if (stored.success && stored.content === repositoryMarker(repository)) return;
+    const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+    if (stored.success && stored.content === repositoryMarker(repository) && checkout.exists)
+      return;
   }
   const checkoutRequest: RunnerRequest = {
     ...request,
@@ -297,7 +300,12 @@ const prepareRepository = async (
       throw new Error(`repository checkout failed with code ${result.exitCode}: ${result.stderr}`);
     }
     const prepared = await sandbox.readFile(REPOSITORY_MARKER);
-    if (!prepared.success || prepared.content !== repositoryMarker(repository)) {
+    const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+    if (
+      !prepared.success ||
+      prepared.content !== repositoryMarker(repository) ||
+      !checkout.exists
+    ) {
       await sandbox.destroy();
       throw new Error("repository checkout did not prepare the expected source");
     }

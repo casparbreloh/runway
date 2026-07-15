@@ -3,6 +3,8 @@ import { env, exports } from "cloudflare:workers";
 import * as runtime from "runway/runtime";
 import { beforeEach, expect, test, vi } from "vitest";
 
+import { repositoryFixture } from "./repository-fixture.ts";
+
 const testRunner = exports.TestRunner({ props: {} });
 const adapterHarness = exports.RunnerAdapterHarness({ props: {} });
 const disposable = <T>(result: Promise<T>): Promise<T> & Disposable =>
@@ -92,7 +94,12 @@ test("a retried command reconnects to its deterministic process without starting
 test("repository commands prepare once and reconstruct after Sandbox replacement", async () => {
   using result = disposable(adapterHarness.repositoryRecovery());
 
-  await expect(result).resolves.toEqual({ checkoutRuns: 2, commandRuns: 3 });
+  await expect(result).resolves.toEqual({
+    checkoutRuns: 2,
+    commandRuns: 3,
+    commitsSeen: [repositoryFixture.commit, repositoryFixture.commit, repositoryFixture.commit],
+    repositoryFiles: ["/workspace/.git/HEAD"],
+  });
 });
 
 test("concurrent repository commands perform one checkout for a Sandbox placement", async () => {
