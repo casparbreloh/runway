@@ -22,6 +22,18 @@ export interface RunnerBridge {
   destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
 }
 
+export interface HostCapability {
+  secrets(): Promise<Readonly<Record<string, string>>>;
+  captureSecrets(runId: string): Promise<string>;
+  restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;
+  exec(
+    request: Omit<Parameters<RunnerBridge["exec"]>[0], "secrets"> & {
+      readonly secrets: Readonly<Record<string, string>>;
+    },
+  ): Promise<ExecResult>;
+  destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
+}
+
 type DurableExec = (
   callback: (step: {
     readonly step: { readonly count: number };
@@ -46,24 +58,22 @@ const normalize = (command: string | ExecOptions): NormalizedExecOptions => {
 export class ManagedRunner {
   private started = false;
   private cleaned = false;
-  private readonly bridge: RunnerBridge | undefined;
+  private readonly host: HostCapability;
   private readonly runId: string;
-  private readonly secrets: ReadonlyArray<string>;
+  private readonly secrets: Readonly<Record<string, string>>;
 
-  constructor(bridge: RunnerBridge | undefined, runId: string, secrets: ReadonlyArray<string>) {
-    this.bridge = bridge;
+  constructor(host: HostCapability, runId: string, secrets: Readonly<Record<string, string>>) {
+    this.host = host;
     this.runId = runId;
     this.secrets = secrets;
   }
 
   async exec(id: string, command: string | ExecOptions, durable: DurableExec): Promise<ExecResult> {
     const options = normalize(command);
-    const bridge = this.bridge;
-    if (!bridge) throw new Error("missing runner binding: RUNWAY_RUNNER");
     this.started = true;
     const result = await durable(
       async (step) =>
-        await bridge.exec({
+        await this.host.exec({
           runId: this.runId,
           step: { id, count: step.step.count, attempt: step.attempt },
           options,
@@ -71,18 +81,19 @@ export class ManagedRunner {
         }),
     );
     if (result.exitCode !== 0) {
-      throw new ExecError(id, redactSecrets(options.command, this.secrets), {
+      const values = Object.values(this.secrets);
+      throw new ExecError(id, redactSecrets(options.command, values), {
         ...result,
-        stdout: redactSecrets(result.stdout, this.secrets),
-        stderr: redactSecrets(result.stderr, this.secrets),
+        stdout: redactSecrets(result.stdout, values),
+        stderr: redactSecrets(result.stderr, values),
       });
     }
     return result;
   }
 
   async cleanup(): Promise<void> {
-    if (!this.started || this.cleaned || !this.bridge) return;
-    await this.bridge.destroy(this.runId, this.secrets);
+    if (!this.started || this.cleaned) return;
+    await this.host.destroy(this.runId, this.secrets);
     this.cleaned = true;
   }
 }

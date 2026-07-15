@@ -15,6 +15,11 @@ export const secretNamesOf = (registry: Registry): ReadonlyArray<string> => [
   ...new Set(registry.flatMap((w) => w.def.secrets)),
 ];
 
+export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
+  registry.flatMap((workflow) =>
+    workflow.def.trigger.type === "cron" ? [workflow.def.trigger.expression] : [],
+  );
+
 const INCLUDE = [".runway/workflows/**/*.ts"];
 const EXCLUDE = ["**/*.test.ts", "**/*.spec.ts", "**/*.d.ts"];
 

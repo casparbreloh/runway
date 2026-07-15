@@ -144,6 +144,7 @@ test("secrets set validates command shape before auth", async () => {
   const invalidName = await run(["secrets", "set", "not-valid", "value"]);
   const missingValue = await run(["secrets", "set", "LINEAR_API_KEY"]);
   const extraArg = await run(["secrets", "set", "LINEAR_API_KEY", "value", "extra"]);
+  const reserved = await run(["secrets", "set", "RUNWAY_SECRET_SNAPSHOT_KEY", "value"]);
 
   expect(invalidName.code).toBe(1);
   expect(invalidName.output).toMatch(/runway: secrets failed/);
@@ -152,4 +153,6 @@ test("secrets set validates command shape before auth", async () => {
   expect(missingValue.output).toMatch(/usage: runway secrets set <name> <value>/);
   expect(extraArg.code).toBe(1);
   expect(extraArg.output).toMatch(/usage: runway secrets set <name> <value>/);
+  expect(reserved.code).toBe(1);
+  expect(reserved.output).toMatch(/secret "RUNWAY_SECRET_SNAPSHOT_KEY" is reserved by Runway/);
 });

@@ -5,12 +5,12 @@ import { defineCommand, runMain } from "citty";
 import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
-import { COMPATIBILITY_DATE } from "../src/codegen.ts";
 import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
 import { resolveScriptName } from "../src/naming.ts";
 import { loadRegistry } from "../src/registry.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
 import type { ProgressEvent } from "../src/types.ts";
+import { COMPATIBILITY_DATE, isSecretSnapshotKeyBinding } from "../src/worker-contract.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
@@ -61,6 +61,9 @@ const parseSecretsSet = (args: ReadonlyArray<string>): { name: string; value: st
     throw new Error("usage: runway secrets set <name> <value>");
   }
   validateSecrets([name]);
+  if (isSecretSnapshotKeyBinding(name)) {
+    throw new Error(`secret ${JSON.stringify(name)} is reserved by Runway`);
+  }
   return { name, value };
 };
 

@@ -111,6 +111,27 @@ test("step.exec delegates string and options commands with their durable ids", a
   ]);
 });
 
+test("workflow steps cannot use Runway's internal id namespace", () => {
+  const primitives: Primitives = {
+    step: {
+      do: async (_id, fn) => await fn(),
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
+      sleep: async () => {},
+    },
+  };
+  const ctx = makeCtx(primitives, { runId: "run-1", secrets: {}, env: {} });
+
+  expect(() => ctx.step.do("runway:secret-snapshot", () => undefined)).toThrow(
+    'step id "runway:secret-snapshot" is reserved by Runway',
+  );
+  expect(() => ctx.step.exec("runway:command", "true")).toThrow(
+    'step id "runway:command" is reserved by Runway',
+  );
+  expect(() => ctx.step.sleep("runway:wait", 1)).toThrow(
+    'step id "runway:wait" is reserved by Runway',
+  );
+});
+
 test("schema validation and filtering narrow the handler event", () => {
   const schema: StandardSchemaV1<unknown, { action: string }> = {
     "~standard": {

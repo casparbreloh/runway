@@ -1,4 +1,3 @@
-export const RUNNER_BRIDGE_BINDING = "RUNWAY_RUNNER";
 export const SANDBOX_BINDING = "RunwaySandbox";
 export const SANDBOX_CLASS = "Sandbox";
 export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.3";
