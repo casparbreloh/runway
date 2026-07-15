@@ -1,199 +1,83 @@
 import path from "node:path";
 
-import { RUNNER_BRIDGE_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
-import type { RegisteredWorkflow } from "./types.ts";
-import type { Registry } from "./types.ts";
+import type { RegisteredWorkflow, Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
+import { DYNAMIC_WORKFLOW_CLASS, RUNWAY_WORKFLOW_CLASS } from "./worker-contract.ts";
 
-export const COMPATIBILITY_DATE = "2026-06-06";
-export const WORKFLOW_BINDING = "WORKFLOWS";
-export const LOADER_BINDING = "LOADER";
-export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
-const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
-
-export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
-  registry.flatMap((w) => (w.def.trigger.type === "cron" ? [w.def.trigger.expression] : []));
-
-const toPosix = (p: string): string => p.split(path.sep).join(path.posix.sep);
+const toPosix = (value: string): string => value.split(path.sep).join(path.posix.sep);
 
 const relImport = (cwd: string, module: string): string => {
-  const rel = path.posix.relative(toPosix(cwd), toPosix(module));
-  return rel.startsWith("./") || rel.startsWith("../") ? rel : `./${rel}`;
+  const relative = path.posix.relative(toPosix(cwd), toPosix(module));
+  return relative.startsWith("./") || relative.startsWith("../") ? relative : `./${relative}`;
 };
 
-const workflowRef = (index: number, exportName: string): string =>
-  exportName === "default" ? `__m${index}.default` : `__m${index}[${JSON.stringify(exportName)}]`;
+const workflowRef = (exportName: string): string =>
+  exportName === "default"
+    ? "workflowModule.default"
+    : `workflowModule[${JSON.stringify(exportName)}]`;
 
 export const generateDynamicWorker = (
   workflow: RegisteredWorkflow,
   opts: { cwd: string },
 ): string => {
-  const ref = workflowRef(0, workflow.exportName);
-  return `import * as __m0 from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, workflow.path)))};
+  const ref = workflowRef(workflow.exportName);
+  return `import * as workflowModule from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, workflow.path)))};
 import { createWorkflowWorker, toEntrypoint } from "runway/runtime";
 
-export class ${RUNWAY_WORKFLOW_CLASS} extends toEntrypoint(${ref}) {}
+const workflow = ${ref};
 
-export default createWorkflowWorker();
+export class ${RUNWAY_WORKFLOW_CLASS} extends toEntrypoint(workflow) {}
+
+export default createWorkflowWorker(workflow);
 `;
 };
 
-export const generateWorker = (
+export const generateHost = (
   registry: Registry,
   opts: {
-    cwd: string;
-    modules: Readonly<Record<string, string>>;
-    workflowLoaders: Readonly<Record<string, string>>;
+    scriptName: string;
+    workflowArtifacts: Readonly<Record<string, string>>;
+    deploymentId: string;
+    secretSnapshotKey: string;
   },
 ): string => {
   validateRegistry(registry);
-  const imports = registry
-    .map(
-      (w, i) =>
-        `import * as __m${i} from ${JSON.stringify(relImport(opts.cwd, path.resolve(opts.cwd, w.path)))};`,
-    )
-    .join("\n");
-  const routes = registry
-    .map(
-      (w, i) =>
-        `  { id: ${JSON.stringify(w.def.id)}, trigger: ${workflowRef(i, w.exportName)}.trigger },`,
-    )
-    .join("\n");
-  const modules = JSON.stringify(opts.modules);
-  const workflowLoaders = JSON.stringify(opts.workflowLoaders);
-  const workflowSecrets = JSON.stringify(
-    Object.fromEntries(registry.map((w) => [w.def.id, w.def.secrets])),
-  );
-  return `${imports}
-import { WorkerEntrypoint } from "cloudflare:workers";
-import { getSandbox } from "@cloudflare/sandbox";
+  const routes = registry.map((workflow) => {
+    const artifactVersion = opts.workflowArtifacts[workflow.def.id]!;
+    return workflow.def.trigger.type === "webhook"
+      ? {
+          id: workflow.def.id,
+          artifactVersion,
+          type: "webhook",
+          path: workflow.def.trigger.path,
+        }
+      : {
+          id: workflow.def.id,
+          artifactVersion,
+          type: "cron",
+          expression: workflow.def.trigger.expression,
+        };
+  });
+  const config = JSON.stringify({
+    scriptName: opts.scriptName,
+    deploymentId: opts.deploymentId,
+    secretSnapshotKey: opts.secretSnapshotKey,
+    routes,
+  });
+  return `import { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
+import { Sandbox } from "@cloudflare/sandbox";
 import {
-  createDynamicWorkflowEntrypoint,
-  DynamicWorkflowBinding,
-  wrapWorkflowBinding,
-  type WorkflowRunner,
-} from "@cloudflare/dynamic-workflows";
-import {
-  createRouter,
-  createRunnerAdapter,
-  type RouterEntry,
-  type WorkflowStarter,
-} from "runway/runtime";
+  RunwayRunnerBinding,
+  createDynamicWorkflow,
+  createHost,
+} from "runway:host-runtime";
 
-export { DynamicWorkflowBinding };
-export { Sandbox } from "@cloudflare/sandbox";
+export { DynamicWorkflowBinding, RunwayRunnerBinding, Sandbox };
 
-interface LoaderStub {
-  getEntrypoint(name?: string): { fetch(req: Request): Promise<Response>; run?: unknown };
-}
+const config = ${config};
 
-interface LoaderBinding {
-  get(
-    name: string,
-    init: () => Promise<{
-      compatibilityDate: string;
-      compatibilityFlags?: ReadonlyArray<string>;
-      mainModule: string;
-      modules: Record<string, string>;
-      env: Record<string, unknown>;
-    }>,
-  ): LoaderStub;
-}
+export const ${DYNAMIC_WORKFLOW_CLASS} = createDynamicWorkflow(config);
 
-interface Env {
-  ${LOADER_BINDING}: LoaderBinding;
-  ${SANDBOX_BINDING}: DurableObjectNamespace;
-  ${WORKFLOW_BINDING}: Workflow;
-}
-
-interface LoaderContext {
-  exports: {
-    RunwayRunnerBinding(options: { props: Record<string, never> }): {
-      exec(request: Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0]): Promise<unknown>;
-      destroy(...args: Parameters<ReturnType<typeof createRunnerAdapter>["destroy"]>): Promise<void>;
-    };
-  };
-}
-
-const modules: Record<string, string> = ${modules};
-const workflowLoaders: Record<string, string> = ${workflowLoaders};
-const workflowSecrets: Record<string, ReadonlyArray<string>> = ${workflowSecrets};
-
-const secretsFor = (parentEnv: Record<string, unknown>, workflowId: string): Record<string, unknown> =>
-  Object.fromEntries(
-    (workflowSecrets[workflowId] ?? []).map((name) => [
-      name,
-      parentEnv[name],
-    ]),
-  );
-
-export class RunwayRunnerBinding extends WorkerEntrypoint<Env> {
-  private adapter(): ReturnType<typeof createRunnerAdapter> {
-    return createRunnerAdapter({
-      sandbox: (runnerId) => getSandbox(this.env.${SANDBOX_BINDING}, runnerId, {
-        enableDefaultSession: false,
-      }),
-      status: async (runId) => await (await this.env.${WORKFLOW_BINDING}.get(runId)).status(),
-      waitUntil: (promise) => this.ctx.waitUntil(promise),
-      log: ({ stream, chunk }) => {
-        if (stream === "stdout") console.log(chunk);
-        else console.error(chunk);
-      },
-    });
-  }
-
-  async exec(request: Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0]): Promise<unknown> {
-    return await this.adapter().exec(request);
-  }
-
-  async destroy(...args: Parameters<ReturnType<typeof createRunnerAdapter>["destroy"]>): Promise<void> {
-    await this.adapter().destroy(...args);
-  }
-}
-
-const loadWorkflow = (env: Env, workflowId: string, ctx: LoaderContext): LoaderStub => {
-  const loaderId = workflowLoaders[workflowId];
-  if (!loaderId) throw new Error(\`unknown workflow: \${workflowId}\`);
-  const code = modules[loaderId];
-  if (!code) throw new Error(\`unknown workflow version: \${loaderId}\`);
-  const parentEnv = env as unknown as Record<string, unknown>;
-  return env.${LOADER_BINDING}.get(loaderId, async () => ({
-    compatibilityDate: ${JSON.stringify(COMPATIBILITY_DATE)},
-    compatibilityFlags: ["nodejs_compat"],
-    mainModule: "index.js",
-    modules: { "index.js": code },
-    env: {
-      ...secretsFor(parentEnv, workflowId),
-      ${JSON.stringify(RUNNER_BRIDGE_BINDING)}: ctx.exports.RunwayRunnerBinding({ props: {} }),
-      ${WORKFLOW_BINDING}: wrapWorkflowBinding({ workflowId }),
-    },
-  }));
-};
-
-export const ${DYNAMIC_WORKFLOW_CLASS} = createDynamicWorkflowEntrypoint<Env>(
-  async ({ env, metadata, ctx }) => {
-    const workflowId = metadata.workflowId;
-    if (typeof workflowId !== "string") throw new Error("missing workflow metadata");
-    return loadWorkflow(env, workflowId, ctx as unknown as LoaderContext).getEntrypoint(${JSON.stringify(RUNWAY_WORKFLOW_CLASS)}) as unknown as WorkflowRunner;
-  },
-);
-
-const starter: WorkflowStarter = {
-  async start(entry: RouterEntry, event: unknown, env: unknown, ctx: unknown) {
-    const response = await loadWorkflow(env as Env, entry.id, ctx as LoaderContext).getEntrypoint().fetch(
-      new Request("https://runway.local/", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(event),
-      }),
-    );
-    if (!response.ok) throw new Error(await response.text());
-    return await response.json() as { id: string };
-  },
-};
-
-export default createRouter([
-${routes}
-], starter);
+export default createHost(config);
 `;
 };

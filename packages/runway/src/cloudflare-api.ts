@@ -53,6 +53,20 @@ export type CloudflareApi = {
       ): Promise<unknown>;
     };
   };
+  r2: {
+    buckets: {
+      get(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      create(params: { account_id: string; name: string }): Promise<unknown>;
+      objects: {
+        upload(
+          bucketName: string,
+          objectKey: string,
+          body: Uint8Array,
+          params: { account_id: string },
+        ): Promise<unknown>;
+      };
+    };
+  };
 };
 
 export const defaultClient = (apiToken: string): CloudflareApi => {
@@ -93,6 +107,7 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
           }),
       },
     },
+    r2: cf.r2,
   };
 };
 
@@ -109,16 +124,16 @@ export const collectResultItems = async <T>(
   collect: (item: unknown) => T | undefined,
 ): Promise<ReadonlyArray<T>> => {
   const values: T[] = [];
-  const result = resultOf(response);
-  if (Array.isArray(result)) {
-    for (const item of result) {
+  if (isAsyncIterable(response)) {
+    for await (const item of response) {
       const value = collect(item);
       if (value !== undefined) values.push(value);
     }
     return values;
   }
-  if (isAsyncIterable(response)) {
-    for await (const item of response) {
+  const result = resultOf(response);
+  if (Array.isArray(result)) {
+    for (const item of result) {
       const value = collect(item);
       if (value !== undefined) values.push(value);
     }

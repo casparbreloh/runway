@@ -32,6 +32,13 @@ Loader binding, and one hidden Sandbox container application. Per-workflow modul
 dynamically, so Cloudflare dashboards are not filled with one static Workflow resource per authored
 workflow. There is no account-level execution Worker.
 
+Deployments persist each workflow as one immutable, content-addressed artifact containing its
+identity, declared secret names, and bundled source. Dynamic Workflow metadata pins each run to an
+artifact version. The typed host runtime verifies the artifact hash before loading it, and durable
+encrypted secret snapshots preserve the run's original declared secrets across redeploys and secret
+rotation. `runway deploy` waits for 31 consecutive cache-busted deployment identity observations
+over 30 seconds before reporting success.
+
 The managed runner currently provides:
 
 - One lazy, isolated Sandbox workspace per workflow run.
@@ -54,10 +61,22 @@ On 2026-07-14, an isolated `runway-phase1-smoke` deployment tested the current r
   reconstructed exact commit `da322101847b4da536a52646b98862ee1e1b0b45` in 1,334 ms. The complete
   write, destroy, clone, and verification workflow finished in six seconds.
 - One workflow triggered immediately after a successful redeploy executed the previous workflow
-  body. A later trigger used the new body. This is an observed deploy-readiness problem that must be
-  reproduced and fixed before repository CI is trusted.
+  body. A later trigger used the new body. This established the deploy-readiness problem addressed
+  by the immutable artifact and readiness work below.
 
 The temporary Worker, Dynamic Workflow, and container application were deleted after the test.
+
+On 2026-07-15, an isolated immutable-artifact deployment held a v1 run in durable sleep, deployed
+v2, rotated its secret, and then resumed v1. Fresh runs used only the v2 body and observed the new
+secret after propagation; the suspended run resumed with only its pinned v1 body and original
+secret. Managed command output remained redacted. Both deployments returned only after the
+readiness barrier succeeded.
+
+The smoke test removed and verified absence of its Worker, Dynamic Workflow, Sandbox container
+application, and owned R2 artifact objects. It preserved the pre-existing shared artifact bucket.
+Cloudflare exposes no supported Worker Loader eviction control, so forced cold-loader recovery was
+not exercised live. Workers-runtime tests cover exact metadata-selected artifact and secret loading
+at that seam.
 
 Cloudflare Sandbox backup/restore was inspected at the exact SDK version used here, `0.12.3`, but
 was not deployed. Production backup requires an R2 binding, bucket name, account id, and S3 access
@@ -81,9 +100,6 @@ generated workspace state only if measured restore cost is materially better tha
 
 This is the next implementation phase.
 
-- Reproduce the stale-body-after-deploy observation and add a deployment readiness or version
-  confirmation barrier. `runway deploy` must not report success while a new run can still load the
-  previous workflow body.
 - Introduce an internal repository source descriptor containing the remote, exact commit SHA, and
   an internal authentication capability. Do not add a public checkout DSL.
 - Prepare `/workspace` automatically before the first repository command.
@@ -156,5 +172,6 @@ Cloudflare deployment without introducing a separate CI language.
 - Keep Sandbox, containers, repository credentials, and recovery mechanics internal.
 - Prefer reconstruction and standard tool protocols over Runway-specific abstractions.
 - Add a shared service only when a provider boundary requires it; keep execution repo-scoped.
-- Do not add Queues, R2 resources, Durable Objects, or compatibility APIs without a measured need.
+- Do not add Queues, new R2-backed subsystems, Durable Objects, or compatibility APIs without a
+  measured need.
 - Test behavior at SDK, Workers runtime, CLI, Cloudflare API, and live deployment seams.

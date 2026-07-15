@@ -1,5 +1,11 @@
 import type { Ctx, Primitives } from "./types.ts";
 
+const publicStepId = (id: string): string => {
+  if (id.startsWith("runway:"))
+    throw new Error(`step id ${JSON.stringify(id)} is reserved by Runway`);
+  return id;
+};
+
 export const secretsOf = (
   names: ReadonlyArray<string>,
   source: unknown,
@@ -24,8 +30,8 @@ export const makeCtx = (
   secrets: meta.secrets,
   env: meta.env,
   step: {
-    do: (id, fn) => primitives.step.do(id, () => Promise.resolve(fn({ id }))),
-    exec: (id, command) => primitives.step.exec(id, command),
-    sleep: (id, durationMs) => primitives.step.sleep(id, durationMs),
+    do: (id, fn) => primitives.step.do(publicStepId(id), () => Promise.resolve(fn({ id }))),
+    exec: (id, command) => primitives.step.exec(publicStepId(id), command),
+    sleep: (id, durationMs) => primitives.step.sleep(publicStepId(id), durationMs),
   },
 });

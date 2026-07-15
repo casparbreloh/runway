@@ -2,17 +2,19 @@ import { toFile } from "cloudflare";
 
 import type { CloudflareApi } from "./cloudflare-api.ts";
 import {
-  COMPATIBILITY_DATE,
-  DYNAMIC_WORKFLOW_CLASS,
-  LOADER_BINDING,
-  WORKFLOW_BINDING,
-} from "./codegen.ts";
-import {
   RUNNER_CONTAINER,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
   SANDBOX_MIGRATION_TAG,
 } from "./runner-config.ts";
+import {
+  ARTIFACT_BUCKET_BINDING,
+  COMPATIBILITY_DATE,
+  DYNAMIC_WORKFLOW_CLASS,
+  isSecretSnapshotKeyBinding,
+  LOADER_BINDING,
+  WORKFLOW_BINDING,
+} from "./worker-contract.ts";
 
 type ScriptMetadata = Parameters<CloudflareApi["workers"]["scripts"]["update"]>[1]["metadata"];
 
@@ -20,9 +22,9 @@ interface WorkerUploadOptions {
   readonly accountId: string;
   readonly scriptName: string;
   readonly workflowName: string;
+  readonly artifactBucketName: string;
   readonly contents: Uint8Array;
-  readonly env: Record<string, string | undefined>;
-  readonly localSecretBindings: ReadonlyArray<string>;
+  readonly secretBindings: Readonly<Record<string, string>>;
   readonly needsSandboxMigration: boolean;
 }
 
@@ -30,8 +32,12 @@ export const validateBindings = (secrets: ReadonlyArray<string>): void => {
   const names = new Map<string, string>();
   names.set(WORKFLOW_BINDING, "Runway workflow binding");
   names.set(LOADER_BINDING, "Runway worker loader binding");
+  names.set(ARTIFACT_BUCKET_BINDING, "Runway workflow artifact binding");
   names.set(SANDBOX_BINDING, "Runway sandbox binding");
   for (const secret of secrets) {
+    if (isSecretSnapshotKeyBinding(secret)) {
+      throw new Error(`binding ${JSON.stringify(secret)} is used by Runway and a secret`);
+    }
     const owner = names.get(secret);
     if (owner) {
       throw new Error(`binding ${JSON.stringify(secret)} is used by ${owner} and a secret`);
@@ -48,6 +54,11 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
     bindings: [
       { type: "worker_loader" as const, name: LOADER_BINDING },
       {
+        type: "r2_bucket" as const,
+        name: ARTIFACT_BUCKET_BINDING,
+        bucket_name: opts.artifactBucketName,
+      },
+      {
         type: "workflow" as const,
         name: WORKFLOW_BINDING,
         workflow_name: opts.workflowName,
@@ -58,10 +69,10 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
         name: SANDBOX_BINDING,
         class_name: SANDBOX_CLASS,
       },
-      ...opts.localSecretBindings.map((name) => ({
+      ...Object.entries(opts.secretBindings).map(([name, text]) => ({
         type: "secret_text" as const,
         name,
-        text: opts.env[name]!,
+        text,
       })),
     ],
     containers: [RUNNER_CONTAINER],

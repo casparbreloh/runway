@@ -10,15 +10,21 @@ const disposable = <T>(result: Promise<T>): Promise<T> & Disposable =>
 
 beforeEach(async () => {
   await testRunner.reset();
+  await exports
+    .TestHost({
+      props: {
+        secrets: {
+          API_KEY: "test-api-key",
+          HOOK_SECRET: "test-secret",
+          RUNNER_SECRET: "runner-secret",
+        },
+      },
+    })
+    .resetSecret();
 });
 
 test("generated workers receive one runner adapter without low-level runner exports", () => {
-  expect(Object.keys(runtime).sort()).toEqual([
-    "createRouter",
-    "createRunnerAdapter",
-    "createWorkflowWorker",
-    "toEntrypoint",
-  ]);
+  expect(Object.keys(runtime).sort()).toEqual(["createWorkflowWorker", "toEntrypoint"]);
 });
 
 test("exec supports shorthand, options, defaults, and declared-secret redaction input", async () => {
@@ -255,6 +261,38 @@ test("a non-zero command redacts declared secrets from its command and ExecError
       stderr: "stderr ***",
     });
     expect(JSON.stringify(error)).not.toContain("runner-secret");
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("a run keeps one secret snapshot when the host binding rotates before exec", async () => {
+  const introspector = await introspectWorkflow(env.SECRET_SNAPSHOT);
+  const host = exports.TestHost({
+    props: {
+      secrets: {
+        API_KEY: "test-api-key",
+        HOOK_SECRET: "test-secret",
+        RUNNER_SECRET: "runner-secret",
+      },
+    },
+  });
+  try {
+    await env.SECRET_SNAPSHOT.create({ params: {} });
+    const [instance] = introspector.get();
+    await expect(
+      instance!.waitForStepResult({ name: "runway:secret-snapshot" }),
+    ).resolves.not.toContain("runner-secret");
+    await expect(instance!.waitForStepResult({ name: "resolved-secret" })).resolves.toBe(
+      "runner-secret",
+    );
+    await host.rotateSecret("rotated-secret");
+
+    await expect(instance!.waitForStepResult({ name: "snapshot-output" })).resolves.toMatchObject({
+      stdout: "***",
+    });
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    await expect(host.destroySecrets()).resolves.toEqual(["runner-secret"]);
   } finally {
     await introspector.dispose();
   }

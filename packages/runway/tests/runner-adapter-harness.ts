@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { createRunnerAdapter } from "runway/runtime";
+
+import { createRunnerAdapter } from "../src/runner-adapter.ts";
 
 interface HarnessProcess {
   id: string;
