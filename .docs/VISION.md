@@ -68,14 +68,17 @@ On 2026-07-14, an isolated `runway-phase1-smoke` deployment tested the current r
 
 The temporary Worker, Dynamic Workflow, and container application were deleted after the test.
 
-On 2026-07-15, the repeatable repository-recovery smoke deployed the production runner twice and
-forced its supported `Sandbox.destroy()` boundary through a temporary, token-protected cross-script
-binding. In both runs, the next `step.exec()` reconstructed exact commit
-`8206baea16f821638ae16eee4798e282c3dd03de`, and a third command reused that reconstruction without
-another checkout. The filtered shallow fetch produced a 235,592-byte pack. Cold command readiness
-was 3.7–4.6 seconds, including 1.3–1.4 seconds for checkout. Recovery command readiness was 4.5–4.9
-seconds, including 1.4–1.5 seconds for checkout. The smoke verified removal of both temporary
-Workers, the Dynamic Workflow, Sandbox container application, and owned R2 objects after each run.
+On 2026-07-15, the repeatable repository-recovery smoke repeatedly deployed the production runner
+and forced its supported `Sandbox.destroy()` boundary through a temporary, token-protected
+cross-script binding. The final instrumented run reconstructed exact commit
+`3ecbf2fedf9ab7d15fd531a1cad6f92b15c86aae`, and a third command reused that reconstruction without
+another checkout. Cold Sandbox readiness took 4,937 ms, checkout-process startup 194 ms, checkout
+1,296 ms, and total command readiness 6,682 ms. Recovery Sandbox readiness took 1,639 ms,
+checkout-process startup 293 ms, checkout 1,370 ms, and total command readiness 3,800 ms. The
+filtered shallow fetch took 751 ms cold and 811 ms during recovery, producing the same 242,794-byte
+pack. Recovery added 3,428 ms over the warm reused-command baseline. The smoke verified removal of
+both temporary Workers, the Dynamic Workflow, Sandbox container application, and owned R2 objects
+after each completed run.
 
 On 2026-07-15, an isolated immutable-artifact deployment held a v1 run in durable sleep, deployed
 v2, rotated its secret, and then resumed v1. Fresh runs used only the v2 body and observed the new
