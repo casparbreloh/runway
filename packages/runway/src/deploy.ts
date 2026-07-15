@@ -21,6 +21,11 @@ import { uploadWorkflowArtifacts } from "./deploy-storage.ts";
 import { uploadWorker, validateBindings } from "./deploy-upload.ts";
 import { resolveScriptName } from "./naming.ts";
 import { secretNamesOf } from "./registry.ts";
+import {
+  assertRepositorySourceReachable,
+  resolveRepositorySource,
+  type RepositorySource,
+} from "./repository-source.ts";
 import { listScriptSecrets } from "./secret-store.ts";
 import type { ProgressEvent, Registry } from "./types.ts";
 import { SECRET_SNAPSHOT_KEY_BINDING } from "./worker-contract.ts";
@@ -43,6 +48,8 @@ interface DeployOutput {
 
 interface DeployAdapters {
   readonly client?: (opts: { apiToken: string }) => CloudflareApi;
+  readonly repository?: RepositorySource;
+  readonly reachable?: (repository: RepositorySource) => Promise<void>;
   readonly ready?: (opts: {
     readonly host: string;
     readonly scriptName: string;
@@ -87,6 +94,8 @@ export const deployWithAdapters = async (
   }
 
   validateBindings(secrets);
+  const repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
+  await (adapters.reachable ?? assertRepositorySourceReachable)(repository);
   const secretBindings: Record<string, string> = {};
   for (const name of secrets) {
     const value = env[name];
@@ -96,6 +105,7 @@ export const deployWithAdapters = async (
   const deployment = await buildDeployment(registry, {
     ...opts,
     scriptName,
+    repository,
     snapshotKeyAvailable,
   });
   if (!snapshotKeyAvailable) {

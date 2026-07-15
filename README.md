@@ -120,15 +120,17 @@ Runway deploys one orchestration Worker per repository. That Worker owns webhook
 one Dynamic Workflows binding, one Worker Loader binding, and an internal command-runner binding.
 Per-workflow code is loaded through Worker Loader and Dynamic Workflows. The runner container starts
 lazily on the first `step.exec()` in a run and is destroyed after workflow completion or failure.
-The `/workspace` filesystem is ephemeral best-effort state: commands in one run reuse it, including
-across `step.sleep()`, only while the same Sandbox container survives. A container restart loses the
-workspace. Runway does not claim cross-restart durability.
+Deploy captures the current public `origin` and exact `HEAD` commit inside each immutable workflow
+artifact. Before the first command, the runner reconstructs that commit in `/workspace`. Commands in
+one run reuse the checkout, including across `step.sleep()`. If a fresh Sandbox no longer contains
+the matching checkout marker, the runner reconstructs the same commit before the next command.
+Private repository authentication is not yet supported.
 
 Cloudflare Sandbox backup/restore is not enabled. It currently requires an R2 binding and production
 presigning credentials, expired backup objects require separate lifecycle cleanup, and restored
-mounts must themselves be restored again after a container restart. Until Runway can own that
-lifecycle internally and prove acceptable CI overhead, repository checkout and cache transport
-cannot rely on workspace persistence.
+mounts must themselves be restored again after a container restart. Repository source therefore
+uses deterministic reconstruction rather than filesystem persistence. Cache transport remains
+deferred until its own R2-backed protocol is implemented and measured.
 
 Cloudflare Workflow rollback cleans up ordinary failed runs, but a live deployment smoke test
 returned `rollback: null` after terminating an active command. The internal runner adapter therefore
@@ -147,15 +149,16 @@ script.
 ## Scope
 
 The current foundation includes workflows, triggers, secrets, routing, discovery, validation,
-deployment, durable steps, durable sleep, and managed command execution. A live deployment smoke
-test also covers workspace reuse across sleep, process-group timeout cleanup, and active-step
-termination. It does not yet include
-repository checkout, caching, GitHub integration, artifacts, application deployment primitives,
-AI, agents, or public Sandbox access.
+deployment, durable steps, durable sleep, immutable workflow artifacts, public repository checkout,
+and managed command execution. A live deployment smoke test covers workspace reuse across sleep,
+process-group timeout cleanup, and active-step termination. Forced replacement recovery currently
+has Workers-runtime seam coverage; its repeatable live smoke and measurements are still pending. It
+does not yet include private repository checkout, caching, GitHub integration, run artifacts,
+application deployment primitives, AI, agents, or public Sandbox access.
 
 Cloudflare is the only backend target. Current deployments require Workers, Workflows, Dynamic
-Workflows, Worker Loader, and schedules. Workflow resumes currently use the latest deployed code
-and secrets.
+Workflows, Worker Loader, and schedules. Workflow resumes load their exact immutable workflow
+artifact and durable run-secret snapshot.
 
 ## Example
 
@@ -166,8 +169,8 @@ minimal scheduled workflow using `step.do()` and `step.exec()`.
 
 Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
 integration. The suite tests public SDK, Workers runtime, generated runner adapter, CLI, and
-Cloudflare API boundaries. Sandbox restart is simulated at that seam; cross-restart filesystem
-durability has not been proven live and is not part of the contract.
+Cloudflare API boundaries. Sandbox replacement and exact repository reconstruction are simulated at
+that seam; the forced-replacement path has not yet been proven by the repeatable live smoke.
 
 ```sh
 pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test

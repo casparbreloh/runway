@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { cron, webhook, workflow } from "runway";
 import type { ProgressEvent, Registry, WorkflowDefinition } from "runway";
@@ -8,6 +10,9 @@ import { expect, test } from "vitest";
 
 import { deploy, deployWithAdapters } from "../src/deploy.ts";
 import type { CloudflareApi } from "../src/deploy.ts";
+import { repositoryFixture } from "./repository-fixture.ts";
+
+const execFileAsync = promisify(execFile);
 
 const registry: Registry = [
   {
@@ -205,6 +210,8 @@ const deployReady = async (
   const { client, ...context } = opts;
   return await deployWithAdapters(registry, context, {
     client,
+    repository: repositoryFixture,
+    reachable: async () => {},
     ready: async ({ deploymentId }) => {
       expect(calls.metadata).toBeDefined();
       expect(deploymentId).toMatch(
@@ -255,15 +262,75 @@ test("deploy stores immutable workflow artifacts before uploading the host Worke
         scriptName: "runway-ship-it",
         workflowId: "hello",
         secrets: ["LINEAR_WEBHOOK_SECRET", "LINEAR_API_KEY"],
+        repository: repositoryFixture,
         source: "string",
       },
       {
         scriptName: "runway-ship-it",
         workflowId: "daily",
         secrets: [],
+        repository: repositoryFixture,
         source: "string",
       },
     ]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy pins the current public GitHub repository commit", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls);
+  const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+    cwd: project.cwd,
+    encoding: "utf8",
+  });
+
+  try {
+    await deployWithAdapters(
+      registry,
+      { cwd: project.cwd, env: deployEnv },
+      { client: () => client, reachable: async () => {}, ready: async () => {} },
+    );
+
+    const artifact = JSON.parse(
+      new TextDecoder().decode(calls.artifactUploads[0]!.contents),
+    ) as Record<string, unknown>;
+    expect(artifact.repository).toEqual({
+      remote: "https://github.com/casparbreloh/runway.git",
+      commit: stdout.trim(),
+      authentication: { type: "public" },
+    });
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects a commit that the repository remote cannot reconstruct", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls);
+
+  try {
+    await expect(
+      deployWithAdapters(
+        registry,
+        { cwd: project.cwd, env: deployEnv },
+        {
+          client: () => client,
+          repository: repositoryFixture,
+          reachable: async () => {
+            throw new Error(
+              `repository remote does not contain commit ${repositoryFixture.commit}`,
+            );
+          },
+          ready: async () => {},
+        },
+      ),
+    ).rejects.toThrow(`repository remote does not contain commit ${repositoryFixture.commit}`);
+    expect(calls.artifactUploads).toEqual([]);
+    expect(calls.scriptUpdates).toEqual([]);
   } finally {
     await project.cleanup();
   }
@@ -378,6 +445,8 @@ test("deploy emits final progress and returns webhook urls only after readiness"
       },
       {
         client: () => fakeApi(calls),
+        repository: repositoryFixture,
+        reachable: async () => {},
         ready: async () => {
           observations += 1;
           expect(progress.filter((event) => event.step === "deploy")).toEqual([

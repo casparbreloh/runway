@@ -12,6 +12,7 @@ import type { Registry } from "runway";
 import { buildDeployment } from "../src/deploy-build.ts";
 import { artifactBucketName, ensureArtifactBucket } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
+import { resolveRepositorySource } from "../src/repository-source.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
 
@@ -408,11 +409,13 @@ const run = async (): Promise<void> => {
     bucketCreated = await ensureArtifactBucket(cf, accountId, bucketName);
     await mkdir(path.dirname(workflowPath), { recursive: true });
     await writeFile(path.join(project, "package.json"), JSON.stringify({ name: scriptName }));
+    const repository = await resolveRepositorySource(project);
     console.log(JSON.stringify({ phase: "start", accountId, scriptName, bucketName }));
     await writeFile(workflowPath, workflowSource("v1", scriptName));
     const preparedV1 = await buildDeployment(registry(project), {
       cwd: project,
       scriptName,
+      repository,
       snapshotKeyAvailable: true,
     });
     const expectedV1Artifacts = preparedV1.artifacts.map(({ artifactVersion }) => artifactVersion);
@@ -480,6 +483,7 @@ const run = async (): Promise<void> => {
     const preparedV2 = await buildDeployment(registry(project), {
       cwd: project,
       scriptName,
+      repository,
       snapshotKeyAvailable: true,
     });
     const expectedV2Artifacts = preparedV2.artifacts.map(({ artifactVersion }) => artifactVersion);

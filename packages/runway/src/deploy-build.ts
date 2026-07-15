@@ -6,6 +6,7 @@ import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
 
 import { generateDynamicWorker, generateHost } from "./codegen.ts";
+import type { RepositorySource } from "./repository-source.ts";
 import type { ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 import { SECRET_SNAPSHOT_KEY_BINDING, secretSnapshotBackupBinding } from "./worker-contract.ts";
 import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
@@ -13,6 +14,7 @@ import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
 interface BuildContext {
   readonly cwd: string;
   readonly scriptName: string;
+  readonly repository: RepositorySource;
   readonly snapshotKeyAvailable: boolean;
   readonly onProgress?: (event: ProgressEvent) => void;
 }
@@ -111,6 +113,7 @@ export const buildDeployment = async (
         scriptName: opts.scriptName,
         workflowId: w.def.id,
         secrets: w.def.secrets,
+        repository: opts.repository,
         source,
       });
       const artifactVersion = hashOf(contents);

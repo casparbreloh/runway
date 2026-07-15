@@ -9,6 +9,7 @@ import { secretRef } from "./src/secrets.ts";
 import { cron, webhook } from "./src/trigger.ts";
 import type { Registry } from "./src/types.ts";
 import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
+import { repositoryFixture } from "./tests/repository-fixture.ts";
 
 const generatedHostRegistry: Registry = [
   {
@@ -47,11 +48,13 @@ export default defineConfig({
       const generated = await buildDeployment(generatedHostRegistry, {
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
+        repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const suspended = await buildDeployment(suspendedRunRegistry, {
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
+        repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const activeArtifact = generated.artifacts[0]!;

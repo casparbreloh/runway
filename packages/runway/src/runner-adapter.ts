@@ -1,10 +1,15 @@
 import { parseSSEStream } from "@cloudflare/sandbox";
 
+import type { RepositorySource } from "./repository-source.ts";
 import type { RunnerBridge } from "./runner.ts";
 import { redactError, StreamingRedactor } from "./secret-redaction.ts";
 import type { ExecResult } from "./types.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
+const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
+const REPOSITORY_GENERATION = "/tmp/runway-checkout-generation";
+const REPOSITORY_MARKER = "/tmp/runway-repository";
+const REPOSITORY_GIT_DIRECTORY = "/workspace/.git";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -19,6 +24,8 @@ interface SandboxProcess {
 }
 
 interface RunnerSandbox {
+  exists(path: string): Promise<{ readonly exists: boolean }>;
+  readFile(path: string): Promise<{ readonly success: boolean; readonly content: string }>;
   getProcess(id: string): Promise<SandboxProcess | null>;
   startProcess(
     command: string,
@@ -64,6 +71,7 @@ interface OutputCollector {
 
 interface RunnerAdapterOptions {
   readonly sandbox: (runnerId: string) => RunnerSandbox | Promise<RunnerSandbox>;
+  readonly repository: RepositorySource;
   readonly log: (entry: RunnerLog) => void;
   readonly status?: (runId: string) => Promise<{ status: string }>;
   readonly waitUntil?: (promise: Promise<void>) => void;
@@ -95,6 +103,15 @@ const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)
 
 const managedCommand = (command: string): string =>
   `child=; cleanup() { [ -z "$child" ] || kill -KILL -- -"$child" 2>/dev/null || true; }; trap cleanup EXIT; trap 'exit 143' TERM INT HUP; setsid sh -c ${shellQuote(command)} & child=$!; wait "$child"`;
+
+const repositoryMarker = (repository: RepositorySource): string => JSON.stringify(repository);
+
+const checkoutCommand = (repository: RepositorySource, generation: number): string => {
+  const remote = shellQuote(repository.remote);
+  const commit = shellQuote(repository.commit);
+  const marker = shellQuote(repositoryMarker(repository));
+  return `set -eu; rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; git -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
+};
 
 const killProcessGroup = async (sandbox: RunnerSandbox, process: SandboxProcess): Promise<void> => {
   await sandbox.killProcess(process.id);
@@ -225,6 +242,78 @@ const collectResult = async (
   };
 };
 
+const checkoutGeneration = async (sandbox: RunnerSandbox): Promise<number> => {
+  const exists = await sandbox.exists(REPOSITORY_GENERATION);
+  if (!exists.exists) return 0;
+  const stored = await sandbox.readFile(REPOSITORY_GENERATION);
+  if (!stored.success || !/^\d+$/.test(stored.content)) return 0;
+  return Number(stored.content);
+};
+
+const prepareRepository = async (
+  sandbox: RunnerSandbox,
+  request: RunnerRequest,
+  repository: RepositorySource,
+  log: RunnerAdapterOptions["log"],
+): Promise<void> => {
+  const marker = await sandbox.exists(REPOSITORY_MARKER);
+  if (marker.exists) {
+    const stored = await sandbox.readFile(REPOSITORY_MARKER);
+    const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+    if (stored.success && stored.content === repositoryMarker(repository) && checkout.exists)
+      return;
+  }
+  const checkoutRequest: RunnerRequest = {
+    ...request,
+    step: { ...request.step, id: "runway:checkout" },
+  };
+  const generation = (await checkoutGeneration(sandbox)) + 1;
+  const processId = await hashId("checkout", [request.runId, generation]);
+  const command = managedCommand(checkoutCommand(repository, generation));
+  let process = await sandbox.getProcess(processId);
+  if (!process) {
+    try {
+      process = await sandbox.startProcess(command, {
+        processId,
+        autoCleanup: false,
+        cwd: "/",
+        env: { CI: "true" },
+      });
+    } catch (error) {
+      process = await sandbox.getProcess(processId);
+      if (!process) throw error;
+    }
+  }
+  if (process.command !== command) throw new Error("repository checkout process collision");
+  const timeout = cancellableDelay(REPOSITORY_CHECKOUT_TIMEOUT_MS);
+  try {
+    const result = await Promise.race([
+      collectResult(sandbox, process, checkoutRequest, log),
+      timeout.promise.then(async () => {
+        await killProcessGroup(sandbox, process);
+        await sandbox.destroy();
+        throw new Error(`repository checkout timed out after ${REPOSITORY_CHECKOUT_TIMEOUT_MS}ms`);
+      }),
+    ]);
+    if (result.exitCode !== 0) {
+      await sandbox.destroy();
+      throw new Error(`repository checkout failed with code ${result.exitCode}: ${result.stderr}`);
+    }
+    const prepared = await sandbox.readFile(REPOSITORY_MARKER);
+    const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+    if (
+      !prepared.success ||
+      prepared.content !== repositoryMarker(repository) ||
+      !checkout.exists
+    ) {
+      await sandbox.destroy();
+      throw new Error("repository checkout did not prepare the expected source");
+    }
+  } finally {
+    timeout.cancel();
+  }
+};
+
 export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge => ({
   async exec(request) {
     let completed = false;
@@ -235,6 +324,7 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
       const processId = await hashId("step", [request.runId, request.step.id, request.step.count]);
       const command = managedCommand(request.options.command);
       const sandbox = await options.sandbox(runnerId);
+      await prepareRepository(sandbox, request, options.repository, options.log);
       let process = await sandbox.getProcess(processId);
       if (!process) {
         try {
