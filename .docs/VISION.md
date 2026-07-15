@@ -68,6 +68,15 @@ On 2026-07-14, an isolated `runway-phase1-smoke` deployment tested the current r
 
 The temporary Worker, Dynamic Workflow, and container application were deleted after the test.
 
+On 2026-07-15, the repeatable repository-recovery smoke deployed the production runner twice and
+forced its supported `Sandbox.destroy()` boundary through a temporary, token-protected cross-script
+binding. In both runs, the next `step.exec()` reconstructed exact commit
+`8206baea16f821638ae16eee4798e282c3dd03de`, and a third command reused that reconstruction without
+another checkout. The filtered shallow fetch produced a 235,592-byte pack. Cold command readiness
+was 3.7–4.6 seconds, including 1.3–1.4 seconds for checkout. Recovery command readiness was 4.5–4.9
+seconds, including 1.4–1.5 seconds for checkout. The smoke verified removal of both temporary
+Workers, the Dynamic Workflow, Sandbox container application, and owned R2 objects after each run.
+
 On 2026-07-15, an isolated immutable-artifact deployment held a v1 run in durable sleep, deployed
 v2, rotated its secret, and then resumed v1. Fresh runs used only the v2 body and observed the new
 secret after propagation; the suspended run resumed with only its pinned v1 body and original
@@ -110,13 +119,14 @@ The core public-repository implementation shipped on 2026-07-15:
 - Keep command ergonomics unchanged: ordinary workflows continue to call `step.exec()`.
 - Support public repositories.
 - Add deployment, artifact-runtime, and managed-runner seam tests.
+- Add a repeatable live smoke test that forces `Sandbox.destroy()` between commands.
+- Measure cold container and process start, checkout and fetch time, fetched pack bytes, and recovery
+  overhead.
 
-The remaining Phase 1 work is operational validation and private-repository access:
+The remaining Phase 1 work is private-repository access:
 
 - Support private repositories through short-lived GitHub App credentials without exposing
   credentials to command output.
-- Add a repeatable live smoke test that forces `Sandbox.destroy()` between commands.
-- Measure cold container start, checkout time, transferred bytes, and recovery overhead.
 
 Phase 1 is complete when a workflow can check out an exact commit, lose its Sandbox, transparently
 reconstruct that commit, and continue with the next `step.exec()` without a public recovery call.
