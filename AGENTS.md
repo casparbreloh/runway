@@ -88,12 +88,14 @@ export default workflow({
 - Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, one matching Dynamic
   Workflow resource, and one `RUNWAY_ARTIFACTS` binding to the shared account artifact bucket.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
-  up when the run ends. Workspace reuse is ephemeral best effort across commands and durable sleep;
-  it is not durable across Sandbox restart.
-- Artifact storage is not Sandbox workspace checkpointing. Do not claim repository checkout or
-  cache durability until a live integration test proves a persistence mechanism. Sandbox
-  backup/restore currently needs R2 credentials/configuration and object lifecycle management, so
-  Runway does not enable a partial checkpoint layer.
+  up when the run ends. Deploy captures the public repository remote and exact commit inside each
+  workflow artifact. The runner prepares `/workspace` before the first command and reconstructs the
+  same commit when a fresh Sandbox is missing its matching checkout marker.
+- Repository recovery is deterministic reconstruction, not Sandbox workspace checkpointing. The
+  Workers-runtime seam covers forced replacement; keep the live `Sandbox.destroy()` smoke and
+  checkout measurements pending until they pass against Cloudflare. Sandbox backup/restore still
+  needs R2 credentials/configuration and object lifecycle management, so Runway does not enable a
+  partial checkpoint layer.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
   returns webhook URLs.

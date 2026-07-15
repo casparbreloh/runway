@@ -89,6 +89,18 @@ test("a retried command reconnects to its deterministic process without starting
   });
 });
 
+test("repository commands prepare once and reconstruct after Sandbox replacement", async () => {
+  using result = disposable(adapterHarness.repositoryRecovery());
+
+  await expect(result).resolves.toEqual({ checkoutRuns: 2, commandRuns: 3 });
+});
+
+test("concurrent repository commands perform one checkout for a Sandbox placement", async () => {
+  using result = disposable(adapterHarness.concurrentRepositoryBootstrap());
+
+  await expect(result).resolves.toEqual({ checkoutRuns: 1, commandRuns: 2 });
+});
+
 test("large command output is incrementally streamed into bounded redacted tails", async () => {
   using result = disposable(adapterHarness.boundedOutput());
   const execution = (await result) as {
@@ -192,29 +204,6 @@ test("a live runner keeps workspace files across durable sleep", async () => {
     await expect(instance!.waitForStepResult({ name: "command-1" })).resolves.toMatchObject({
       exitCode: 0,
       stdout: "hello\n",
-    });
-  } finally {
-    await introspector.dispose();
-  }
-});
-
-test("a Sandbox restart between commands loses the best-effort workspace", async () => {
-  const introspector = await introspectWorkflow(env.RUNNER);
-  try {
-    const run = await env.RUNNER.create({
-      params: {
-        commands: ["echo hello > state.txt", "cat state.txt"],
-        pauseMs: 100,
-        catchErrors: true,
-      },
-    });
-    const [instance] = introspector.get();
-    await instance!.waitForStepResult({ name: "command-0" });
-    await testRunner.restart(run.id);
-
-    await expect(instance!.waitForStepResult({ name: "command-1" })).resolves.toMatchObject({
-      exitCode: 1,
-      stderr: "cat: state.txt: No such file\n",
     });
   } finally {
     await introspector.dispose();

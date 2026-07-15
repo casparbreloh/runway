@@ -5,10 +5,17 @@ import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
 import { buildDeployment } from "./src/deploy-build.ts";
+import type { RepositorySource } from "./src/repository-source.ts";
 import { secretRef } from "./src/secrets.ts";
 import { cron, webhook } from "./src/trigger.ts";
 import type { Registry } from "./src/types.ts";
 import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
+
+const repository: RepositorySource = {
+  remote: "https://github.com/casparbreloh/runway.git",
+  commit: "1328fb0d0e8629a84abc11d820715cb5c78b629c",
+  authentication: { type: "public" },
+};
 
 const generatedHostRegistry: Registry = [
   {
@@ -47,11 +54,13 @@ export default defineConfig({
       const generated = await buildDeployment(generatedHostRegistry, {
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
+        repository,
         snapshotKeyAvailable: true,
       });
       const suspended = await buildDeployment(suspendedRunRegistry, {
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
+        repository,
         snapshotKeyAvailable: true,
       });
       const activeArtifact = generated.artifacts[0]!;

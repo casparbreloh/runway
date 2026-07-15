@@ -118,10 +118,6 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     failNextDestroy = false;
   }
 
-  restart(runId: string): void {
-    runnerWorkspaces.delete(runId);
-  }
-
   failDestroyOnce(): void {
     failNextDestroy = true;
   }

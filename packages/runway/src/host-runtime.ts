@@ -6,6 +6,7 @@ import {
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+import type { RepositorySource } from "./repository-source.ts";
 import { createRunnerAdapter } from "./runner-adapter.ts";
 import { SANDBOX_BINDING } from "./runner-config.ts";
 import type { HostCapability } from "./runner.ts";
@@ -50,6 +51,7 @@ interface HostEnv {
 }
 
 interface HostProps {
+  readonly repository: RepositorySource;
   readonly secretNames: ReadonlyArray<string>;
   readonly secretSnapshotKey: string;
   readonly snapshotScope: string;
@@ -103,6 +105,7 @@ export class RunwayRunnerBinding
         getSandbox(this.env[SANDBOX_BINDING], runnerId, { enableDefaultSession: false }),
       status: async (runId) => await (await this.env[WORKFLOW_BINDING].get(runId)).status(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
+      repository: this.ctx.props.repository,
       log: ({ stream, chunk }) => {
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
@@ -282,6 +285,7 @@ const loadWorker = async (
     env: {
       [HOST_CAPABILITY_BINDING]: ctx.exports.RunwayRunnerBinding({
         props: {
+          repository: artifact.repository,
           secretNames: artifact.secrets,
           secretSnapshotKey: config.secretSnapshotKey,
           snapshotScope: `${config.scriptName}:${artifact.workflowId}:${metadata.artifactVersion}`,
