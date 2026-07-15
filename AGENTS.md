@@ -18,10 +18,13 @@ own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents
   - `src/trigger.ts` — webhook and cron triggers.
   - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
   - `src/runner.ts` — internal managed command runner.
-  - `src/runtime.ts` — generated Worker runtime adapter.
+  - `src/runtime.ts` — workflow artifact runtime adapter.
+  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runner capability.
+  - `src/workflow-artifact.ts` — immutable content-addressed artifact contract.
+  - `src/secret-snapshot.ts` — encrypted durable run-secret snapshots.
   - `src/router.ts` — webhook and cron routing.
-  - `src/deploy.ts` — validation, codegen, bundle, and Cloudflare upload path.
-  - `src/codegen.ts` — generated orchestration and workflow Worker modules.
+  - `src/deploy.ts` — validation and deployment orchestration.
+  - `src/codegen.ts` — thin generated host configuration and workflow entry modules.
   - `src/validate.ts` — registry validation.
   - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
 - `example/` — minimal scheduled workflow using `ctx.step.do()` and `ctx.step.exec()`.
@@ -52,6 +55,7 @@ export default workflow({
   `timeoutMs`.
 - Step return values must be JSON-serializable and step bodies idempotent.
 - Every sleep has a caller-provided stable id.
+- Caller-provided step ids must not begin with the reserved `runway:` prefix.
 
 ## Triggers And Secrets
 
@@ -76,16 +80,23 @@ export default workflow({
   internal to the runner adapter.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
-- Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, and one matching
-  Dynamic Workflow resource.
+- Deploy stores each bundled workflow as one immutable content-addressed artifact in the shared
+  account R2 bucket before uploading the host. Trigger starts persist only the artifact version;
+  resumed Dynamic Workflows load that exact artifact.
+- Declared secrets are captured once per run in an encrypted durable snapshot, so secret rotation
+  does not alter an active run.
+- Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, one matching Dynamic
+  Workflow resource, and one `RUNWAY_ARTIFACTS` binding to the shared account artifact bucket.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
   up when the run ends. Workspace reuse is ephemeral best effort across commands and durable sleep;
   it is not durable across Sandbox restart.
-- Do not claim repository checkout or cache durability until a live integration test proves a
-  persistence mechanism. Sandbox backup/restore currently needs R2 credentials/configuration and
-  object lifecycle management, so Runway does not enable a partial checkpoint layer.
+- Artifact storage is not Sandbox workspace checkpointing. Do not claim repository checkout or
+  cache durability until a live integration test proves a persistence mechanism. Sandbox
+  backup/restore currently needs R2 credentials/configuration and object lifecycle management, so
+  Runway does not enable a partial checkpoint layer.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
-  and returns webhook URLs.
+  waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
+  returns webhook URLs.
 - Keep Sandbox and container deployment resources internal to the managed command runner.
 
 ## Conventions
