@@ -12,7 +12,11 @@ const downloads = cacheParts.map(
   (digest, index) =>
     `curl --retry 3 --retry-all-errors --connect-timeout 10 --max-time 300 -fsSL ${cacheUrl}/${digest}.tar.gz -o /tmp/runway-ci-${index} && echo '${digest}  /tmp/runway-ci-${index}' | sha256sum --check --status`,
 );
+const backgroundDownloads = downloads
+  .map((download, index) => `(${download}) & runway_cache_${index}=$!;`)
+  .join(" ");
+const waitForDownloads = cacheParts.map((_, index) => `wait "$runway_cache_${index}"`).join(" && ");
 
-export const setupCiToolchain = `${downloads.join(" && ")} && cat ${cacheParts.map((_, index) => `/tmp/runway-ci-${index}`).join(" ")} > /tmp/runway-ci.tar.gz && echo '${cacheArchive}  /tmp/runway-ci.tar.gz' | sha256sum --check --status && tar -xzf /tmp/runway-ci.tar.gz -C / && ldconfig`;
+export const setupCiToolchain = `${backgroundDownloads} ${waitForDownloads} && cat ${cacheParts.map((_, index) => `/tmp/runway-ci-${index}`).join(" ")} > /tmp/runway-ci.tar.gz && echo '${cacheArchive}  /tmp/runway-ci.tar.gz' | sha256sum --check --status && tar -xzf /tmp/runway-ci.tar.gz -C / && ldconfig`;
 
 export const installCiDependencies = `if echo '${lockfile}  pnpm-lock.yaml' | sha256sum --check --status; then test -d node_modules/.pnpm && test -e node_modules/runway; else NODE_OPTIONS=--max-old-space-size=128 pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16 --package-import-method=hardlink; fi`;
