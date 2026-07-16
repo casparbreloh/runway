@@ -1015,7 +1015,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       {
         class_name: "Sandbox",
         image: "docker.io/cloudflare/sandbox:0.12.3",
-        instance_type: "lite",
+        instance_type: "basic",
       },
     ]);
     expect(metadata.migrations).toEqual({
@@ -1031,7 +1031,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
             scheduling_policy: "default",
             configuration: {
               image: "docker.io/cloudflare/sandbox:0.12.3",
-              instance_type: "lite",
+              instance_type: "basic",
             },
             instances: 0,
             max_instances: 20,
@@ -1107,7 +1107,7 @@ test("deploy reuses the matching container application and does not replay its v
         scheduling_policy: "default",
         configuration: {
           image: "docker.io/cloudflare/sandbox:0.12.3",
-          instance_type: "lite",
+          instance_type: "basic",
         },
         instances: 0,
         max_instances: 20,
@@ -1159,7 +1159,7 @@ test("deploy reconciles stale container application configuration", async () => 
             scheduling_policy: "default",
             configuration: {
               image: "docker.io/cloudflare/sandbox:0.12.3",
-              instance_type: "lite",
+              instance_type: "basic",
             },
             instances: 0,
             max_instances: 20,
