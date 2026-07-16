@@ -19,7 +19,7 @@ export default workflow({
   await ctx.step.exec("toolchain", "node --version && npm --version && pnpm --version");
   await ctx.step.exec(
     "install",
-    "if echo '6b0c2ddcbf7d1d54754462700d7854b91ab3fd858d32bd352ec331d5d6585cf3  pnpm-lock.yaml' | sha256sum --check --status; then pnpm install --frozen-lockfile --trust-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=64; else pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=64; fi",
+    "if echo '6b0c2ddcbf7d1d54754462700d7854b91ab3fd858d32bd352ec331d5d6585cf3  pnpm-lock.yaml' | sha256sum --check --status; then pnpm install --frozen-lockfile --trust-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16; else pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16; fi",
   );
   await ctx.step.exec("format-check", "pnpm format-check");
   await ctx.step.exec("lint", "pnpm lint");
