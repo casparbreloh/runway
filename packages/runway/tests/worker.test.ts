@@ -6,6 +6,7 @@ import {
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, expect, test } from "vitest";
 
+import { repositoryFixture } from "./repository-fixture.ts";
 import worker from "./runtime-worker.ts";
 
 const signatureOf = async (body: string): Promise<string> => {
@@ -232,22 +233,53 @@ test.each([
   }
 });
 
-test("cleanup failure reports failure before a retry can report late success", async () => {
+test("the runtime durably records success after cleanup and before publication", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
+    const [instance] = introspector.get();
+
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    await expect(
+      instance!.waitForStepResult({ name: "runway:terminal-claim" }),
+    ).resolves.toMatchObject({
+      claimId: expect.any(String),
+      outcome: "success",
+      runId: run.id,
+    });
+    await expect(testHost.lifecycleEvents()).resolves.toEqual([
+      "lifecycle:in_progress",
+      "handler:start",
+      "handler:success",
+      "cleanup:start",
+      "cleanup:success",
+      "lifecycle:success",
+    ]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("cleanup failure durably wins failure before any terminal publication", async () => {
   await testSandbox.failDestroyOnce();
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     await env.COMMANDS.create({ params: { commands: ["true"] } });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
-    await eventually(async () => {
-      const events = await testHost.lifecycleEvents();
-      expect(events).toContain("cleanup:failure");
-      expect(events).toContain("lifecycle:failure");
-      expect(events.lastIndexOf("cleanup:success")).toBeGreaterThan(
-        events.indexOf("lifecycle:failure"),
-      );
-      expect(events).not.toContain("lifecycle:success");
-    });
+    await expect(
+      instance!.waitForStepResult({ name: "runway:terminal-claim" }),
+    ).resolves.toMatchObject({ outcome: "failure" });
+    await expect(testHost.lifecycleEvents()).resolves.toEqual([
+      "lifecycle:in_progress",
+      "handler:start",
+      "handler:success",
+      "cleanup:start",
+      "cleanup:failure",
+      "lifecycle:failure",
+      "cleanup:start",
+      "cleanup:success",
+    ]);
   } finally {
     await introspector.dispose();
   }
@@ -1401,11 +1433,32 @@ test("a generated runtime binding returns only declared secrets", async () => {
   });
 });
 
-test("a generated runtime binding rejects invalid lifecycle RPC states", async () => {
+test("a generated runtime binding returns its constructor-bound terminal identity", async () => {
+  await expect(env.GENERATED_ISSUE_HOST.terminal("run-id")).resolves.toEqual({
+    accountId: "test-account",
+    repositoryId: `remote:${repositoryFixture.remote}`,
+    workflowId: "issue-created",
+    runId: "run-id",
+    trustId: `remote:${repositoryFixture.remote}`,
+    generation: 1,
+  });
+});
+
+test("a generated runtime binding rejects invalid terminal control input", async () => {
   const probe = exports.CapabilityProbe({ props: {} });
-  await expect(probe.invoke("reportRunLifecycle", ["run-id", "cancelled"])).resolves.toBe(
-    "invalid run lifecycle",
-  );
+  await expect(probe.invoke("startRun", [""])).resolves.toBe("invalid run lifecycle");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "", outcome: "success" }]),
+  ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "claim", outcome: "pending" }]),
+  ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "success", extra: true },
+    ]),
+  ).resolves.toBe("invalid terminal finalization");
 });
 
 test("a generated host resolves the immutable snapshot key named by its root", async () => {

@@ -1,9 +1,12 @@
 import type { ExecResult } from "./run.ts";
 import type { NormalizedExecOptions } from "./sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
+import type { Finalization, TerminalIdentity } from "./terminal.ts";
 
 export interface RuntimeBinding {
-  reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean>;
+  startRun(runId: string): Promise<boolean>;
+  terminal(runId: string): Promise<TerminalIdentity>;
+  publishTerminal(runId: string, finalization: Finalization): Promise<void>;
   secrets(): Promise<Readonly<Record<string, string>>>;
   captureSecrets(runId: string): Promise<string>;
   restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;
@@ -23,5 +26,3 @@ export interface RuntimeBinding {
   }): Promise<ExecResult>;
   destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
 }
-
-export type RunLifecycleState = "in_progress" | "success" | "failure";

@@ -95,18 +95,21 @@ export default defineConfig({
   plugins: [
     cloudflareTest(async () => {
       const generated = await buildDeployment(generatedHostRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const suspended = await buildDeployment(suspendedRunRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const githubHost = await buildDeployment(githubRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-github-host",
         repository: repositoryFixture,
@@ -123,6 +126,7 @@ export default defineConfig({
         ({ workflowId }) => workflowId === "github-test",
       )!;
       const manyGithubHost = await buildDeployment(manyGithubRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-many-github-host",
         repository: repositoryFixture,
@@ -386,9 +390,17 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: "generated-runway-host",
               entrypoint: "RunwaySandboxBinding",
               props: {
+                repository: repositoryFixture,
                 secretNames: ["HOOK_SECRET", "API_KEY"],
                 secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
                 snapshotScope: "generated-runway-host:issue-created:direct-capability",
+                terminal: {
+                  accountId: "test-account",
+                  repositoryId: `remote:${repositoryFixture.remote}`,
+                  workflowId: "issue-created",
+                  trustId: `remote:${repositoryFixture.remote}`,
+                  generation: 1,
+                },
               },
             },
             RUNWAY_RUNTIME: {

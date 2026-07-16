@@ -419,6 +419,7 @@ test("concurrent first commands share source preparation and placement", async (
   const sandbox = new Sandbox({
     runId: "run-concurrent",
     secrets: {},
+    terminal: { verify: async () => {} },
     source: exactSource,
     placement: {
       exec: async ({ runId, step, command: options, source: prepared, secrets }) =>

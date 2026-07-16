@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     COMMANDS: Workflow;
     SECRET_SNAPSHOT: Workflow;
     GENERATED_ISSUE_HOST: {
+      terminal(runId: string): Promise<import("../src/terminal.ts").TerminalIdentity>;
       secrets(): Promise<Readonly<Record<string, string>>>;
       captureSecrets(runId: string): Promise<string>;
       restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;

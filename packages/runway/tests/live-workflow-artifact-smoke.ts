@@ -414,6 +414,7 @@ const run = async (): Promise<void> => {
     console.log(JSON.stringify({ phase: "start", accountId, scriptName, bucketName }));
     await writeFile(workflowPath, workflowSource("v1", scriptName));
     const preparedV1 = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,
@@ -481,6 +482,7 @@ const run = async (): Promise<void> => {
 
     await writeFile(workflowPath, workflowSource("v2", scriptName));
     const preparedV2 = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,

@@ -3,6 +3,8 @@ import { expect, test } from "vitest";
 import { makeRun } from "../src/run.ts";
 import { RunLostError, Sandbox, type DurableStep } from "../src/sandbox.ts";
 import { source } from "../src/source.ts";
+import { Terminal } from "../src/terminal.ts";
+import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
 
 const durable = (id: string, events?: string[]) => ({
   id,
@@ -28,6 +30,31 @@ const prepared = (revision: string, bytes = 0, placement = "placement-witness") 
   placement,
   result: { revision, state: "prepared" as const, bytes },
 });
+
+const terminalFixture = () => {
+  let winner: TerminalRecord | undefined;
+  const state: TerminalState = {
+    claim(candidate) {
+      winner ??= structuredClone(candidate);
+      return Promise.resolve(structuredClone(winner));
+    },
+    read() {
+      return Promise.resolve(winner && structuredClone(winner));
+    },
+  };
+  return new Terminal(
+    {
+      accountId: "account-1",
+      repositoryId: "repository-1",
+      workflowId: "check",
+      runId: "run-1",
+      trustId: "trusted-default",
+      generation: 1,
+    },
+    state,
+    async () => {},
+  );
+};
 
 const recordedDurable = (): DurableStep => {
   let recorded:
@@ -55,6 +82,7 @@ test("a recorded command rejects changed canonical options without starting agai
     new Sandbox({
       runId: "run-recorded-command",
       secrets: {},
+      terminal: terminalFixture(),
       source: source(
         {
           repositoryId: "repository-1",
@@ -89,6 +117,7 @@ test("canonical command evidence ignores env insertion order and distinguishes U
     new Sandbox({
       runId: "run-canonical-unicode",
       secrets: {},
+      terminal: terminalFixture(),
       source: source(
         {
           repositoryId: "repository-1",
@@ -127,6 +156,7 @@ test("a recorded command fences source reconstruction after runtime replacement"
     new Sandbox({
       runId: "run-runtime-replacement",
       secrets: {},
+      terminal: terminalFixture(),
       source: source(
         {
           repositoryId: "repository-1",
@@ -166,6 +196,7 @@ test("a lost Sandbox rejects every later command without source or placement act
   const sandbox = new Sandbox({
     runId: "run-lost-latch",
     secrets: {},
+    terminal: terminalFixture(),
     source: source(
       {
         repositoryId: "repository-1",
@@ -201,6 +232,7 @@ test("known command outcomes stay honest and a later placement replacement is lo
     const sandbox = new Sandbox({
       runId: `run-${outcome}`,
       secrets: {},
+      terminal: terminalFixture(),
       source: source(
         {
           repositoryId: "repository-1",
@@ -278,6 +310,7 @@ test("one exact public source prepares before one command executes", async () =>
   const sandbox = new Sandbox({
     runId: "run-1",
     secrets: {},
+    terminal: terminalFixture(),
     source: exactSource,
     placement: {
       exec: async ({ source: prepared, command }) => {
@@ -400,6 +433,7 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
   const sandbox = new Sandbox({
     runId: "run-1",
     secrets: {},
+    terminal: terminalFixture(),
     source: exactSource,
     placement: {
       exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
@@ -446,6 +480,7 @@ test("commands share one prepared source and preserve workspace mutation", async
   const sandbox = new Sandbox({
     runId: "run-shared-workspace",
     secrets: {},
+    terminal: terminalFixture(),
     source: source(
       {
         repositoryId: "repository-1",
@@ -486,6 +521,7 @@ test("a failed source preparation remains retryable", async () => {
   const sandbox = new Sandbox({
     runId: "run-retry-preparation",
     secrets: {},
+    terminal: terminalFixture(),
     source: source(
       {
         repositoryId: "repository-1",
@@ -522,6 +558,7 @@ test("a nonzero result crosses the durable boundary once before becoming an Exec
   const sandbox = new Sandbox({
     runId: "run-nonzero",
     secrets: {},
+    terminal: terminalFixture(),
     source: source(
       {
         repositoryId: "repository-1",
@@ -559,4 +596,109 @@ test("a nonzero result crosses the durable boundary once before becoming an Exec
     durableResult: { exitCode: 7, stdout: "", stderr: "failed\n", durationMs: 1 },
     executions: 1,
   });
+});
+
+test("Sandbox finish accepts only a verified terminal winner", async () => {
+  const revision = "7".repeat(40);
+  const terminal = terminalFixture();
+  const winner = await terminal.claim("success");
+  let destroys = 0;
+  const sandbox = new Sandbox({
+    runId: "run-1",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      { prepare: async () => prepared(revision) },
+    ),
+    placement: {
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      destroy: async () => {
+        destroys += 1;
+      },
+    },
+    terminal,
+  });
+  await sandbox.exec(durable("build"), "build");
+
+  await expect(sandbox.finish({ claimId: winner.claimId, outcome: "failure" })).rejects.toThrow(
+    "terminal finalization does not match the durable winner",
+  );
+  expect(destroys).toBe(0);
+  await expect(sandbox.finish(winner)).resolves.toBeUndefined();
+  expect(destroys).toBe(1);
+});
+
+test("a failed finish cleanup remains retryable under the same winner", async () => {
+  const revision = "8".repeat(40);
+  const terminal = terminalFixture();
+  const winner = await terminal.claim("failure");
+  let attempts = 0;
+  const sandbox = new Sandbox({
+    runId: "run-1",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      { prepare: async () => prepared(revision) },
+    ),
+    placement: {
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      destroy: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient cleanup failure");
+      },
+    },
+    terminal,
+  });
+  await sandbox.exec(durable("build"), "build");
+
+  await expect(sandbox.finish(winner)).rejects.toThrow("transient cleanup failure");
+  await expect(sandbox.finish(winner)).resolves.toBeUndefined();
+  expect(attempts).toBe(2);
+});
+
+test("forced cleanup racing finish destroys one placement", async () => {
+  const revision = "9".repeat(40);
+  const terminal = terminalFixture();
+  const winner = await terminal.claim("cancelled");
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let destroys = 0;
+  const sandbox = new Sandbox({
+    runId: "run-1",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      { prepare: async () => prepared(revision) },
+    ),
+    placement: {
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      destroy: async () => {
+        destroys += 1;
+        await blocked;
+      },
+    },
+    terminal,
+  });
+  await sandbox.exec(durable("build"), "build");
+
+  const forced = sandbox.cleanup();
+  const finished = sandbox.finish(winner);
+  await Promise.resolve();
+  release();
+  await expect(Promise.all([forced, finished])).resolves.toEqual([undefined, undefined]);
+  expect(destroys).toBe(1);
 });

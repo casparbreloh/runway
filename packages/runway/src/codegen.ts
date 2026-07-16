@@ -35,6 +35,7 @@ export default createWorkflowWorker(workflow);
 export const generateHost = (
   registry: Registry,
   opts: {
+    accountId: string;
     scriptName: string;
     workflowArtifacts: Readonly<Record<string, string>>;
     deploymentId: string;
@@ -70,6 +71,7 @@ export const generateHost = (
     };
   });
   const config = JSON.stringify({
+    accountId: opts.accountId,
     scriptName: opts.scriptName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,

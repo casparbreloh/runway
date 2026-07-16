@@ -6,6 +6,7 @@ import { toEntrypoint } from "runway/runtime";
 
 import { createRouter } from "../src/router.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
+import type { Finalization, TerminalIdentity } from "../src/terminal.ts";
 import { repositoryFixture } from "./repository-fixture.ts";
 
 let githubEffectEvents: string[] = [];
@@ -491,9 +492,24 @@ interface TestHostProps {
 }
 
 export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
-  async reportRunLifecycle(_runId: string, state: string): Promise<boolean> {
-    runtimeLifecycleEvents.push(`lifecycle:${state}`);
+  async startRun(): Promise<boolean> {
+    runtimeLifecycleEvents.push("lifecycle:in_progress");
     return true;
+  }
+
+  async terminal(runId: string): Promise<TerminalIdentity> {
+    return {
+      accountId: "test-account",
+      repositoryId: `remote:${repositoryFixture.remote}`,
+      workflowId: "commands",
+      runId,
+      trustId: `remote:${repositoryFixture.remote}`,
+      generation: 1,
+    };
+  }
+
+  async publishTerminal(_runId: string, finalization: Finalization): Promise<void> {
+    runtimeLifecycleEvents.push(`lifecycle:${finalization.outcome}`);
   }
 
   async secrets(): Promise<Readonly<Record<string, string>>> {

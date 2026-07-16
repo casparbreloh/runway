@@ -2,6 +2,7 @@ import { ExecError } from "./exec-error.ts";
 import type { ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
 import type { PreparedSource, Source } from "./source.ts";
+import type { Finalization, Terminal } from "./terminal.ts";
 
 const DEFAULT_EXEC_CWD = "/workspace";
 const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;
@@ -63,6 +64,7 @@ export class ExecTimeoutError extends Error {
 
 export class Sandbox {
   #cleaned = false;
+  #cleaning: Promise<void> | undefined;
   #preparation: Promise<PreparedSource> | undefined;
   #lost: RunLostError | undefined;
   #priorStart = false;
@@ -71,17 +73,20 @@ export class Sandbox {
   readonly #runId: string;
   readonly #secrets: ReadonlyArray<string>;
   readonly #source: Source;
+  readonly #terminal: Pick<Terminal, "verify">;
 
   constructor(options: {
     readonly runId: string;
     readonly secrets: Readonly<Record<string, string>>;
     readonly source: Source;
     readonly placement: Placement;
+    readonly terminal: Pick<Terminal, "verify">;
   }) {
     this.#runId = options.runId;
     this.#secrets = Object.values(options.secrets);
     this.#source = options.source;
     this.#placement = options.placement;
+    this.#terminal = options.terminal;
   }
 
   #prepare(allowReconstruct: boolean): Promise<PreparedSource> {
@@ -158,8 +163,22 @@ export class Sandbox {
 
   async cleanup(): Promise<void> {
     if (!this.#started || this.#cleaned) return;
-    await this.#placement.destroy(this.#runId, this.#secrets);
-    this.#cleaned = true;
+    if (this.#cleaning) return await this.#cleaning;
+    const cleaning = (async () => {
+      await this.#placement.destroy(this.#runId, this.#secrets);
+      this.#cleaned = true;
+    })();
+    this.#cleaning = cleaning;
+    try {
+      await cleaning;
+    } finally {
+      if (!this.#cleaned && this.#cleaning === cleaning) this.#cleaning = undefined;
+    }
+  }
+
+  async finish(finalization: Finalization): Promise<void> {
+    await this.#terminal.verify(finalization);
+    await this.cleanup();
   }
 }
 

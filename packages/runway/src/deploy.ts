@@ -206,6 +206,7 @@ export const deployWithAdapters = async (
   }
   const snapshotKeyAvailable = remoteSecrets.has(SECRET_SNAPSHOT_KEY_BINDING);
   const deployment = await buildDeployment(registry, {
+    accountId,
     ...opts,
     scriptName,
     repository,

@@ -623,6 +623,7 @@ const run = async (config: LiveConfig): Promise<void> => {
     await writeFile(workflowPath, workflowSource());
     const identity = await authenticatedSource(project, config);
     const prepared = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository: identity.source,

@@ -12,6 +12,7 @@ import { SECRET_SNAPSHOT_KEY_BINDING, secretSnapshotBackupBinding } from "./work
 import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
 
 interface BuildContext {
+  readonly accountId: string;
   readonly cwd: string;
   readonly scriptName: string;
   readonly repository: RepositorySource;
@@ -126,6 +127,7 @@ export const buildDeployment = async (
   );
   const entry = path.join(opts.cwd, "worker.gen.ts");
   const host = generateHost(registry, {
+    accountId: opts.accountId,
     scriptName: opts.scriptName,
     workflowArtifacts,
     deploymentId,

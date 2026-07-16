@@ -421,6 +421,7 @@ const run = async (): Promise<void> => {
     await writeFile(workflowPath, workflowSource());
     const repository = await resolveRepositorySource(project);
     const prepared = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,

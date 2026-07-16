@@ -26,10 +26,11 @@ import {
   type RepositorySource,
 } from "./repository-source.ts";
 import type { ExecResult } from "./run.ts";
-import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
+import type { RuntimeBinding } from "./runtime-binding.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
+import type { Finalization, TerminalIdentity } from "./terminal.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -85,6 +86,7 @@ interface HostProps {
   readonly secretNames: ReadonlyArray<string>;
   readonly secretSnapshotKey: string;
   readonly snapshotScope: string;
+  readonly terminal: Omit<TerminalIdentity, "runId">;
 }
 
 interface LoaderContext {
@@ -115,6 +117,7 @@ type HostRoute =
     };
 
 export interface HostConfig {
+  readonly accountId: string;
   readonly scriptName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
@@ -129,24 +132,52 @@ export class RunwaySandboxBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
   implements RuntimeBinding
 {
-  async reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean> {
-    if (
-      typeof runId !== "string" ||
-      (state !== "in_progress" && state !== "success" && state !== "failure")
-    ) {
-      throw new Error("invalid run lifecycle");
-    }
+  async startRun(runId: string): Promise<boolean> {
+    this.#assertRun(runId);
     const source = this.ctx.props.source;
     if (!source) return true;
-    if (source.runId !== runId) throw new Error("invalid GitHub run lifecycle");
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
     if (!namespace) throw new Error("GitHub coordinator is not configured");
     const result = await namespace.getByName(String(source.check.repository.id)).lifecycle({
       source,
-      state,
+      state: "in_progress",
     });
     if (typeof result?.proceed !== "boolean") throw new Error("invalid GitHub run lifecycle");
     return result.proceed;
+  }
+
+  async terminal(runId: string): Promise<TerminalIdentity> {
+    this.#assertRun(runId);
+    return { ...this.ctx.props.terminal, runId };
+  }
+
+  async publishTerminal(runId: string, finalization: Finalization): Promise<void> {
+    this.#assertRun(runId);
+    if (
+      !finalization ||
+      typeof finalization !== "object" ||
+      Object.keys(finalization).sort().join(",") !== "claimId,outcome" ||
+      typeof finalization.claimId !== "string" ||
+      finalization.claimId.length === 0 ||
+      !["success", "failure", "cancelled"].includes(finalization.outcome)
+    ) {
+      throw new Error("invalid terminal finalization");
+    }
+    const source = this.ctx.props.source;
+    if (!source) return;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    const result = await namespace.getByName(String(source.check.repository.id)).lifecycle({
+      source,
+      state: finalization.outcome === "success" ? "success" : "failure",
+    });
+    if (typeof result?.proceed !== "boolean") throw new Error("invalid GitHub run lifecycle");
+  }
+
+  #assertRun(runId: string): void {
+    if (typeof runId !== "string" || runId.length === 0) throw new Error("invalid run lifecycle");
+    const source = this.ctx.props.source;
+    if (source && source.runId !== runId) throw new Error("invalid GitHub run lifecycle");
   }
 
   #secretValues(): Readonly<Record<string, string>> {
@@ -375,6 +406,10 @@ const loadWorker = async (
   artifact: WorkflowArtifact,
   metadata: WorkflowMetadata,
 ): Promise<LoaderStub> => {
+  const repository = metadata.source
+    ? repositorySourceForRun(metadata.source)
+    : artifact.repository;
+  const repositoryId = sourceIdentity(repository).repositoryId;
   const identity = new TextEncoder().encode(
     JSON.stringify([purpose, metadata.artifactVersion, config.deploymentId, metadata.source]),
   );
@@ -387,13 +422,18 @@ const loadWorker = async (
     env: {
       [RUNTIME_BINDING]: ctx.exports.RunwaySandboxBinding({
         props: {
-          repository: metadata.source
-            ? repositorySourceForRun(metadata.source)
-            : artifact.repository,
+          repository,
           ...(metadata.source ? { source: metadata.source } : {}),
           secretNames: artifact.secrets,
           secretSnapshotKey: config.secretSnapshotKey,
           snapshotScope: `${config.scriptName}:${artifact.workflowId}:${metadata.artifactVersion}`,
+          terminal: {
+            accountId: config.accountId,
+            repositoryId,
+            workflowId: artifact.workflowId,
+            trustId: repositoryId,
+            generation: metadata.source?.generation ?? 1,
+          },
         },
       }),
       [WORKFLOW_BINDING]: wrapWorkflowBinding(metadata),

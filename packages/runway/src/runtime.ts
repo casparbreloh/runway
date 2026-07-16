@@ -4,17 +4,19 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
 import type { RunOperations } from "./run.ts";
-import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
+import type { RuntimeBinding } from "./runtime-binding.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
 import type { SourceIdentity } from "./source.ts";
+import { Terminal, TerminalError } from "./terminal.ts";
+import type { Finalization, TerminalRecord, TerminalState } from "./terminal.ts";
 import type { WorkflowDefinition } from "./types.ts";
 import { RUNTIME_BINDING } from "./worker-contract.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
-const GITHUB_START_STEP = "runway:github-in-progress";
-const GITHUB_SUCCESS_STEP = "runway:github-success";
-const GITHUB_FAILURE_STEP = "runway:github-failure";
+const TERMINAL_START_STEP = "runway:terminal-start";
+const TERMINAL_CLAIM_STEP = "runway:terminal-claim";
+const TERMINAL_PUBLISH_STEP = "runway:terminal-publish";
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string | Promise<string> }>;
@@ -28,6 +30,7 @@ type DynamicWorkerEnv = Record<string, unknown> & {
 interface RunRuntime {
   readonly operations: RunOperations;
   cleanup(): Promise<void>;
+  finish(finalization: Finalization): Promise<void>;
 }
 
 const makeRunRuntime = (
@@ -36,6 +39,7 @@ const makeRunRuntime = (
   runId: string,
   secrets: Readonly<Record<string, string>>,
   identity: SourceIdentity,
+  terminal: Terminal,
 ): RunRuntime => {
   const exactSource = source(identity, {
     prepare: async (requested, options) =>
@@ -79,6 +83,7 @@ const makeRunRuntime = (
       },
       destroy: async () => await binding.destroy(runId, secrets),
     },
+    terminal,
   });
   return {
     operations: {
@@ -153,7 +158,31 @@ const makeRunRuntime = (
       sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
     },
     cleanup: () => sandbox.cleanup(),
+    finish: (finalization) => sandbox.finish(finalization),
   };
+};
+
+const makeTerminal = async (
+  step: WorkflowStep,
+  binding: RuntimeBinding,
+  runId: string,
+): Promise<Terminal> => {
+  let winner: TerminalRecord | undefined;
+  const state: TerminalState = {
+    claim: async (candidate) => {
+      winner = (await step.do(
+        TERMINAL_CLAIM_STEP,
+        async () => candidate as never,
+      )) as TerminalRecord;
+      return winner;
+    },
+    read: async () => winner,
+  };
+  return new Terminal(await binding.terminal(runId), state, async (finalization) => {
+    await step.do(TERMINAL_PUBLISH_STEP, async () => {
+      await binding.publishTerminal(runId, finalization);
+    });
+  });
 };
 
 export const toEntrypoint = (
@@ -163,16 +192,12 @@ export const toEntrypoint = (
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       const binding = (this.env as DynamicWorkerEnv)[RUNTIME_BINDING];
       if (!binding) throw new Error(`missing runtime binding: ${RUNTIME_BINDING}`);
-      const reportLifecycle = async (state: RunLifecycleState): Promise<boolean> =>
-        (await step.do(
-          state === "in_progress"
-            ? GITHUB_START_STEP
-            : state === "success"
-              ? GITHUB_SUCCESS_STEP
-              : GITHUB_FAILURE_STEP,
-          async () => (await binding.reportRunLifecycle(event.instanceId, state)) as never,
-        )) as boolean;
-      if (!(await reportLifecycle("in_progress"))) return undefined;
+      const terminal = await makeTerminal(step, binding, event.instanceId);
+      const started = (await step.do(
+        TERMINAL_START_STEP,
+        async () => (await binding.startRun(event.instanceId)) as never,
+      )) as boolean;
+      if (!started) return undefined;
       let secrets: Readonly<Record<string, string>>;
       try {
         const snapshot = await step.do(
@@ -181,7 +206,7 @@ export const toEntrypoint = (
         );
         secrets = secretsOf(def.secrets, await binding.restoreSecrets(event.instanceId, snapshot));
       } catch (error) {
-        await reportLifecycle("failure");
+        await terminal.publish(await terminal.claim("failure"));
         throw error;
       }
       const runtime = makeRunRuntime(
@@ -190,6 +215,7 @@ export const toEntrypoint = (
         event.instanceId,
         secrets,
         await binding.source(),
+        terminal,
       );
       let result: unknown;
       let failed = false;
@@ -206,17 +232,35 @@ export const toEntrypoint = (
         failed = true;
         failure = error;
       }
-      try {
-        await runtime.cleanup();
-      } catch (error) {
-        if (!failed) failure = error;
-        failed = true;
+      let cleanupFailed = false;
+      if (!failed) {
+        try {
+          await runtime.cleanup();
+        } catch (error) {
+          failed = true;
+          failure = error;
+          cleanupFailed = true;
+        }
       }
-      if (failed) {
-        await reportLifecycle("failure");
+      const finalization = await terminal.claim(failed ? "failure" : "success");
+      if (cleanupFailed) {
+        await terminal.publish(finalization);
         throw failure;
       }
-      await reportLifecycle("success");
+      let finishFailure: unknown;
+      let finishFailed = false;
+      try {
+        await runtime.finish(finalization);
+      } catch (error) {
+        finishFailed = true;
+        finishFailure = error;
+      }
+      await terminal.publish(finalization);
+      if (finishFailed) throw finishFailure;
+      if (finalization.outcome !== "success") {
+        if (failed) throw failure;
+        throw new TerminalError(`run was already finalized as ${finalization.outcome}`);
+      }
       return result;
     }
   };

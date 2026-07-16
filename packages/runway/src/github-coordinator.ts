@@ -6,8 +6,9 @@ import {
   type GitHubProvider,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
-import type { RunLifecycleState } from "./runtime-binding.ts";
 import type { GitHubRepository } from "./types.ts";
+
+type GitHubLifecycleState = "in_progress" | "success" | "failure";
 
 const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const ALARM_BATCH_SIZE = 32;
@@ -38,7 +39,7 @@ export interface GitHubCoordinatorRun {
 
 export interface GitHubCoordinatorLifecycle {
   readonly source: GitHubRunSource;
-  readonly state: RunLifecycleState;
+  readonly state: GitHubLifecycleState;
 }
 
 interface CoordinatorProvider extends GitHubProvider {}

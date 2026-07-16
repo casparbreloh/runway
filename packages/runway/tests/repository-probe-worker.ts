@@ -11,9 +11,23 @@ interface RepositoryProbeProps {
 }
 
 export class RunwaySandboxBinding extends WorkerEntrypoint<Cloudflare.Env, RepositoryProbeProps> {
-  async reportRunLifecycle(): Promise<boolean> {
+  async startRun(): Promise<boolean> {
     return true;
   }
+
+  async terminal(runId: string) {
+    const source = await this.source();
+    return {
+      accountId: "repository-probe-account",
+      repositoryId: source.repositoryId,
+      workflowId: "repository-probe",
+      runId,
+      trustId: source.repositoryId,
+      generation: 1,
+    };
+  }
+
+  async publishTerminal(): Promise<void> {}
 
   async secrets(): Promise<Readonly<Record<string, string>>> {
     return this.#values();
@@ -65,6 +79,7 @@ export class RunwaySandboxBinding extends WorkerEntrypoint<Cloudflare.Env, Repos
 
 export const RepositoryProbeDynamic: typeof WorkflowEntrypoint<unknown, unknown> =
   createDynamicWorkflow({
+    accountId: "repository-probe-account",
     scriptName: "generated-runway-host",
     deploymentId: "repository-probe-deployment",
     secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
