@@ -29,7 +29,7 @@ import type { ExecResult } from "./run.ts";
 import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
-import type { SourceIdentity, SourceResult } from "./source.ts";
+import type { PreparedSource, SourceIdentity } from "./source.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -283,7 +283,8 @@ export class RunwaySandboxBinding
     readonly runId: string;
     readonly source: SourceIdentity;
     readonly secrets: Readonly<Record<string, string>>;
-  }): Promise<SourceResult> {
+    readonly allowReconstruct: boolean;
+  }): Promise<PreparedSource> {
     const expected = sourceIdentity(this.ctx.props.repository);
     if (
       request.source.repositoryId !== expected.repositoryId ||
@@ -295,6 +296,7 @@ export class RunwaySandboxBinding
     return await this.#sandbox().prepare({
       runId: request.runId,
       secrets: this.#snapshotValues(request.secrets),
+      allowReconstruct: request.allowReconstruct,
     });
   }
 

@@ -3,7 +3,7 @@ export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
 import { createDynamicWorkflow } from "../src/host-runtime.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
-import type { SourceIdentity, SourceResult } from "../src/source.ts";
+import type { PreparedSource, SourceIdentity } from "../src/source.ts";
 
 interface RepositoryProbeProps {
   readonly repository: RepositorySource;
@@ -39,9 +39,12 @@ export class RunwaySandboxBinding extends WorkerEntrypoint<Cloudflare.Env, Repos
     };
   }
 
-  async prepareSource(): Promise<SourceResult> {
+  async prepareSource(): Promise<PreparedSource> {
     const source = await this.source();
-    return { revision: source.revision, state: "prepared", bytes: 0 };
+    return {
+      placement: "repository-probe-placement",
+      result: { revision: source.revision, state: "prepared", bytes: 0 },
+    };
   }
 
   async execute(): Promise<never> {

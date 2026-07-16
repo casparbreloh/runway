@@ -81,6 +81,31 @@ test("exec supports shorthand, options, defaults, and declared-secret redaction 
   }
 });
 
+test("a confirmed timeout is durably recorded once and keeps its original outcome", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    const run = await env.COMMANDS.create({
+      params: { commands: ["confirmed-timeout"], catchErrors: true },
+    });
+    const [instance] = introspector.get();
+
+    await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
+      timeout: { message: "command timed out after 25ms", attempt: 1 },
+    });
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using stateResult = disposable(testSandbox.state());
+    expect(
+      (await stateResult).executions.map(({ runId, step, options }) => ({
+        runId,
+        attempt: step.attempt,
+        command: options.command,
+      })),
+    ).toEqual([{ runId: run.id, attempt: 1, command: "confirmed-timeout" }]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
 test("the Workflow host prepares only its exact credential-free source capability", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
@@ -91,7 +116,13 @@ test("the Workflow host prepares only its exact credential-free source capabilit
     using sourceStateResult = disposable(testSandbox.sourceState());
     const requests = (await sourceStateResult) as Array<Record<string, unknown>>;
     expect(requests).toHaveLength(1);
-    expect(Object.keys(requests[0]!).sort()).toEqual(["runId", "secrets", "source"]);
+    expect(Object.keys(requests[0]!).sort()).toEqual([
+      "allowReconstruct",
+      "runId",
+      "secrets",
+      "source",
+    ]);
+    expect(requests[0]!.allowReconstruct).toBe(true);
     expect(requests[0]!.source).toEqual({
       repositoryId: `remote:${repositoryFixture.remote}`,
       remote: repositoryFixture.remote,
@@ -138,8 +169,7 @@ test("a live Sandbox keeps workspace files across durable sleep", async () => {
     const [instance] = introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-1" })).resolves.toMatchObject({
-      exitCode: 0,
-      stdout: "hello\n",
+      result: { exitCode: 0, stdout: "hello\n" },
     });
   } finally {
     await introspector.dispose();
@@ -153,7 +183,7 @@ test("non-zero execution is recorded once, throws a typed error, and cleans up",
     const [instance] = introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
-      exitCode: 7,
+      result: { exitCode: 7 },
     });
     await expect(instance!.waitForStepResult({ name: "caught-error" })).resolves.toEqual({
       name: "ExecError",
@@ -164,6 +194,33 @@ test("non-zero execution is recorded once, throws a typed error, and cleans up",
     const state = await stateResult;
     expect(state.executions).toHaveLength(1);
     expect(state.destroys).toEqual([run.id]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("an ambiguous start latches loss across durable retries and later authored commands", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    const run = await env.COMMANDS.create({
+      params: { commands: ["ambiguous-start", "must-not-start"], catchErrors: true },
+    });
+    const [instance] = introspector.get();
+
+    await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
+      lost: {
+        message: "run continuity was lost: ambiguous command start",
+        attempt: 1,
+      },
+    });
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using stateResult = disposable(testSandbox.state());
+    const state = await stateResult;
+    expect(
+      state.executions.map(({ runId, options }) => ({ runId, command: options.command })),
+    ).toEqual([{ runId: run.id, command: "ambiguous-start" }]);
+    using sourceStateResult = disposable(testSandbox.sourceState());
+    expect(await sourceStateResult).toHaveLength(1);
   } finally {
     await introspector.dispose();
   }
@@ -214,7 +271,7 @@ test("a run keeps one secret snapshot when the host binding rotates before exec"
     await host.rotateSecret("rotated-secret");
 
     await expect(instance!.waitForStepResult({ name: "snapshot-output" })).resolves.toMatchObject({
-      stdout: "***",
+      result: { stdout: "***" },
     });
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     await expect(host.destroySecrets()).resolves.toEqual(["sandbox-secret"]);

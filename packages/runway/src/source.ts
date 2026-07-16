@@ -4,6 +4,11 @@ export interface SourceResult {
   readonly bytes: number;
 }
 
+export interface PreparedSource {
+  readonly result: SourceResult;
+  readonly placement: string;
+}
+
 export interface SourceIdentity {
   readonly repositoryId: string;
   readonly remote: string;
@@ -11,11 +16,14 @@ export interface SourceIdentity {
 }
 
 export interface Source extends SourceIdentity {
-  prepare(): Promise<SourceResult>;
+  prepare(options: { readonly allowReconstruct: boolean }): Promise<PreparedSource>;
 }
 
 export interface SourceTransport {
-  prepare(source: SourceIdentity): Promise<SourceResult>;
+  prepare(
+    source: SourceIdentity,
+    options: { readonly allowReconstruct: boolean },
+  ): Promise<PreparedSource>;
 }
 
 const exactRevision = (revision: string): string => {
@@ -58,12 +66,23 @@ export const source = (
   const identity = { repositoryId: input.repositoryId, remote, revision };
   return {
     ...identity,
-    async prepare() {
-      const result: unknown = await transport.prepare(identity);
-      if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    async prepare(options) {
+      const prepared: unknown = await transport.prepare(identity, options);
+      if (typeof prepared !== "object" || prepared === null || Array.isArray(prepared)) {
         throw new Error("source preparation result is invalid");
       }
-      const record = result as Record<string, unknown>;
+      const evidence = prepared as Record<string, unknown>;
+      if (
+        Object.keys(evidence).sort().join(",") !== "placement,result" ||
+        typeof evidence.placement !== "string" ||
+        evidence.placement.length < 16 ||
+        typeof evidence.result !== "object" ||
+        evidence.result === null ||
+        Array.isArray(evidence.result)
+      ) {
+        throw new Error("source preparation result is invalid");
+      }
+      const record = evidence.result as Record<string, unknown>;
       if (Object.keys(record).sort().join(",") !== "bytes,revision,state") {
         throw new Error("source preparation result is invalid");
       }
@@ -79,9 +98,12 @@ export const source = (
         throw new Error("source preparation result is invalid");
       }
       return {
-        revision,
-        state: record.state,
-        bytes: record.bytes,
+        placement: evidence.placement,
+        result: {
+          revision,
+          state: record.state,
+          bytes: record.bytes,
+        },
       };
     },
   };

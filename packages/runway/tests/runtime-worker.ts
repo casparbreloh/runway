@@ -5,7 +5,7 @@ import type { ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
 import { createRouter } from "../src/router.ts";
-import type { SourceIdentity, SourceResult } from "../src/source.ts";
+import type { PreparedSource, SourceIdentity } from "../src/source.ts";
 import { repositoryFixture } from "./repository-fixture.ts";
 
 let githubEffectEvents: string[] = [];
@@ -329,7 +329,7 @@ interface SandboxRequest {
   step: { id: string; count: number; attempt: number };
   options: NormalizedExecOptions;
   secrets: ReadonlyArray<string>;
-  source: SourceResult;
+  source: PreparedSource;
 }
 
 const sandboxState = {
@@ -368,18 +368,32 @@ export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
     runId: string;
     source: SourceIdentity;
     secrets: Readonly<Record<string, string>>;
-  }): SourceResult {
+    allowReconstruct: boolean;
+  }): PreparedSource {
     sourcePreparations.push(structuredClone(request));
     const expected = this.source();
     if (JSON.stringify(request.source) !== JSON.stringify(expected)) {
       throw new Error("unexpected source");
     }
-    return { revision: expected.revision, state: "prepared", bytes: 0 };
+    return {
+      placement: `placement:${request.runId}`,
+      result: { revision: expected.revision, state: "prepared", bytes: 0 },
+    };
   }
 
   async exec(request: SandboxRequest): Promise<ExecResult> {
     const { runId, step, options, secrets } = request;
     sandboxState.executions.push({ runId, step, options, secrets });
+    if (options.command === "ambiguous-start") {
+      const error = new Error("run continuity was lost: ambiguous command start");
+      error.name = "RunLostError";
+      throw error;
+    }
+    if (options.command === "confirmed-timeout") {
+      const error = new Error("command timed out after 25ms");
+      error.name = "ExecTimeoutError";
+      throw error;
+    }
     if (options.command === "block") {
       const blocked = new Promise<void>((resolve) => activeExecutions.set(runId, resolve));
       this.ctx.waitUntil(
@@ -515,7 +529,8 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     runId: string;
     source: SourceIdentity;
     secrets: Readonly<Record<string, string>>;
-  }): Promise<SourceResult> {
+    allowReconstruct: boolean;
+  }): Promise<PreparedSource> {
     return await this.env.RUNWAY_TEST_SANDBOX.prepareSource(request);
   }
 
@@ -696,7 +711,7 @@ const commands = workflow({
   runtimeLifecycleEvents.push("handler:start");
   for (const [index, command] of commands.entries()) {
     try {
-      using _result = (await run.exec(`command-${index}`, command)) as ExecResult & Disposable;
+      await run.exec(`command-${index}`, command);
     } catch (error) {
       if (!catchErrors) throw error;
       await run.do("caught-error", () =>

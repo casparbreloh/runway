@@ -154,21 +154,17 @@ export default workflow({
     if (!response.ok) throw new Error(\`destroy driver returned \${response.status}\`);
     return await response.json();
   });
-  const recovered = observe((await run.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reused = observe((await run.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  const replacementPlacement = await run.do("replacement-placement", async () => {
-    const response = await fetch(event.destroyUrl, {
-      method: "POST",
-      headers: {
-        authorization: \`Bearer \${run.secrets.DRIVER_TOKEN}\`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ runId: run.runId, action: "placement" }),
-    });
-    if (!response.ok) throw new Error(\`placement driver returned \${response.status}\`);
-    return await response.json();
-  });
-  await run.do("recovery-report", () => ({ recovered, reused, replacementPlacement }));
+  let loss;
+  try {
+    await run.exec("recovered", ${JSON.stringify(measurementCommand())});
+    throw new Error("destroyed placement unexpectedly replayed an authenticated command");
+  } catch (error) {
+    loss = {
+      name: error instanceof Error ? error.name : "unknown",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  await run.do("loss-report", () => ({ loss, replacementPlacement: null }));
 });
 `;
 
@@ -194,9 +190,6 @@ export default {
     }
     const id = env.RUNWAY_SANDBOX.idFromName(await sandboxId(body.runId));
     const sandbox = env.RUNWAY_SANDBOX.get(id);
-    if (body.action === "placement") {
-      return Response.json({ placement: await sandbox.getContainerPlacementId() });
-    }
     const placement = await sandbox.getContainerPlacementId();
     await sandbox.destroy();
     return Response.json({ destroyed: true, placement });
@@ -694,56 +687,57 @@ const run = async (config: LiveConfig): Promise<void> => {
     const destroyed = JSON.parse(stepOutput(completed, "force-destroy")) as {
       placement?: unknown;
     };
-    const recovery = JSON.parse(stepOutput(completed, "recovery-report")) as {
-      recovered?: unknown;
-      reused?: unknown;
-      replacementPlacement?: { placement?: unknown };
+    const recovered = JSON.parse(stepOutput(completed, "recovered")) as {
+      lost?: { message?: unknown; attempt?: unknown };
+      result?: unknown;
+      timeout?: unknown;
     };
-    const recovered = observationOf(recovery.recovered);
-    const reused = observationOf(recovery.reused);
+    const lossReport = JSON.parse(stepOutput(completed, "loss-report")) as {
+      loss?: { name?: unknown; message?: unknown };
+      replacementPlacement?: unknown;
+    };
     const initialPlacement = destroyed.placement;
-    const replacementPlacement = recovery.replacementPlacement?.placement;
     if (
       typeof initialPlacement !== "string" ||
       initialPlacement.length === 0 ||
-      typeof replacementPlacement !== "string" ||
-      replacementPlacement.length === 0
+      recovered.result !== undefined ||
+      recovered.timeout !== undefined ||
+      recovered.lost?.attempt !== 1 ||
+      typeof recovered.lost.message !== "string" ||
+      !recovered.lost.message.includes("continuity was lost") ||
+      lossReport.loss?.name !== "RunLostError" ||
+      typeof lossReport.loss.message !== "string" ||
+      !lossReport.loss.message.includes("continuity was lost") ||
+      lossReport.replacementPlacement !== null
     ) {
-      throw new Error("Sandbox placement observations were missing");
+      throw new Error("Authenticated smoke did not report honest placement loss");
     }
-    for (const observation of [cold, recovered, reused]) {
-      if (observation.head !== config.sha || observation.metrics.commit !== config.sha) {
-        throw new Error("A command observed a checkout other than the opted-in exact SHA");
-      }
-      if (
-        observation.metrics.prepareStartedAtMs > observation.metrics.sandboxReadyAtMs ||
-        observation.metrics.sandboxReadyAtMs > observation.metrics.startedAtMs ||
-        observation.metrics.startedAtMs > observation.observedAtMs
-      ) {
-        throw new Error("Checkout timing boundaries were not monotonic");
-      }
-      if (observation.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
+    if (cold.head !== config.sha || cold.metrics.commit !== config.sha) {
+      throw new Error("The cold command observed a checkout other than the opted-in exact SHA");
     }
-    if (initialPlacement === replacementPlacement) {
-      throw new Error("Sandbox.destroy() did not produce a changed placement ID");
+    if (
+      cold.metrics.prepareStartedAtMs > cold.metrics.sandboxReadyAtMs ||
+      cold.metrics.sandboxReadyAtMs > cold.metrics.startedAtMs ||
+      cold.metrics.startedAtMs > cold.observedAtMs
+    ) {
+      throw new Error("Checkout timing boundaries were not monotonic");
     }
-    if (recovered.placement !== reused.placement) {
-      throw new Error("The post-recovery command unexpectedly changed Sandbox hostname");
+    if (cold.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
+    if (cold.metrics.generation !== 1 || !cold.metrics.authenticationTokenMinted) {
+      throw new Error("Initial authenticated checkout did not mint installation auth exactly once");
     }
-    if (cold.metrics.generation !== 1 || recovered.metrics.generation !== 1) {
-      throw new Error("Replacement did not reconstruct a fresh authenticated checkout");
-    }
-    if (!cold.metrics.authenticationTokenMinted || !recovered.metrics.authenticationTokenMinted) {
-      throw new Error("Initial and replacement checkout did not both mint installation auth");
-    }
-    if (JSON.stringify(recovered.metrics) !== JSON.stringify(reused.metrics)) {
-      throw new Error("A reused Sandbox performed an extra checkout");
+    if (
+      completed.steps.some(
+        ({ name }) =>
+          typeof name === "string" &&
+          (name.startsWith("reused") || name.startsWith("replacement-placement")),
+      ) ||
+      JSON.stringify({ recovered, lossReport }).includes("authenticationTokenMinted")
+    ) {
+      throw new Error("A command or authenticated checkout ran after placement loss");
     }
     assertNoCredentialDiagnostics(completed, config);
-    const authenticationTokenMintEvidence = [
-      cold.metrics.authenticationTokenMinted,
-      recovered.metrics.authenticationTokenMinted,
-    ];
+    const authenticationTokenMintEvidence = [cold.metrics.authenticationTokenMinted];
     const namespaceObjects = Object.fromEntries(
       await Promise.all(
         [SANDBOX_CLASS, GITHUB_COORDINATOR_CLASS].map(async (className) => {
@@ -763,12 +757,14 @@ const run = async (config: LiveConfig): Promise<void> => {
       installationId: identity.installationId,
       sha: config.sha,
       initialPlacement,
-      replacementPlacement,
-      placementChanged: initialPlacement !== replacementPlacement,
+      replacementPlacement: null,
+      placementAfterDestroy: "unobserved",
+      continuity: "lost",
       initialHostname: cold.placement,
-      replacementHostname: recovered.placement,
-      tokenReminted: authenticationTokenMintEvidence.every(Boolean),
+      replacementHostname: null,
+      tokenReminted: false,
       authenticationTokenMintEvidence,
+      loss: lossReport.loss,
       credentialDiagnosticsClean: true,
       durableNamespaces: Object.fromEntries(
         [SANDBOX_CLASS, GITHUB_COORDINATOR_CLASS].map((className) => [

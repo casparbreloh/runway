@@ -1,6 +1,6 @@
 import type { ExecResult } from "./run.ts";
 import type { NormalizedExecOptions } from "./sandbox.ts";
-import type { SourceIdentity, SourceResult } from "./source.ts";
+import type { PreparedSource, SourceIdentity } from "./source.ts";
 
 export interface RuntimeBinding {
   reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean>;
@@ -12,13 +12,14 @@ export interface RuntimeBinding {
     readonly runId: string;
     readonly source: SourceIdentity;
     readonly secrets: Readonly<Record<string, string>>;
-  }): Promise<SourceResult>;
+    readonly allowReconstruct: boolean;
+  }): Promise<PreparedSource>;
   execute(request: {
     readonly runId: string;
     readonly step: { readonly id: string; readonly count: number; readonly attempt: number };
     readonly options: NormalizedExecOptions;
     readonly secrets: Readonly<Record<string, string>>;
-    readonly source: SourceResult;
+    readonly source: PreparedSource;
   }): Promise<ExecResult>;
   destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
 }

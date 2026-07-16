@@ -1,17 +1,239 @@
 import { expect, test } from "vitest";
 
 import { makeRun } from "../src/run.ts";
-import { Sandbox } from "../src/sandbox.ts";
+import { RunLostError, Sandbox, type DurableStep } from "../src/sandbox.ts";
 import { source } from "../src/source.ts";
 
 const durable = (id: string, events?: string[]) => ({
   id,
-  run: async <T>(
-    work: (identity: { count: number; attempt: number }) => Promise<T>,
-  ): Promise<T> => {
+  run: async (
+    digest: string,
+    work: (identity: { count: number; attempt: number }) => Promise<{
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      durationMs: number;
+    }>,
+  ) => {
     events?.push(`durable:${id}`);
-    return await work({ count: 1, attempt: 1 });
+    return {
+      digest,
+      result: await work({ count: 1, attempt: 1 }),
+      callback: "executed" as const,
+    };
   },
+});
+
+const prepared = (revision: string, bytes = 0, placement = "placement-witness") => ({
+  placement,
+  result: { revision, state: "prepared" as const, bytes },
+});
+
+const recordedDurable = (): DurableStep => {
+  let recorded:
+    | {
+        readonly digest: string;
+        readonly result: { exitCode: number; stdout: string; stderr: string; durationMs: number };
+      }
+    | undefined;
+  return {
+    id: "recorded-command",
+    run: async (digest, work) => {
+      if (recorded) return { ...recorded, callback: "recorded" };
+      const result = await work({ count: 1, attempt: 1 });
+      recorded = { digest, result };
+      return { ...recorded, callback: "executed" };
+    },
+  };
+};
+
+test("a recorded command rejects changed canonical options without starting again", async () => {
+  const revision = "0".repeat(40);
+  const step = recordedDurable();
+  const starts: string[] = [];
+  const createSandbox = () =>
+    new Sandbox({
+      runId: "run-recorded-command",
+      secrets: {},
+      source: source(
+        {
+          repositoryId: "repository-1",
+          remote: "https://github.com/acme/example",
+          revision,
+        },
+        { prepare: async () => prepared(revision) },
+      ),
+      placement: {
+        exec: async ({ command }) => {
+          starts.push(command.command);
+          return { exitCode: 0, stdout: "first\n", stderr: "", durationMs: 1 };
+        },
+        destroy: async () => {},
+      },
+    });
+
+  await expect(
+    createSandbox().exec(step, { command: "build", env: { MODE: "one" } }),
+  ).resolves.toMatchObject({ stdout: "first\n" });
+  await expect(
+    createSandbox().exec(step, { command: "build", env: { MODE: "two" } }),
+  ).rejects.toBeInstanceOf(RunLostError);
+  expect(starts).toEqual(["build"]);
+});
+
+test("canonical command evidence ignores env insertion order and distinguishes Unicode", async () => {
+  const revision = "d".repeat(40);
+  const step = recordedDurable();
+  let starts = 0;
+  const createSandbox = () =>
+    new Sandbox({
+      runId: "run-canonical-unicode",
+      secrets: {},
+      source: source(
+        {
+          repositoryId: "repository-1",
+          remote: "https://github.com/acme/example",
+          revision,
+        },
+        { prepare: async () => prepared(revision) },
+      ),
+      placement: {
+        exec: async () => {
+          starts += 1;
+          return { exitCode: 0, stdout: "same\n", stderr: "", durationMs: 1 };
+        },
+        destroy: async () => {},
+      },
+    });
+
+  await expect(
+    createSandbox().exec(step, { command: "build", env: { z: "last", ä: "grün", a: "first" } }),
+  ).resolves.toMatchObject({ stdout: "same\n" });
+  await expect(
+    createSandbox().exec(step, { command: "build", env: { a: "first", ä: "grün", z: "last" } }),
+  ).resolves.toMatchObject({ stdout: "same\n" });
+  await expect(
+    createSandbox().exec(step, { command: "build", env: { a: "first", ä: "grün!", z: "last" } }),
+  ).rejects.toBeInstanceOf(RunLostError);
+  expect(starts).toBe(1);
+});
+
+test("a recorded command fences source reconstruction after runtime replacement", async () => {
+  const revision = "a".repeat(40);
+  const recorded = recordedDurable();
+  let preparations = 0;
+  let starts = 0;
+  const makeSandbox = () =>
+    new Sandbox({
+      runId: "run-runtime-replacement",
+      secrets: {},
+      source: source(
+        {
+          repositoryId: "repository-1",
+          remote: "https://github.com/acme/example",
+          revision,
+        },
+        {
+          prepare: async (_source, { allowReconstruct }) => {
+            preparations += 1;
+            if (!allowReconstruct) {
+              throw new RunLostError("run continuity was lost: placement was replaced");
+            }
+            return prepared(revision);
+          },
+        },
+      ),
+      placement: {
+        exec: async () => {
+          starts += 1;
+          return { exitCode: 0, stdout: "done\n", stderr: "", durationMs: 1 };
+        },
+        destroy: async () => {},
+      },
+    });
+
+  await expect(makeSandbox().exec(recorded, "build")).resolves.toMatchObject({ stdout: "done\n" });
+  const reconstructed = makeSandbox();
+  await expect(reconstructed.exec(recorded, "build")).resolves.toMatchObject({ stdout: "done\n" });
+  await expect(reconstructed.exec(durable("next"), "test")).rejects.toBeInstanceOf(RunLostError);
+  expect({ preparations, starts }).toEqual({ preparations: 2, starts: 1 });
+});
+
+test("a lost Sandbox rejects every later command without source or placement activity", async () => {
+  const revision = "b".repeat(40);
+  let preparations = 0;
+  let starts = 0;
+  const sandbox = new Sandbox({
+    runId: "run-lost-latch",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      {
+        prepare: async () => {
+          preparations += 1;
+          return prepared(revision);
+        },
+      },
+    ),
+    placement: {
+      exec: async () => {
+        starts += 1;
+        throw new RunLostError("run continuity was lost: ambiguous start");
+      },
+      destroy: async () => {},
+    },
+  });
+
+  await expect(sandbox.exec(durable("ambiguous"), "mutate")).rejects.toBeInstanceOf(RunLostError);
+  await expect(sandbox.exec(durable("later"), "publish")).rejects.toBeInstanceOf(RunLostError);
+  expect({ preparations, starts }).toEqual({ preparations: 1, starts: 1 });
+});
+
+test("known command outcomes stay honest and a later placement replacement is lost", async () => {
+  const revision = "c".repeat(40);
+  for (const outcome of ["success", "failed", "timed-out", "cancelled"] as const) {
+    let replaced = false;
+    const commands: string[] = [];
+    const sandbox = new Sandbox({
+      runId: `run-${outcome}`,
+      secrets: {},
+      source: source(
+        {
+          repositoryId: "repository-1",
+          remote: "https://github.com/acme/example",
+          revision,
+        },
+        { prepare: async () => prepared(revision) },
+      ),
+      placement: {
+        exec: async ({ command }) => {
+          commands.push(command.command);
+          if (replaced) throw new RunLostError("run continuity was lost: placement changed");
+          if (outcome === "failed") {
+            return { exitCode: 7, stdout: "", stderr: "failed\n", durationMs: 1 };
+          }
+          if (outcome === "timed-out") throw new Error("command timed out after 5ms");
+          if (outcome === "cancelled") throw new Error("command was cancelled");
+          return { exitCode: 0, stdout: "ok\n", stderr: "", durationMs: 1 };
+        },
+        destroy: async () => {},
+      },
+    });
+
+    const first = sandbox.exec(durable("first"), "first");
+    if (outcome === "success") await expect(first).resolves.toMatchObject({ exitCode: 0 });
+    else if (outcome === "failed") await expect(first).rejects.toMatchObject({ name: "ExecError" });
+    else if (outcome === "timed-out") await expect(first).rejects.toThrow("timed out");
+    else await expect(first).rejects.toThrow("cancelled");
+
+    replaced = true;
+    await expect(sandbox.exec(durable("next"), "next")).rejects.toBeInstanceOf(RunLostError);
+    expect(commands).toEqual(["first", "next"]);
+  }
 });
 
 test("invalid or non-immutable source revisions fail before placement mutation", async () => {
@@ -28,7 +250,7 @@ test("invalid or non-immutable source revisions fail before placement mutation",
         {
           prepare: async () => {
             placementMutated = true;
-            return { revision, state: "prepared", bytes: 0 };
+            return prepared(revision);
           },
         },
       ),
@@ -49,7 +271,7 @@ test("one exact public source prepares before one command executes", async () =>
     {
       prepare: async () => {
         events.push(`prepare:${revision}`);
-        return { revision, state: "prepared", bytes: 123 };
+        return prepared(revision, 123);
       },
     },
   );
@@ -59,8 +281,13 @@ test("one exact public source prepares before one command executes", async () =>
     source: exactSource,
     placement: {
       exec: async ({ source: prepared, command }) => {
-        events.push(`exec:${prepared.revision}:${command.command}`);
-        return { exitCode: 0, stdout: `${prepared.revision}\n`, stderr: "", durationMs: 4 };
+        events.push(`exec:${prepared.result.revision}:${command.command}`);
+        return {
+          exitCode: 0,
+          stdout: `${prepared.result.revision}\n`,
+          stderr: "",
+          durationMs: 4,
+        };
       },
       destroy: async () => {},
     },
@@ -95,10 +322,12 @@ test("source preparation validates state and transferred bytes after transport",
         remote: "https://github.com/acme/example",
         revision,
       },
-      { prepare: async () => result as never },
+      { prepare: async () => ({ placement: "placement-witness", result }) as never },
     );
 
-    await expect(exactSource.prepare()).rejects.toThrow("source preparation result is invalid");
+    await expect(exactSource.prepare({ allowReconstruct: true })).rejects.toThrow(
+      "source preparation result is invalid",
+    );
   }
 });
 
@@ -130,12 +359,12 @@ test("an authenticated source confines its purpose-scoped credential to checkout
         checkoutEnvironments.push(environment);
         metrics.push({ type: "source", state: "prepared", bytes: 91 });
         credential = undefined;
-        return { revision, state: "prepared", bytes: 91 };
+        return prepared(revision, 91);
       },
     },
   );
 
-  const result = await exactSource.prepare();
+  const result = await exactSource.prepare({ allowReconstruct: true });
   expect(issuerRequests).toEqual([{ purpose: "checkout", repositoryId: "github:17" }]);
   expect(preparedSources).toEqual([
     {
@@ -164,7 +393,7 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
     {
       prepare: async () => {
         prepares += 1;
-        return { revision, state: "prepared", bytes: 10 };
+        return prepared(revision, 10);
       },
     },
   );
@@ -226,7 +455,7 @@ test("commands share one prepared source and preserve workspace mutation", async
       {
         prepare: async () => {
           preparations += 1;
-          return { revision, state: "prepared", bytes: 10 };
+          return prepared(revision, 10);
         },
       },
     ),
@@ -267,7 +496,7 @@ test("a failed source preparation remains retryable", async () => {
         prepare: async () => {
           preparations += 1;
           if (preparations === 1) throw new Error("transient preparation failure");
-          return { revision, state: "prepared", bytes: 10 };
+          return prepared(revision, 10);
         },
       },
     ),
@@ -299,7 +528,7 @@ test("a nonzero result crosses the durable boundary once before becoming an Exec
         remote: "https://github.com/acme/example",
         revision,
       },
-      { prepare: async () => ({ revision, state: "prepared", bytes: 0 }) },
+      { prepare: async () => prepared(revision) },
     ),
     placement: {
       exec: async () => {
@@ -314,9 +543,13 @@ test("a nonzero result crosses the durable boundary once before becoming an Exec
     sandbox.exec(
       {
         id: "fail",
-        run: async (work) => {
+        run: async (digest, work) => {
           durableResult = await work({ count: 1, attempt: 1 });
-          return durableResult as never;
+          return {
+            digest,
+            result: durableResult as never,
+            callback: "executed" as const,
+          };
         },
       },
       "exit 7",

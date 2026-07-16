@@ -1,8 +1,13 @@
 import type { GitHubRepositoryAuthentication, RepositorySource } from "../repository-source.ts";
 import type { ExecResult } from "../run.ts";
-import type { NormalizedExecOptions } from "../sandbox.ts";
+import {
+  digestCommand,
+  ExecTimeoutError,
+  RunLostError,
+  type NormalizedExecOptions,
+} from "../sandbox.ts";
 import { redactError, StreamingRedactor } from "../secret-redaction.ts";
-import type { SourceResult } from "../source.ts";
+import type { PreparedSource } from "../source.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
@@ -45,14 +50,15 @@ export interface SandboxCommand {
   readonly step: { readonly id: string; readonly count: number; readonly attempt: number };
   readonly options: NormalizedExecOptions;
   readonly secrets: ReadonlyArray<string>;
-  readonly source: SourceResult;
+  readonly source: PreparedSource;
 }
 
 export interface CloudflareSandbox {
   prepare(request: {
     readonly runId: string;
     readonly secrets: ReadonlyArray<string>;
-  }): Promise<SourceResult>;
+    readonly allowReconstruct: boolean;
+  }): Promise<PreparedSource>;
   execute(request: SandboxCommand): Promise<ExecResult>;
   destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
 }
@@ -148,10 +154,11 @@ const isTerminal = (status: string): boolean =>
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
-const managedCommand = (command: string): string =>
-  `child=; cleanup() { [ -z "$child" ] || kill -KILL -- -"$child" 2>/dev/null || true; }; trap cleanup EXIT; trap 'exit 143' TERM INT HUP; setsid sh -c ${shellQuote(command)} & child=$!; wait "$child"`;
+const managedCommand = (command: string, digest?: string): string =>
+  `${digest ? `: ${digest}; ` : ""}child=; cleanup() { [ -z "$child" ] || kill -KILL -- -"$child" 2>/dev/null || true; }; trap cleanup EXIT; trap 'exit 143' TERM INT HUP; setsid sh -c ${shellQuote(command)} & child=$!; wait "$child"`;
 
-const repositoryMarker = (repository: RepositorySource): string => JSON.stringify(repository);
+const repositoryMarker = (repository: RepositorySource, placement: string): string =>
+  JSON.stringify({ repository, placement });
 
 const askpassHelper = `#!/bin/sh
 case "$1" in
@@ -160,10 +167,14 @@ case "$1" in
   *) exit 1 ;;
 esac`;
 
-const checkoutCommand = (repository: RepositorySource, generation: number): string => {
+const checkoutCommand = (
+  repository: RepositorySource,
+  generation: number,
+  placement: string,
+): string => {
   const remote = shellQuote(repository.remote);
   const commit = shellQuote(repository.commit);
-  const marker = shellQuote(repositoryMarker(repository));
+  const marker = shellQuote(repositoryMarker(repository, placement));
   const helper = shellQuote(askpassHelper);
   return `set -eu; helper="${"${GIT_ASKPASS:-}"}"; cleanup_checkout() { [ -z "$helper" ] || rm -f "$helper"; }; trap cleanup_checkout EXIT; if [ -n "${"${RUNWAY_GITHUB_TOKEN:-}"}" ]; then umask 077; printf %s ${helper} > "$helper"; chmod 700 "$helper"; fi; started_at=$(date +%s%3N); rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; fetch_started_at=$(date +%s%3N); git -c http.followRedirects=false -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; fetch_completed_at=$(date +%s%3N); git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; completed_at=$(date +%s%3N); pack_bytes=$(find /workspace/.git/objects/pack -type f -name '*.pack' -exec wc -c {} + | awk '{ total += $1 } END { print total + 0 }'); printf '{"commit":"%s","generation":%s,"authenticationTokenMinted":%s,"prepareStartedAtMs":%s,"sandboxReadyAtMs":%s,"startedAtMs":%s,"fetchMs":%s,"checkoutMs":%s,"packBytes":%s}' ${commit} ${generation} "$RUNWAY_AUTHENTICATION_TOKEN_MINTED" "$RUNWAY_PREPARE_STARTED_AT_MS" "$RUNWAY_SANDBOX_READY_AT_MS" "$started_at" "$((fetch_completed_at - fetch_started_at))" "$((completed_at - started_at))" "$pack_bytes" > ${REPOSITORY_METRICS}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
 };
@@ -209,6 +220,16 @@ const watchTermination = async (
       return;
     }
   }
+};
+
+const lost = (message: string): RunLostError =>
+  new RunLostError(`run continuity was lost: ${message}`);
+
+const redactFailure = (error: unknown, secrets: ReadonlyArray<string>): Error => {
+  const redacted = redactError(error, secrets);
+  if (error instanceof RunLostError) return new RunLostError(redacted.message);
+  if (error instanceof ExecTimeoutError) return new ExecTimeoutError(redacted.message);
+  return redacted;
 };
 
 const createOutputCollector = (
@@ -356,26 +377,42 @@ const prepareRepository = async (
   sandbox: PlatformSandbox,
   request: SandboxCommand,
   repository: RepositorySource,
+  allowReconstruct: boolean,
   installationToken: CloudflareSandboxOptions["installationToken"],
   log: CloudflareSandboxOptions["log"],
-): Promise<SourceResult> => {
+): Promise<PreparedSource> => {
   const prepareStartedAtMs = Date.now();
   const marker = await sandbox.exists(REPOSITORY_MARKER);
   const sandboxReadyAtMs = Date.now();
   if (marker.exists) {
     const stored = await sandbox.readFile(REPOSITORY_MARKER);
     const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
-    if (stored.success && stored.content === repositoryMarker(repository) && checkout.exists) {
-      return { revision: repository.commit, state: "reused", bytes: 0 };
+    if (stored.success && checkout.exists) {
+      try {
+        const evidence = JSON.parse(stored.content) as Record<string, unknown>;
+        if (
+          Object.keys(evidence).sort().join(",") === "placement,repository" &&
+          JSON.stringify(evidence.repository) === JSON.stringify(repository) &&
+          typeof evidence.placement === "string" &&
+          evidence.placement.length >= 16
+        ) {
+          return {
+            placement: evidence.placement,
+            result: { revision: repository.commit, state: "reused", bytes: 0 },
+          };
+        }
+      } catch {}
     }
   }
+  if (!allowReconstruct) throw lost("the command placement was replaced");
   const checkoutRequest: SandboxCommand = {
     ...request,
     step: { ...request.step, id: "runway:checkout" },
   };
   const generation = (await checkoutGeneration(sandbox)) + 1;
+  const placement = crypto.randomUUID();
   const processId = await hashId("checkout", [request.runId, generation]);
-  const command = managedCommand(checkoutCommand(repository, generation));
+  const command = managedCommand(checkoutCommand(repository, generation, placement));
   let process = await sandbox.getProcess(processId);
   let token: string | undefined;
   let ownsAuthenticatedCheckout = false;
@@ -438,7 +475,7 @@ const prepareRepository = async (
     const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
     if (
       !prepared.success ||
-      prepared.content !== repositoryMarker(repository) ||
+      prepared.content !== repositoryMarker(repository, placement) ||
       !checkout.exists
     ) {
       await sandbox.destroy();
@@ -451,10 +488,13 @@ const prepareRepository = async (
       await sandbox.destroy();
       throw error;
     }
-    return { revision: repository.commit, state: "prepared", bytes };
+    return {
+      placement,
+      result: { revision: repository.commit, state: "prepared", bytes },
+    };
   } catch (error) {
     if (recoveredAuthenticatedCheckout) throw new Error("repository checkout recovery failed");
-    throw redactError(error, redactedCheckoutRequest.secrets);
+    throw redactFailure(error, redactedCheckoutRequest.secrets);
   } finally {
     timeout.cancel();
   }
@@ -472,14 +512,18 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
           step: { id: "runway:checkout", count: 1, attempt: 1 },
           options: { command: "true", cwd: "/", env: { CI: "true" }, timeoutMs: 1 },
           secrets: request.secrets,
-          source: { revision: options.repository.commit, state: "prepared", bytes: 0 },
+          source: {
+            placement: "source-preparation",
+            result: { revision: options.repository.commit, state: "prepared", bytes: 0 },
+          },
         },
         options.repository,
+        request.allowReconstruct,
         options.installationToken,
         options.log,
       );
     } catch (error) {
-      throw redactError(error, request.secrets);
+      throw redactFailure(error, request.secrets);
     }
   };
   const execute: CloudflareSandbox["execute"] = async (request): Promise<ExecResult> => {
@@ -488,14 +532,30 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
     const untilCompleted = new Promise<void>((resolve) => (finish = resolve));
     try {
       const sandboxId = await hashId("runway", [request.runId]);
-      const processId = await hashId("step", [request.runId, request.step.id, request.step.count]);
-      const command = managedCommand(request.options.command);
+      const digest = await digestCommand(request.options);
+      const processId = await hashId("step", [
+        request.runId,
+        request.step.id,
+        request.step.count,
+        digest,
+      ]);
+      const command = managedCommand(request.options.command, digest);
       const sandbox = await options.placement(sandboxId);
-      if (request.source.revision !== options.repository.commit) {
+      if (request.source.result.revision !== options.repository.commit) {
         throw new Error("command source does not match the exact repository revision");
+      }
+      const storedMarker = await sandbox.readFile(REPOSITORY_MARKER);
+      const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+      if (
+        !storedMarker.success ||
+        storedMarker.content !== repositoryMarker(options.repository, request.source.placement) ||
+        !checkout.exists
+      ) {
+        throw lost("the command placement was replaced");
       }
       let process = await sandbox.getProcess(processId);
       if (!process) {
+        if (request.step.attempt > 1) throw lost("the command process disappeared during retry");
         try {
           process = await sandbox.startProcess(command, {
             processId,
@@ -503,16 +563,21 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
             cwd: request.options.cwd,
             env: { ...request.options.env },
           });
-        } catch (error) {
+        } catch {
           process = await sandbox.getProcess(processId);
-          if (!process) throw error;
+          if (!process) throw lost("the command start response was ambiguous");
         }
       }
       if (process.command !== command) {
-        throw new Error(`process identity collision for step ${JSON.stringify(request.step.id)}`);
+        throw lost(`the command evidence changed for step ${JSON.stringify(request.step.id)}`);
+      }
+      if (process.status === "killed" || process.status === "error") {
+        throw lost("the command was cancelled or its result is ambiguous");
       }
       if (isTerminal(process.status)) {
-        return await collectResult(sandbox, process, request, options.log);
+        return await collectResult(sandbox, process, request, options.log).catch(() => {
+          throw lost("the recorded command result is ambiguous");
+        });
       }
       if (options.status && options.waitUntil) {
         options.waitUntil(
@@ -524,7 +589,7 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
             () => completed,
             untilCompleted,
           ).catch((error) => {
-            throw redactError(error, request.secrets);
+            throw redactFailure(error, request.secrets);
           }),
         );
       }
@@ -532,18 +597,21 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
       const remainingMs = Math.max(0, request.options.timeoutMs - elapsedMs);
       const timeout = cancellableDelay(remainingMs);
       try {
-        return await Promise.race([
-          collectResult(sandbox, process, request, options.log),
+        const result = await Promise.race([
+          collectResult(sandbox, process, request, options.log).catch(() => {
+            throw lost("the command result is ambiguous");
+          }),
           timeout.promise.then(async () => {
             await killProcessGroup(sandbox, process);
-            throw new Error(`command timed out after ${request.options.timeoutMs}ms`);
+            throw new ExecTimeoutError(`command timed out after ${request.options.timeoutMs}ms`);
           }),
         ]);
+        return result;
       } finally {
         timeout.cancel();
       }
     } catch (error) {
-      throw redactError(error, request.secrets);
+      throw redactFailure(error, request.secrets);
     } finally {
       completed = true;
       finish();

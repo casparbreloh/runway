@@ -119,15 +119,17 @@ export default workflow({
     return await response.json();
   });
   const recoveryStartedAtMs = await run.do("recovery-started", () => Date.now());
-  const recovered = observe((await run.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reusedStartedAtMs = await run.do("reused-started", () => Date.now());
-  const reused = observe((await run.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  await run.do("recovery-report", () => ({
-    recoveryStartedAtMs,
-    reusedStartedAtMs,
-    recovered,
-    reused,
-  }));
+  let loss;
+  try {
+    await run.exec("recovered", ${JSON.stringify(measurementCommand())});
+    throw new Error("destroyed placement unexpectedly replayed a user command");
+  } catch (error) {
+    loss = {
+      name: error instanceof Error ? error.name : "unknown",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  await run.do("loss-report", () => ({ recoveryStartedAtMs, loss }));
 });
 `;
 
@@ -458,41 +460,31 @@ const run = async (): Promise<void> => {
       coldStartedAtMs?: unknown;
       cold?: unknown;
     };
-    const recoveryReport = JSON.parse(stepOutput(completed, "recovery-report")) as {
+    const lossReport = JSON.parse(stepOutput(completed, "loss-report")) as {
       recoveryStartedAtMs?: unknown;
-      reusedStartedAtMs?: unknown;
-      recovered?: unknown;
-      reused?: unknown;
+      loss?: { name?: unknown; message?: unknown };
     };
     if (
       typeof coldReport.coldStartedAtMs !== "number" ||
-      typeof recoveryReport.recoveryStartedAtMs !== "number" ||
-      typeof recoveryReport.reusedStartedAtMs !== "number"
+      typeof lossReport.recoveryStartedAtMs !== "number" ||
+      lossReport.loss?.name !== "RunLostError" ||
+      typeof lossReport.loss.message !== "string" ||
+      !lossReport.loss.message.includes("continuity was lost")
     ) {
-      throw new Error("Smoke report omitted phase timestamps");
+      throw new Error("Smoke did not report honest placement loss");
     }
     const cold = observationOf(coldReport.cold);
-    const recovered = observationOf(recoveryReport.recovered);
-    const reused = observationOf(recoveryReport.reused);
-    for (const observation of [cold, recovered, reused]) {
-      if (observation.head !== observation.metrics.commit) {
-        throw new Error("A command observed a checkout other than the pinned commit");
-      }
-      if (
-        observation.metrics.prepareStartedAtMs > observation.metrics.sandboxReadyAtMs ||
-        observation.metrics.sandboxReadyAtMs > observation.metrics.startedAtMs ||
-        observation.metrics.startedAtMs > observation.observedAtMs
-      ) {
-        throw new Error("Checkout timing boundaries were not monotonic");
-      }
-      if (observation.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
+    if (cold.head !== cold.metrics.commit) {
+      throw new Error("The cold command observed a checkout other than the pinned commit");
     }
-    if (cold.metrics.startedAtMs === recovered.metrics.startedAtMs) {
-      throw new Error("Recovery reused checkout metrics from the destroyed Sandbox");
+    if (
+      cold.metrics.prepareStartedAtMs > cold.metrics.sandboxReadyAtMs ||
+      cold.metrics.sandboxReadyAtMs > cold.metrics.startedAtMs ||
+      cold.metrics.startedAtMs > cold.observedAtMs
+    ) {
+      throw new Error("Checkout timing boundaries were not monotonic");
     }
-    if (JSON.stringify(recovered.metrics) !== JSON.stringify(reused.metrics)) {
-      throw new Error("A reused Sandbox performed more than one recovery checkout");
-    }
+    if (cold.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
     report = {
       outcome: "passed",
       accountId,
@@ -510,18 +502,8 @@ const run = async (): Promise<void> => {
         commandReadyMs: cold.observedAtMs - cold.metrics.prepareStartedAtMs,
       },
       recovery: {
-        workflowToSandboxMs:
-          recovered.metrics.prepareStartedAtMs - recoveryReport.recoveryStartedAtMs,
-        sandboxReadyMs: recovered.metrics.sandboxReadyAtMs - recovered.metrics.prepareStartedAtMs,
-        checkoutProcessStartMs: recovered.metrics.startedAtMs - recovered.metrics.sandboxReadyAtMs,
-        checkoutMs: recovered.metrics.checkoutMs,
-        fetchMs: recovered.metrics.fetchMs,
-        packBytes: recovered.metrics.packBytes,
-        commandReadyMs: recovered.observedAtMs - recovered.metrics.prepareStartedAtMs,
-        overheadMs:
-          recovered.observedAtMs -
-          recoveryReport.recoveryStartedAtMs -
-          (reused.observedAtMs - recoveryReport.reusedStartedAtMs),
+        state: "lost",
+        detectedMs: Date.now() - lossReport.recoveryStartedAtMs,
       },
       totalMs: Date.now() - startedAt,
     };

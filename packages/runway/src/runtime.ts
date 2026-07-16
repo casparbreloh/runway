@@ -5,7 +5,7 @@ import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
 import type { RunOperations } from "./run.ts";
 import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
-import { Sandbox } from "./sandbox.ts";
+import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
 import type { SourceIdentity } from "./source.ts";
 import type { WorkflowDefinition } from "./types.ts";
@@ -38,22 +38,45 @@ const makeRunRuntime = (
   identity: SourceIdentity,
 ): RunRuntime => {
   const exactSource = source(identity, {
-    prepare: async (requested) =>
-      await binding.prepareSource({ runId, source: requested, secrets }),
+    prepare: async (requested, options) =>
+      await binding.prepareSource({ runId, source: requested, secrets, ...options }),
   });
   const sandbox = new Sandbox({
     runId,
     secrets,
     source: exactSource,
     placement: {
-      exec: async ({ step: durableStep, source: prepared, command, secrets: _secrets, ...rest }) =>
-        await binding.execute({
-          ...rest,
-          step: durableStep,
-          source: prepared,
-          options: command,
-          secrets,
-        }),
+      exec: async ({
+        step: durableStep,
+        source: prepared,
+        command,
+        secrets: _secrets,
+        ...rest
+      }) => {
+        try {
+          return await binding.execute({
+            ...rest,
+            step: durableStep,
+            source: prepared,
+            options: command,
+            secrets,
+          });
+        } catch (error) {
+          if (
+            error instanceof RunLostError ||
+            (error instanceof Error && error.name === "RunLostError")
+          ) {
+            throw new RunLostError(error.message);
+          }
+          if (
+            error instanceof ExecTimeoutError ||
+            (error instanceof Error && error.name === "ExecTimeoutError")
+          ) {
+            throw new ExecTimeoutError(error.message);
+          }
+          throw error;
+        }
+      },
       destroy: async () => await binding.destroy(runId, secrets),
     },
   });
@@ -65,16 +88,65 @@ const makeRunRuntime = (
         sandbox.exec(
           {
             id,
-            run: async (work, rollback) =>
-              await step.do(
+            run: async (digest, work, rollback) => {
+              let executed = false;
+              const recorded: unknown = await step.do(
                 id,
-                async (ctx) =>
-                  await work({
-                    count: ctx.step.count,
-                    attempt: ctx.attempt,
-                  }),
+                { retries: { limit: 5, delay: 0 } },
+                async (ctx) => {
+                  executed = true;
+                  try {
+                    return {
+                      digest,
+                      result: await work({
+                        count: ctx.step.count,
+                        attempt: ctx.attempt,
+                      }),
+                    } as never;
+                  } catch (error) {
+                    if (error instanceof RunLostError) {
+                      return {
+                        digest,
+                        lost: { message: error.message, attempt: ctx.attempt },
+                      } as never;
+                    }
+                    if (error instanceof ExecTimeoutError) {
+                      return {
+                        digest,
+                        timeout: { message: error.message, attempt: ctx.attempt },
+                      } as never;
+                    }
+                    throw error;
+                  }
+                },
                 { rollback },
-              ),
+              );
+              if (
+                !recorded ||
+                typeof recorded !== "object" ||
+                !("digest" in recorded) ||
+                recorded.digest !== digest ||
+                ["result", "lost", "timeout"].filter((field) => field in recorded).length !== 1
+              ) {
+                throw new RunLostError("run continuity was lost because command options changed");
+              }
+              const evidence = recorded as {
+                readonly digest: string;
+                readonly result?: never;
+                readonly lost?: { readonly message: string; readonly attempt: number };
+                readonly timeout?: { readonly message: string; readonly attempt: number };
+              };
+              const terminal = evidence.lost
+                ? { lost: evidence.lost }
+                : evidence.timeout
+                  ? { timeout: evidence.timeout }
+                  : { result: evidence.result as never };
+              return {
+                digest: evidence.digest,
+                ...terminal,
+                callback: executed ? "executed" : "recorded",
+              };
+            },
           },
           command,
         ),
