@@ -145,8 +145,14 @@ Tokens travel only through the checkout process environment and are redacted fro
 Cloudflare Sandbox backup/restore is not enabled. It currently requires an R2 binding and production
 presigning credentials, expired backup objects require separate lifecycle cleanup, and restored
 mounts must themselves be restored again after a container restart. Repository source therefore
-uses deterministic reconstruction rather than filesystem persistence. Cache transport remains
-deferred until its own R2-backed protocol is implemented and measured.
+uses deterministic reconstruction rather than filesystem persistence.
+
+This repository bootstraps its Linux CI toolchain and lockfile-resolved dependencies from a
+reproducible, content-addressed archive in a dedicated public R2 cache bucket. Each archive chunk
+and the complete archive are SHA-256 verified before extraction. That bucket contains only the
+toolchain and dependency tree: workflow artifacts, repository source, run data, and credentials
+remain in private storage. This bootstrap is specific to Runway's own workflows; general cache
+transport through tools such as Turborepo and Nx remains a later milestone.
 
 Cloudflare Workflow rollback cleans up ordinary failed runs, but a live deployment smoke test
 returned `rollback: null` after terminating an active command. The internal runner adapter therefore
@@ -160,14 +166,18 @@ name identifies the Worker script, Dynamic Workflow resource, and workers.dev ho
 `runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, reconciles the
 hidden Sandbox and GitHub coordinator Durable Objects and container application, updates its
 Dynamic Workflow, replaces cron schedules, enables workers.dev, and removes stale Workflow
-resources belonging to the same script.
+resources belonging to the same script. The managed runner uses Cloudflare's `standard-1`
+container tier. When deployment changes an existing container definition, Runway explicitly starts
+the required rollout and waits for it to complete; updating application metadata alone does not
+activate the new runner configuration.
 
-## GitHub App Setup And Cutover
+## GitHub App Setup
 
-Runway's repository App needs Contents read, Pull requests read, and Checks write permissions, and
-subscriptions to Push and Pull request events. Install it only on the repository being deployed.
-Set its webhook secret to the same value as `RUNWAY_GITHUB_WEBHOOK_SECRET`; after the first deploy,
-set the App webhook URL to the printed `github` URL.
+Create a GitHub App named Runway for the repository integration. It needs Contents read, Pull
+requests read, and Checks write permissions, and subscriptions to Push and Pull request events.
+Install it only on the repository being deployed. Set its webhook secret to the same value as
+`RUNWAY_GITHUB_WEBHOOK_SECRET`; after the first deploy, set the App webhook URL to the printed
+`github` URL.
 
 Provide the App ID and private key locally for every deploy. Provide the webhook secret locally for
 the first deploy, or store it on the repo Worker for later preservation:
@@ -180,22 +190,28 @@ runway deploy
 ```
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows run for
-pushes to `main` and pull requests opened, reopened, or synchronized. GitHub Actions remains the
-fallback while this integration is staged. Before deleting [the Actions workflow](.github/workflows/ci.yml),
-prove on a real pull request that both Runway Checks target the exact head SHA, a superseding commit
-cancels only the prior same-key runs, authenticated checkout recovers after Sandbox replacement,
-credentials remain redacted, and owned smoke resources are absent after cleanup. Removing Actions
-is a separate evidence-gated cutover, not part of `runway deploy`.
+pushes to `main` and pull requests opened, reopened, or synchronized. This evidence-gated cutover
+makes Runway the repository's CI provider by deleting the duplicate GitHub Actions workflow.
+
+The cutover was gated by live evidence on 2026-07-16. The installed App, `Runway by casparbreloh`,
+accepted delivery `4ce375d0-812e-11f1-8d6c-4c67fc189943` for exact PR head
+`cc86fa5820f78d7dfce15cb2ffbc6507d03bccfb`. Generation 42 completed Check
+`87671213580` and Test `87671211046` successfully, with Runway external IDs ending in `-42`.
+Supersession cancelled generation 34 Check `87638027646` and Test `87638030943`, while unrelated
+Actions checks remained successful. An authenticated recovery run checked out exact SHA
+`8c63b9a00f7a15c8ed66eaad1dba33730609dfe4`, changed Sandbox placement after `Sandbox.destroy()`,
+reminted repository-scoped authentication, reused the recovered placement for the next command,
+kept credentials out of diagnostics, and left no owned smoke resources. The `main` branch was
+unprotected, so the cutover required no branch-rule migration.
 
 ## Scope
 
 The current implementation includes workflows, triggers, secrets, routing, discovery, validation,
 deployment, durable steps, durable sleep, immutable workflow artifacts, authenticated private GitHub
 checkout, GitHub delivery dispatch and Checks, scoped supersession, and managed command execution.
-Public-repository recovery has repeatable live evidence. Authenticated replacement and the complete
-GitHub self-hosting flow have local seam coverage but still require the evidence-gated live proof
-described above. Runway does not yet include caching, run artifacts, application deployment
-primitives, AI, agents, or public Sandbox access.
+Public and authenticated repository recovery and the complete GitHub self-hosting flow have
+repeatable live evidence. Runway does not yet include general-purpose cache transport, run
+artifacts, application deployment primitives, AI, agents, or public Sandbox access.
 
 Cloudflare is the only backend target. Current deployments require Workers, Workflows, Dynamic
 Workflows, Worker Loader, and schedules. Workflow resumes load their exact immutable workflow
@@ -210,8 +226,8 @@ are part of the root TypeScript solution, so ordinary `pnpm typecheck` verifies 
 
 Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
 integration. The suite tests public SDK, Workers runtime, generated runner adapter, CLI, and
-Cloudflare API boundaries. Sandbox replacement and exact repository reconstruction are simulated at
-that seam; the forced-replacement path has not yet been proven by the repeatable live smoke.
+Cloudflare API boundaries. Repeatable live smokes also prove public and authenticated exact-SHA
+repository reconstruction after forced Sandbox replacement and audit their owned-resource cleanup.
 
 ```sh
 pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test
