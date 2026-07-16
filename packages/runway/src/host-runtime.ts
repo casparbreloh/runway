@@ -30,7 +30,7 @@ import type { RuntimeBinding } from "./runtime-binding.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
-import type { Finalization, TerminalIdentity } from "./terminal.ts";
+import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -151,6 +151,41 @@ export class RunwaySandboxBinding
     return { ...this.ctx.props.terminal, runId };
   }
 
+  async claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
+    this.#assertRun(runId);
+    const identity = await this.terminal(runId);
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Object.keys(candidate).sort().join(",") !==
+        "accountId,claimId,generation,outcome,repositoryId,runId,trustId,workflowId" ||
+      Object.entries(identity).some(
+        ([field, value]) => candidate[field as keyof TerminalIdentity] !== value,
+      ) ||
+      typeof candidate.claimId !== "string" ||
+      candidate.claimId.length === 0 ||
+      !["success", "failure", "cancelled"].includes(candidate.outcome)
+    ) {
+      throw new Error("invalid terminal claim");
+    }
+    const source = this.ctx.props.source;
+    if (!source) return candidate;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    return await namespace
+      .getByName(String(source.check.repository.id))
+      .claimTerminal({ source, candidate });
+  }
+
+  async readTerminal(runId: string): Promise<TerminalRecord | undefined> {
+    this.#assertRun(runId);
+    const source = this.ctx.props.source;
+    if (!source) return undefined;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    return await namespace.getByName(String(source.check.repository.id)).readTerminal(source);
+  }
+
   async publishTerminal(runId: string, finalization: Finalization): Promise<void> {
     this.#assertRun(runId);
     if (
@@ -167,11 +202,10 @@ export class RunwaySandboxBinding
     if (!source) return;
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
     if (!namespace) throw new Error("GitHub coordinator is not configured");
-    const result = await namespace.getByName(String(source.check.repository.id)).lifecycle({
+    await namespace.getByName(String(source.check.repository.id)).publishTerminal({
       source,
-      state: finalization.outcome === "success" ? "success" : "failure",
+      finalization,
     });
-    if (typeof result?.proceed !== "boolean") throw new Error("invalid GitHub run lifecycle");
   }
 
   #assertRun(runId: string): void {
@@ -528,7 +562,11 @@ export const createHost = (config: HostConfig) => ({
       const namespace = env[GITHUB_COORDINATOR_BINDING];
       if (!namespace) return new Response("GitHub coordinator is not configured", { status: 503 });
       const coordinator = namespace.getByName(String(config.github.repository.id));
-      const result = (await coordinator.admit({ delivery, workflows })) as {
+      const result = (await coordinator.admit({
+        accountId: config.accountId,
+        delivery,
+        workflows,
+      })) as {
         readonly runs: readonly GitHubCoordinatorRun[];
       };
       return Response.json({ runs: result.runs }, { status: 202 });

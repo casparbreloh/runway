@@ -1,11 +1,13 @@
 import type { ExecResult } from "./run.ts";
 import type { NormalizedExecOptions } from "./sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
-import type { Finalization, TerminalIdentity } from "./terminal.ts";
+import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 
 export interface RuntimeBinding {
   startRun(runId: string): Promise<boolean>;
   terminal(runId: string): Promise<TerminalIdentity>;
+  claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord>;
+  readTerminal(runId: string): Promise<TerminalRecord | undefined>;
   publishTerminal(runId: string, finalization: Finalization): Promise<void>;
   secrets(): Promise<Readonly<Record<string, string>>>;
   captureSecrets(runId: string): Promise<string>;

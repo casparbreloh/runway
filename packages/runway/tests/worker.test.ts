@@ -492,6 +492,7 @@ test("corrupted durable identities and contradictory flags fail closed before pr
       [`active:${activeKey}`]: { kind: "active", activeKey, runId, generation: 1 },
       [`run:${runId}`]: {
         kind: "run",
+        accountId: "test-account",
         runId,
         workflowId,
         artifactVersion: "a".repeat(64),
@@ -500,6 +501,8 @@ test("corrupted durable identities and contradictory flags fail closed before pr
         activeKey,
         generation: 1,
         expiresAt: now + 7 * 24 * 60 * 60 * 1_000,
+        terminal: null,
+        terminalPublished: false,
         desired: "queued",
         preflightComplete: false,
         checkCreateAttempted: false,
@@ -603,6 +606,53 @@ test("a duplicate GitHub delivery resumes the same per-workflow dispatch without
   expect(duplicatePayload.runs).toEqual(firstPayload.runs);
   expect((await env.RUNWAY_GITHUB_PROVIDER.state()).checks).toHaveLength(2);
   expect((await githubWorkflowProbeState()).creates).toHaveLength(2);
+});
+
+test("a duplicate delivery cannot cross the coordinator account authority", async () => {
+  const deliveryId = "123e4567-e89b-42d3-a456-426614174152";
+  const repository = { id: 101, name: "runway", fullName: "casparbreloh/runway" };
+  const delivery = {
+    status: "accepted" as const,
+    deliveryId,
+    installationId: 42,
+    checkRepository: repository,
+    checkoutRepository: repository,
+    event: {
+      type: "push" as const,
+      repository,
+      ref: "refs/heads/main",
+      sha: "f".repeat(40),
+    },
+    concurrency: { type: "push" as const, repositoryId: 101, ref: "refs/heads/main" },
+  };
+  const coordinator = (
+    env.GITHUB_COORDINATOR_TEST as unknown as {
+      getByName(name: string): {
+        admit(value: unknown): Promise<unknown>;
+        admitResultForTest(value: unknown): Promise<{ ok: boolean; error?: string }>;
+      };
+    }
+  ).getByName("account-authority");
+  const workflows = [
+    {
+      workflowId: "github-check",
+      artifactVersion: env.GITHUB_CHECK_ARTIFACT_VERSION,
+      checkName: "Check",
+    },
+  ];
+
+  const admitted = (await coordinator.admit({
+    accountId: "test-account",
+    delivery,
+    workflows,
+  })) as { runs: Array<{ id: string; workflow: string }> };
+  expect(admitted).toMatchObject({
+    runs: [expect.objectContaining({ workflow: "github-check" })],
+  });
+  await waitForGitHubCreates(admitted.runs.map(({ id }) => id));
+  await expect(
+    coordinator.admitResultForTest({ accountId: "another-account", delivery, workflows }),
+  ).resolves.toEqual({ ok: false, error: "invalid GitHub coordinator state" });
 });
 
 test("lost Check and Workflow create responses reconcile their exact persisted intents", async () => {
@@ -774,12 +824,12 @@ test("supersession before runtime start fences the old handler and keeps cancell
   ]);
 });
 
-test("cancellation beats a persisted success while its Check effect is awaiting", async () => {
+test("a claimed GitHub success remains the terminal winner when supersession arrives before its Check effect", async () => {
   await putGitHubArtifacts();
   const oldResponse = await deliverGitHub({
-    deliveryId: "123e4567-e89b-42d3-a456-426614174134",
+    deliveryId: "123e4567-e89b-42d3-a456-426614174150",
     event: "pull_request",
-    payload: pullRequestPayload("7".repeat(40), { number: 42 }),
+    payload: pullRequestPayload("d".repeat(40), { number: 50 }),
   });
   const oldRuns = (await oldResponse.json()) as {
     runs: Array<{ id: string; workflow: string }>;
@@ -792,10 +842,11 @@ test("cancellation beats a persisted success while its Check effect is awaiting"
   )!;
   await using instance = await startGitHubWorkflow(oldCreate);
   await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+
   const latestResponse = await deliverGitHub({
-    deliveryId: "123e4567-e89b-42d3-a456-426614174135",
+    deliveryId: "123e4567-e89b-42d3-a456-426614174151",
     event: "pull_request",
-    payload: pullRequestPayload("8".repeat(40), { number: 42 }),
+    payload: pullRequestPayload("e".repeat(40), { number: 50 }),
   });
   const latestRuns = (await latestResponse.json()) as { runs: Array<{ id: string }> };
   await env.RUNWAY_GITHUB_PROVIDER.configure({ checkTokenDelayMs: 0 });
@@ -804,19 +855,65 @@ test("cancellation beats a persisted success while its Check effect is awaiting"
   await eventually(async () => {
     const provider = await env.RUNWAY_GITHUB_PROVIDER.state();
     const check = provider.checks.find(({ externalId }) => externalId === oldSuccess.id)!;
-    expect(check).toMatchObject({ status: "completed", conclusion: "cancelled" });
+    expect(check).toMatchObject({ status: "completed", conclusion: "success" });
     expect(provider.updates.filter(({ checkRunId }) => checkRunId === check.id)).not.toContainEqual(
       {
         checkRunId: check.id,
-        state: "success",
+        state: "cancelled",
       },
     );
-    expect(
-      provider.checks
-        .filter(({ externalId }) => oldRuns.runs.some(({ id }) => id === externalId))
-        .map(({ conclusion }) => conclusion),
-    ).toEqual(["cancelled", "cancelled"]);
   });
+});
+
+test("an inactive claimed terminal winner survives delivery expiry until publication", async () => {
+  const oldResponse = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174153",
+    event: "pull_request",
+    payload: pullRequestPayload("1".repeat(40), { number: 51 }),
+  });
+  const oldRuns = (await oldResponse.json()) as {
+    runs: Array<{ id: string; workflow: string }>;
+  };
+  await waitForGitHubCreates(oldRuns.runs.map(({ id }) => id));
+  const oldRun = oldRuns.runs.find(({ workflow }) => workflow === "github-check")!;
+  const create = (await githubWorkflowProbeState()).creates.find(({ id }) => id === oldRun.id)!;
+  const source = (
+    create.params as {
+      __dispatcherMetadata: { source: ReturnType<typeof githubRunSource> };
+    }
+  ).__dispatcherMetadata.source;
+  const candidate = {
+    accountId: "test-account",
+    repositoryId: "github:101",
+    workflowId: "github-check",
+    runId: oldRun.id,
+    trustId: "github:101",
+    generation: 1,
+    claimId: crypto.randomUUID(),
+    outcome: "success" as const,
+  };
+  const coordinator = (
+    env.GITHUB_COORDINATOR_TEST as unknown as {
+      getByName(name: string): {
+        claimTerminal(request: unknown): Promise<unknown>;
+        readTerminal(request: unknown): Promise<unknown>;
+        alarmResultForTest(): Promise<{ ok: boolean; error?: string }>;
+      };
+    }
+  ).getByName("101");
+  await expect(coordinator.claimTerminal({ source, candidate })).resolves.toEqual(candidate);
+
+  const latestResponse = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174154",
+    event: "pull_request",
+    payload: pullRequestPayload("2".repeat(40), { number: 51 }),
+  });
+  const latestRuns = (await latestResponse.json()) as { runs: Array<{ id: string }> };
+  await waitForGitHubCreates(latestRuns.runs.map(({ id }) => id));
+  await env.RUNWAY_GITHUB_CLOCK.advance(7 * 24 * 60 * 60 * 1_000 + 1);
+  await expect(coordinator.alarmResultForTest()).resolves.toEqual({ ok: true });
+
+  await expect(coordinator.readTerminal(source)).resolves.toEqual(candidate);
 });
 
 test("terminate failure retries before the cancelled Check transition", async () => {

@@ -6,7 +6,7 @@ import { toEntrypoint } from "runway/runtime";
 
 import { createRouter } from "../src/router.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
-import type { Finalization, TerminalIdentity } from "../src/terminal.ts";
+import type { Finalization, TerminalIdentity, TerminalRecord } from "../src/terminal.ts";
 import { repositoryFixture } from "./repository-fixture.ts";
 
 let githubEffectEvents: string[] = [];
@@ -506,6 +506,14 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
       trustId: `remote:${repositoryFixture.remote}`,
       generation: 1,
     };
+  }
+
+  async claimTerminal(_runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
+    return candidate;
+  }
+
+  async readTerminal(): Promise<undefined> {
+    return undefined;
   }
 
   async publishTerminal(_runId: string, finalization: Finalization): Promise<void> {

@@ -4,6 +4,7 @@ export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { createDynamicWorkflow } from "../src/host-runtime.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
+import type { TerminalRecord } from "../src/terminal.ts";
 
 interface RepositoryProbeProps {
   readonly repository: RepositorySource;
@@ -28,6 +29,14 @@ export class RunwaySandboxBinding extends WorkerEntrypoint<Cloudflare.Env, Repos
   }
 
   async publishTerminal(): Promise<void> {}
+
+  async claimTerminal(_runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
+    return candidate;
+  }
+
+  async readTerminal(): Promise<undefined> {
+    return undefined;
+  }
 
   async secrets(): Promise<Readonly<Record<string, string>>> {
     return this.#values();

@@ -172,11 +172,11 @@ const makeTerminal = async (
     claim: async (candidate) => {
       winner = (await step.do(
         TERMINAL_CLAIM_STEP,
-        async () => candidate as never,
+        async () => (await binding.claimTerminal(runId, candidate)) as never,
       )) as TerminalRecord;
       return winner;
     },
-    read: async () => winner,
+    read: async () => (await binding.readTerminal(runId)) ?? winner,
   };
   return new Terminal(await binding.terminal(runId), state, async (finalization) => {
     await step.do(TERMINAL_PUBLISH_STEP, async () => {

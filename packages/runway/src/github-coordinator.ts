@@ -6,9 +6,10 @@ import {
   type GitHubProvider,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
+import type { Finalization, TerminalRecord } from "./terminal.ts";
 import type { GitHubRepository } from "./types.ts";
 
-type GitHubLifecycleState = "in_progress" | "success" | "failure";
+type GitHubLifecycleState = "in_progress";
 
 const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const ALARM_BATCH_SIZE = 32;
@@ -28,6 +29,7 @@ export interface GitHubWorkflowAdmission {
 }
 
 export interface GitHubCoordinatorAdmission {
+  readonly accountId: string;
   readonly delivery: GitHubAcceptedDelivery;
   readonly workflows: readonly GitHubWorkflowAdmission[];
 }
@@ -74,6 +76,7 @@ type DesiredState = "queued" | "in_progress" | "success" | "failure" | "cancelle
 
 interface RunRecord {
   readonly kind: "run";
+  readonly accountId: string;
   readonly runId: string;
   readonly workflowId: string;
   readonly artifactVersion: string;
@@ -82,6 +85,8 @@ interface RunRecord {
   readonly activeKey: string;
   readonly generation: number;
   readonly expiresAt: number;
+  terminal: TerminalRecord | null;
+  terminalPublished: boolean;
   desired: DesiredState;
   preflightComplete: boolean;
   checkCreateAttempted: boolean;
@@ -152,6 +157,36 @@ const parseString = (value: unknown, pattern?: RegExp): string =>
 
 const parseBoolean = (value: unknown): boolean =>
   typeof value === "boolean" ? value : invariant();
+
+const parseTerminalRecord = (value: unknown): TerminalRecord => {
+  assertRecord(value);
+  const outcome = value.outcome;
+  if (
+    !exactKeys(value, [
+      "accountId",
+      "repositoryId",
+      "workflowId",
+      "runId",
+      "trustId",
+      "generation",
+      "claimId",
+      "outcome",
+    ]) ||
+    (outcome !== "success" && outcome !== "failure" && outcome !== "cancelled")
+  ) {
+    invariant();
+  }
+  return {
+    accountId: parseString(value.accountId),
+    repositoryId: parseString(value.repositoryId),
+    workflowId: parseString(value.workflowId, WORKFLOW_ID),
+    runId: parseString(value.runId, RUN_ID),
+    trustId: parseString(value.trustId),
+    generation: parseGeneration(value.generation),
+    claimId: parseString(value.claimId),
+    outcome: outcome as TerminalRecord["outcome"],
+  };
+};
 
 const WORKFLOW_STATUSES = [
   "queued",
@@ -344,6 +379,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   assertRecord(value);
   const keys = [
     "kind",
+    "accountId",
     "runId",
     "workflowId",
     "artifactVersion",
@@ -352,6 +388,8 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     "activeKey",
     "generation",
     "expiresAt",
+    "terminal",
+    "terminalPublished",
     "desired",
     "preflightComplete",
     "checkCreateAttempted",
@@ -366,6 +404,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     "nextAttemptAt",
   ] as const;
   if (!exactKeys(value, keys) || value.kind !== "run") invariant();
+  const accountId = parseString(value.accountId);
   const delivery = parseAcceptedDelivery(value.delivery);
   const runId = parseString(value.runId, RUN_ID);
   const match = RUN_ID.exec(runId);
@@ -375,6 +414,8 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   const activeKey = parseString(value.activeKey);
   const generation = parseGeneration(value.generation);
   const expiresAt = parseGeneration(value.expiresAt);
+  const terminal = value.terminal === null ? null : parseTerminalRecord(value.terminal);
+  const terminalPublished = parseBoolean(value.terminalPublished);
   const desired =
     value.desired === "queued" ||
     value.desired === "in_progress" ||
@@ -410,6 +451,18 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     Number(match[2]) !== generation ||
     activeKey !== concurrencyKey(delivery, workflowId) ||
     checkName.length === 0 ||
+    (terminal !== null &&
+      (terminal.accountId !== accountId ||
+        terminal.repositoryId !== `github:${delivery.checkoutRepository.id}` ||
+        terminal.workflowId !== workflowId ||
+        terminal.runId !== runId ||
+        terminal.trustId !== `github:${delivery.checkoutRepository.id}` ||
+        terminal.generation !== generation)) ||
+    (terminalPublished && terminal === null) ||
+    ((desired === "success" || desired === "failure" || desired === "cancelled") &&
+      (!terminalPublished || terminal?.outcome !== desired)) ||
+    ((desired === "queued" || desired === "in_progress") && terminalPublished) ||
+    (desired === "skipped" && terminal !== null) ||
     (checkCreateAttempted && !preflightComplete) ||
     (checkRunId !== null && !checkCreateAttempted) ||
     (workflowCreateAttempted && checkRunId === null) ||
@@ -443,6 +496,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   }
   return {
     kind: "run",
+    accountId,
     runId,
     workflowId,
     artifactVersion,
@@ -451,6 +505,8 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     activeKey,
     generation,
     expiresAt,
+    terminal,
+    terminalPublished,
     desired,
     preflightComplete,
     checkCreateAttempted,
@@ -527,6 +583,9 @@ const isPending = (run: RunRecord): boolean =>
           ? !run.checkCancellationComplete
           : false;
 
+const isExternallyTerminal = (run: RunRecord): boolean =>
+  run.desired === "skipped" || run.checkCompletionComplete || run.checkCancellationComplete;
+
 const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -549,6 +608,10 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
   async admit(admission: GitHubCoordinatorAdmission): Promise<{
     readonly runs: readonly GitHubCoordinatorRun[];
   }> {
+    if (!isRecord(admission) || !exactKeys(admission, ["accountId", "delivery", "workflows"])) {
+      invariant();
+    }
+    const accountId = parseString(admission.accountId);
     const delivery = parseAcceptedDelivery(admission.delivery);
     const now = await this.#now();
     if (!Array.isArray(admission.workflows) || admission.workflows.length === 0) invariant();
@@ -595,6 +658,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           for (const runRef of tombstone.runs) {
             const run = parseRun(await transaction.get(runKey(runRef.id)), runRef.id);
             if (
+              run.accountId !== accountId ||
               run.workflowId !== runRef.workflow ||
               run.delivery.deliveryId !== delivery.deliveryId
             ) {
@@ -624,6 +688,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           const prior = parseActive(rawPrior, activeKey);
           const priorRun = parseRun(await transaction.get(runKey(prior.runId)), prior.runId);
           if (
+            priorRun.accountId !== accountId ||
             priorRun.activeKey !== activeKey ||
             priorRun.generation !== prior.generation ||
             prior.generation !== currentGeneration
@@ -633,9 +698,21 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           if (
             priorRun.desired !== "cancelled" &&
             priorRun.desired !== "skipped" &&
-            !priorRun.checkCompletionComplete
+            !priorRun.checkCompletionComplete &&
+            priorRun.terminal === null
           ) {
             await transaction.delete(pendingKey(priorRun.nextAttemptAt, priorRun.runId));
+            priorRun.terminal = {
+              accountId: priorRun.accountId,
+              repositoryId: `github:${priorRun.delivery.checkoutRepository.id}`,
+              workflowId: priorRun.workflowId,
+              runId: priorRun.runId,
+              trustId: `github:${priorRun.delivery.checkoutRepository.id}`,
+              generation: priorRun.generation,
+              claimId: crypto.randomUUID(),
+              outcome: "cancelled",
+            };
+            priorRun.terminalPublished = true;
             priorRun.desired = "cancelled";
             priorRun.retryCount = 0;
             priorRun.nextAttemptAt = now;
@@ -651,6 +728,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         }
         const record: RunRecord = {
           kind: "run",
+          accountId,
           runId,
           workflowId: workflow.workflowId,
           artifactVersion: workflow.artifactVersion,
@@ -659,6 +737,8 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           activeKey,
           generation,
           expiresAt: now + DELIVERY_RETENTION_MS,
+          terminal: null,
+          terminalPublished: false,
           desired: "queued",
           preflightComplete: false,
           checkCreateAttempted: false,
@@ -712,7 +792,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (!isRecord(request) || !exactKeys(request, ["source", "state"])) invariant();
     const source = parseGitHubRunSource(request.source);
     const state = request.state;
-    if (state !== "in_progress" && state !== "success" && state !== "failure") invariant();
+    if (state !== "in_progress") invariant();
     const now = await this.#now();
     const key = runKey(source.runId);
     const initial = parseRun(await this.ctx.storage.get(key), source.runId);
@@ -729,6 +809,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         run.desired !== "cancelled" &&
         run.desired !== "skipped" &&
         !run.checkCompletionComplete &&
+        run.terminal === null &&
         (generation !== run.generation ||
           active?.runId !== run.runId ||
           active.generation !== run.generation)
@@ -738,12 +819,8 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       const oldPending = pendingKey(run.nextAttemptAt, run.runId);
       const wasPending = isPending(run);
       let proceed = true;
-      if (state === "in_progress") {
-        if (run.desired === "queued") run.desired = "in_progress";
-        else if (run.desired !== "in_progress") proceed = false;
-      } else if (run.desired === "queued" || run.desired === "in_progress") {
-        run.desired = state;
-      }
+      if (run.desired === "queued") run.desired = "in_progress";
+      else if (run.desired !== "in_progress") proceed = false;
       run.workflowKnown = true;
       run.retryCount = 0;
       run.nextAttemptAt = now;
@@ -760,6 +837,95 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     });
     await this.ctx.storage.setAlarm(Date.now());
     return result;
+  }
+
+  async claimTerminal(request: {
+    readonly source: GitHubRunSource;
+    readonly candidate: TerminalRecord;
+  }): Promise<TerminalRecord> {
+    if (!isRecord(request) || !exactKeys(request, ["source", "candidate"])) invariant();
+    const source = parseGitHubRunSource(request.source);
+    const candidate = parseTerminalRecord(request.candidate);
+    const key = runKey(source.runId);
+    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
+    await this.#validateDispatchIdentity(initial);
+    this.#validateLifecycleSource(initial, source);
+    const winner = await this.ctx.storage.transaction(async (transaction) => {
+      const run = parseRun(await transaction.get(key), source.runId);
+      this.#validateLifecycleSource(run, source);
+      this.#validateTerminalRecord(run, candidate);
+      if (run.terminal !== null) return run.terminal;
+      if (run.desired === "cancelled" || run.desired === "skipped") invariant();
+      run.terminal = candidate;
+      await transaction.put(key, run);
+      return candidate;
+    });
+    return winner;
+  }
+
+  async readTerminal(sourceValue: GitHubRunSource): Promise<TerminalRecord | undefined> {
+    const source = parseGitHubRunSource(sourceValue);
+    const run = parseRun(await this.ctx.storage.get(runKey(source.runId)), source.runId);
+    await this.#validateDispatchIdentity(run);
+    this.#validateLifecycleSource(run, source);
+    return run.terminal ?? undefined;
+  }
+
+  async publishTerminal(request: {
+    readonly source: GitHubRunSource;
+    readonly finalization: Finalization;
+  }): Promise<void> {
+    if (!isRecord(request) || !exactKeys(request, ["source", "finalization"])) invariant();
+    const source = parseGitHubRunSource(request.source);
+    if (
+      !isRecord(request.finalization) ||
+      !exactKeys(request.finalization, ["claimId", "outcome"])
+    ) {
+      invariant();
+    }
+    const finalization = request.finalization;
+    if (
+      typeof finalization.claimId !== "string" ||
+      finalization.claimId.length === 0 ||
+      (finalization.outcome !== "success" &&
+        finalization.outcome !== "failure" &&
+        finalization.outcome !== "cancelled")
+    ) {
+      invariant();
+    }
+    const now = await this.#now();
+    const key = runKey(source.runId);
+    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
+    await this.#validateDispatchIdentity(initial);
+    this.#validateLifecycleSource(initial, source);
+    await this.ctx.storage.transaction(async (transaction) => {
+      const run = parseRun(await transaction.get(key), source.runId);
+      this.#validateLifecycleSource(run, source);
+      if (
+        run.terminal === null ||
+        run.terminal.claimId !== finalization.claimId ||
+        run.terminal.outcome !== finalization.outcome
+      ) {
+        invariant();
+      }
+      if (run.terminalPublished) return;
+      const oldPending = pendingKey(run.nextAttemptAt, run.runId);
+      const wasPending = isPending(run);
+      run.terminalPublished = true;
+      run.desired = finalization.outcome;
+      run.retryCount = 0;
+      run.nextAttemptAt = now;
+      if (wasPending) await transaction.delete(oldPending);
+      await transaction.put(key, run);
+      if (isPending(run)) {
+        await transaction.put(pendingKey(now, run.runId), {
+          kind: "pending",
+          runId: run.runId,
+          dueAt: now,
+        } satisfies PendingRecord);
+      }
+    });
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   async alarm(): Promise<void> {
@@ -798,6 +964,21 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
   async seedForTest(entries: Record<string, unknown>): Promise<void> {
     if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
     await this.ctx.storage.put(entries);
+  }
+
+  async admitResultForTest(
+    admission: GitHubCoordinatorAdmission,
+  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }> {
+    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
+    try {
+      await this.admit(admission);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "invalid GitHub coordinator state",
+      };
+    }
   }
 
   async alarmResultForTest(): Promise<
@@ -850,7 +1031,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       if (run.workflowId !== ref.workflow || run.delivery.deliveryId !== entry.deliveryId)
         invariant();
       await this.#validateDispatchIdentity(run);
-      if (run.expiresAt <= now && (run.desired === "skipped" || !isPending(run))) {
+      if (run.expiresAt <= now && isExternallyTerminal(run)) {
         const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
         const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
         if (active?.runId !== run.runId) {
@@ -894,6 +1075,19 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     }
   }
 
+  #validateTerminalRecord(run: RunRecord, record: TerminalRecord): void {
+    if (
+      record.accountId !== run.accountId ||
+      record.repositoryId !== `github:${run.delivery.checkoutRepository.id}` ||
+      record.workflowId !== run.workflowId ||
+      record.runId !== run.runId ||
+      record.trustId !== `github:${run.delivery.checkoutRepository.id}` ||
+      record.generation !== run.generation
+    ) {
+      invariant();
+    }
+  }
+
   async #validatedRunForEffect(entry: PendingRecord): Promise<RunRecord> {
     const run = parseRun(await this.ctx.storage.get(runKey(entry.runId)), entry.runId);
     if (run.nextAttemptAt !== entry.dueAt || !isPending(run)) invariant();
@@ -902,7 +1096,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (!positiveInteger(generation) || generation < run.generation) invariant();
     const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
     const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
-    if (run.desired !== "cancelled" && run.desired !== "skipped") {
+    if (run.desired !== "cancelled" && run.desired !== "skipped" && run.terminal === null) {
       if (
         generation !== run.generation ||
         active?.runId !== run.runId ||
