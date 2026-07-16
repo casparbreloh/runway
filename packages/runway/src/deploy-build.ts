@@ -7,7 +7,7 @@ import type { Plugin } from "esbuild";
 
 import { generateDynamicWorker, generateHost } from "./codegen.ts";
 import type { RepositorySource } from "./repository-source.ts";
-import type { ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
+import type { GitHubRepository, ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 import { SECRET_SNAPSHOT_KEY_BINDING, secretSnapshotBackupBinding } from "./worker-contract.ts";
 import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
 
@@ -16,6 +16,7 @@ interface BuildContext {
   readonly scriptName: string;
   readonly repository: RepositorySource;
   readonly snapshotKeyAvailable: boolean;
+  readonly github?: { readonly repository: GitHubRepository; readonly installationId: number };
   readonly onProgress?: (event: ProgressEvent) => void;
 }
 
@@ -129,6 +130,7 @@ export const buildDeployment = async (
     workflowArtifacts,
     deploymentId,
     secretSnapshotKey,
+    ...(opts.github ? { github: opts.github } : {}),
   });
   const result = await esbuild({
     ...esbuildBase,

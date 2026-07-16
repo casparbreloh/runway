@@ -6,11 +6,28 @@ import {
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
-import type { RepositorySource } from "./repository-source.ts";
+import type {
+  GitHubCoordinatorAdmission,
+  GitHubCoordinatorRun,
+  RunwayGitHubCoordinator,
+} from "./github-coordinator.ts";
+import {
+  createGitHubProvider,
+  matchGitHubDelivery,
+  normalizeGitHubDelivery,
+  type GitHubAcceptedDelivery,
+} from "./github.ts";
+import {
+  parseGitHubRunSource,
+  repositorySourceForRun,
+  type GitHubRunSource,
+  type RepositorySource,
+} from "./repository-source.ts";
 import { createRunnerAdapter } from "./runner-adapter.ts";
-import { SANDBOX_BINDING } from "./runner-config.ts";
-import type { HostCapability } from "./runner.ts";
+import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
+import type { HostCapability, RunLifecycleState } from "./runner.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
+import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import type { ExecResult } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -24,6 +41,8 @@ import {
 } from "./worker-contract.ts";
 import { decodeWorkflowArtifact, workflowArtifactKey } from "./workflow-artifact.ts";
 import type { WorkflowArtifact } from "./workflow-artifact.ts";
+
+export { RunwayGitHubCoordinator } from "./github-coordinator.ts";
 
 interface LoaderStub {
   getEntrypoint(name?: string): { fetch(req: Request): Promise<Response>; run?: unknown };
@@ -48,10 +67,15 @@ interface HostEnv {
   [SECRET_SNAPSHOT_KEY_BINDING]: string;
   [SANDBOX_BINDING]: DurableObjectNamespace<Sandbox>;
   [WORKFLOW_BINDING]: Workflow;
+  [GITHUB_COORDINATOR_BINDING]?: DurableObjectNamespace<RunwayGitHubCoordinator>;
+  RUNWAY_GITHUB_APP_ID?: string;
+  RUNWAY_GITHUB_PRIVATE_KEY?: string;
+  RUNWAY_GITHUB_WEBHOOK_SECRET?: string;
 }
 
 interface HostProps {
   readonly repository: RepositorySource;
+  readonly source?: GitHubRunSource;
   readonly secretNames: ReadonlyArray<string>;
   readonly secretSnapshotKey: string;
   readonly snapshotScope: string;
@@ -75,6 +99,13 @@ type HostRoute =
       readonly artifactVersion: string;
       readonly type: "cron";
       readonly expression: string;
+    }
+  | {
+      readonly id: string;
+      readonly artifactVersion: string;
+      readonly type: "github";
+      readonly checkName: string;
+      readonly events: readonly GitHubEventFilter[];
     };
 
 export interface HostConfig {
@@ -82,12 +113,36 @@ export interface HostConfig {
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
   readonly routes: ReadonlyArray<HostRoute>;
+  readonly github?: {
+    readonly repository: GitHubRepository;
+    readonly installationId: number;
+  };
 }
 
 export class RunwayRunnerBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
   implements HostCapability
 {
+  async reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean> {
+    if (
+      typeof runId !== "string" ||
+      (state !== "in_progress" && state !== "success" && state !== "failure")
+    ) {
+      throw new Error("invalid run lifecycle");
+    }
+    const source = this.ctx.props.source;
+    if (!source) return true;
+    if (source.runId !== runId) throw new Error("invalid GitHub run lifecycle");
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    const result = await namespace.getByName(String(source.check.repository.id)).lifecycle({
+      source,
+      state,
+    });
+    if (typeof result?.proceed !== "boolean") throw new Error("invalid GitHub run lifecycle");
+    return result.proceed;
+  }
+
   #secretValues(): Readonly<Record<string, string>> {
     const parentEnv = this.env as unknown as Record<string, unknown>;
     return Object.fromEntries(
@@ -106,6 +161,20 @@ export class RunwayRunnerBinding
       status: async (runId) => await (await this.env[WORKFLOW_BINDING].get(runId)).status(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       repository: this.ctx.props.repository,
+      installationToken: async ({ authentication, purpose }) => {
+        const appId = this.env.RUNWAY_GITHUB_APP_ID;
+        const privateKey = this.env.RUNWAY_GITHUB_PRIVATE_KEY;
+        if (typeof appId !== "string" || typeof privateKey !== "string") {
+          throw new Error("missing GitHub App credentials");
+        }
+        return (
+          await createGitHubProvider({ appId, privateKey }).createInstallationToken({
+            installationId: authentication.installationId,
+            repository: authentication.repository,
+            purpose,
+          })
+        ).token;
+      },
       log: ({ stream, chunk }) => {
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
@@ -219,6 +288,7 @@ export class RunwayRunnerBinding
 
 interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
   readonly artifactVersion: string;
+  readonly source?: GitHubRunSource;
 }
 
 type LoaderPurpose = "trigger" | "run";
@@ -234,15 +304,20 @@ const metadataOf = (value: unknown): WorkflowMetadata => {
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    Object.keys(value).join(",") !== "artifactVersion"
+    !["artifactVersion", "artifactVersion,source"].includes(Object.keys(value).sort().join(","))
   ) {
     throw new Error("invalid workflow metadata");
   }
-  const { artifactVersion } = value as Record<string, unknown>;
+  const { artifactVersion, source } = value as Record<string, unknown>;
   if (typeof artifactVersion !== "string" || !/^[0-9a-f]{64}$/.test(artifactVersion)) {
     throw new Error("invalid workflow metadata");
   }
-  return { artifactVersion };
+  if (source === undefined) return { artifactVersion };
+  try {
+    return { artifactVersion, source: parseGitHubRunSource(source) };
+  } catch {
+    throw new Error("invalid workflow metadata");
+  }
 };
 
 const readArtifact = async (
@@ -274,7 +349,7 @@ const loadWorker = async (
   metadata: WorkflowMetadata,
 ): Promise<LoaderStub> => {
   const identity = new TextEncoder().encode(
-    JSON.stringify([purpose, metadata.artifactVersion, config.deploymentId]),
+    JSON.stringify([purpose, metadata.artifactVersion, config.deploymentId, metadata.source]),
   );
   const loaderId = await sha256(identity);
   return env[LOADER_BINDING].get(loaderId, async () => ({
@@ -285,7 +360,10 @@ const loadWorker = async (
     env: {
       [HOST_CAPABILITY_BINDING]: ctx.exports.RunwayRunnerBinding({
         props: {
-          repository: artifact.repository,
+          repository: metadata.source
+            ? repositorySourceForRun(metadata.source)
+            : artifact.repository,
+          ...(metadata.source ? { source: metadata.source } : {}),
           secretNames: artifact.secrets,
           secretSnapshotKey: config.secretSnapshotKey,
           snapshotScope: `${config.scriptName}:${artifact.workflowId}:${metadata.artifactVersion}`,
@@ -334,6 +412,47 @@ export const createHost = (config: HostConfig) => ({
       );
     }
     const pathname = new URL(req.url).pathname;
+    if (pathname === "/.runway/github" && req.method === "POST") {
+      if (!config.github) return new Response("not found", { status: 404 });
+      const secret = env.RUNWAY_GITHUB_WEBHOOK_SECRET;
+      if (typeof secret !== "string" || secret.length === 0) {
+        return new Response("GitHub webhook is not configured", { status: 503 });
+      }
+      const routes = config.routes.filter((route) => route.type === "github");
+      let delivery: GitHubAcceptedDelivery | undefined;
+      const workflows: GitHubCoordinatorAdmission["workflows"][number][] = [];
+      try {
+        const normalized = await normalizeGitHubDelivery(req, {
+          repository: config.github.repository,
+          installationId: config.github.installationId,
+          webhookSecret: secret,
+        });
+        for (const route of routes) {
+          const parsed = matchGitHubDelivery(normalized, route.events);
+          if (parsed.status === "accepted") {
+            delivery ??= parsed;
+            workflows.push({
+              workflowId: route.id,
+              artifactVersion: route.artifactVersion,
+              checkName: route.checkName,
+            });
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "invalid GitHub webhook";
+        return new Response("invalid GitHub webhook", {
+          status: message === "invalid GitHub webhook signature" ? 401 : 400,
+        });
+      }
+      if (!delivery || workflows.length === 0) return Response.json({ skipped: true });
+      const namespace = env[GITHUB_COORDINATOR_BINDING];
+      if (!namespace) return new Response("GitHub coordinator is not configured", { status: 503 });
+      const coordinator = namespace.getByName(String(config.github.repository.id));
+      const result = (await coordinator.admit({ delivery, workflows })) as {
+        readonly runs: readonly GitHubCoordinatorRun[];
+      };
+      return Response.json({ runs: result.runs }, { status: 202 });
+    }
     const matches = config.routes.filter(
       (route) => route.type === "webhook" && route.path === pathname && req.method === "POST",
     );

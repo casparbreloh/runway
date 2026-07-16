@@ -28,9 +28,11 @@ has a stable caller-provided id. `step.exec()` has simple defaults and optional 
 `timeoutMs`; Sandbox and container configuration remain internal.
 
 Each repository owns one orchestration Worker, one matching Dynamic Workflow resource, one Worker
-Loader binding, and one hidden Sandbox container application. Per-workflow modules are loaded
-dynamically, so Cloudflare dashboards are not filled with one static Workflow resource per authored
-workflow. There is no account-level execution Worker.
+Loader binding, one hidden Sandbox container application, and one narrow Durable Object coordinator.
+The coordinator remains idle unless the repository defines GitHub triggers; then it owns delivery
+deduplication, dispatch progress, Check state, and scoped supersession. Per-workflow modules are loaded dynamically, so Cloudflare
+dashboards are not filled with one static Workflow resource per authored workflow. There is no
+account-level execution Worker.
 
 Deployments persist each workflow as one immutable, content-addressed artifact containing its
 identity, declared secret names, and bundled source. Dynamic Workflow metadata pins each run to an
@@ -42,8 +44,10 @@ over 30 seconds before reporting success.
 The managed runner currently provides:
 
 - One lazy, isolated Sandbox workspace per workflow run.
-- Exact public-repository checkout in `/workspace` before the first command and transparent
-  reconstruction after Sandbox replacement.
+- Exact public or GitHub App-authenticated repository checkout in `/workspace` before the first
+  command and transparent reconstruction after Sandbox replacement.
+- Purpose-scoped, repository-scoped GitHub installation credentials that exist only in the checkout
+  process environment and are reminted after replacement.
 - Deterministic process ids and reconnection when a command step retries on the same container.
 - Bounded stdout and stderr tails with declared-secret redaction.
 - Typed non-zero failures, process-tree timeout cleanup, and active termination monitoring.
@@ -126,24 +130,36 @@ The core public-repository implementation shipped on 2026-07-15:
 - Measure cold container and process start, checkout and fetch time, fetched pack bytes, and recovery
   overhead.
 
-The remaining Phase 1 work is private-repository access:
-
-- Support private repositories through short-lived GitHub App credentials without exposing
-  credentials to command output.
+Private-repository access is now implemented through short-lived GitHub App credentials without
+exposing credentials to command output, artifacts, snapshots, command text, repository markers, or
+logs. Deploy resolves stable installation and repository identity; each fresh checkout mints a
+repository-scoped Contents token and passes it only through a restricted askpass process
+environment. Local provider, runner, deployment, and forced-replacement seams cover this path. Its
+authenticated live replacement smoke remains the evidence needed to close the milestone.
 
 Phase 1 is complete when a workflow can check out an exact commit, lose its Sandbox, transparently
 reconstruct that commit, and continue with the next `step.exec()` without a public recovery call.
 
 ### Phase 2: GitHub Repository Runs
 
-- Add typed push and pull-request triggers while keeping `workflow()` as the only workflow DSL.
-- Verify GitHub App deliveries and map every run to an exact repository and SHA.
-- Report queued, running, success, failure, and cancellation through GitHub Checks.
-- Cancel superseded runs for the same pull request or branch.
-- Keep one orchestration Worker per repository. If GitHub's app-level webhook requires a shared
-  ingress, that component is only a small authenticated router; execution remains repo-scoped.
-- Start Dynamic Workflows directly after verified ingress. Add Queues only when measured burst
-  handling or rate limits require buffering.
+The Phase 2 implementation now:
+
+- Provides typed push and pull-request triggers while keeping `workflow()` as the only workflow
+  DSL.
+- Verifies exact GitHub App delivery bytes and maps every admitted run to an exact repository and
+  SHA.
+- Reports queued, running, success, failure, and cancellation through reconciled GitHub Checks.
+- Cancels and fences superseded runs only for the same repository, workflow, pull request, or full
+  branch ref.
+- Keeps one orchestration Worker and coordinator per repository; execution remains repo-scoped.
+- Starts Dynamic Workflows from a bounded durable outbox after fast ingress admission, without an
+  account-level router or Queue.
+
+This repository now defines its own `Check` and `Test` workflows for pushes to `main` and pull
+requests opened, reopened, or synchronized. GitHub Actions remains an operational fallback until a
+real pull request proves exact-head-SHA Checks, scoped cancellation under supersession,
+authenticated replacement recovery, credential redaction, and complete smoke-resource cleanup.
+Only after that evidence is recorded may the Actions workflow be deleted in a separate cutover.
 
 Phase 2 is complete when a push or pull request automatically runs a repository workflow at the
 correct SHA and reports its terminal state to GitHub.
@@ -192,6 +208,6 @@ Cloudflare deployment without introducing a separate CI language.
 - Keep Sandbox, containers, repository credentials, and recovery mechanics internal.
 - Prefer reconstruction and standard tool protocols over Runway-specific abstractions.
 - Add a shared service only when a provider boundary requires it; keep execution repo-scoped.
-- Do not add Queues, new R2-backed subsystems, Durable Objects, or compatibility APIs without a
-  measured need.
+- Do not add Queues, new R2-backed subsystems, additional Durable Objects, or compatibility APIs
+  without a measured need.
 - Test behavior at SDK, Workers runtime, CLI, Cloudflare API, and live deployment seams.

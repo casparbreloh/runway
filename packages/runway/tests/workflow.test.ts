@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, makeCtx, secretNameOf, webhook, workflow } from "runway";
+import { cron, github, makeCtx, secretNameOf, webhook, workflow } from "runway";
 import type { CronParams, ExecOptions, ExecResult, Primitives, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
@@ -75,6 +75,183 @@ test("the authoring API types secrets, context, raw webhooks, and cron events", 
   workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).handler(async (_ctx, event) => {
     expectTypeOf(event).toEqualTypeOf<CronParams>();
   });
+});
+
+test("a GitHub push trigger is declarative and types its normalized event", () => {
+  const definition = workflow({
+    id: "github-push",
+    trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
+  }).handler(async (_ctx, event) => {
+    expectTypeOf(event).toEqualTypeOf<{
+      readonly type: "push";
+      readonly repository: {
+        readonly id: number;
+        readonly name: string;
+        readonly fullName: string;
+      };
+      readonly ref: string;
+      readonly sha: string;
+    }>();
+  });
+
+  expect(JSON.parse(JSON.stringify(definition.trigger))).toEqual({
+    type: "github",
+    checkName: "Check",
+    events: [{ type: "push", branches: ["main"] }],
+  });
+});
+
+test("a GitHub pull request trigger types only the selected normalized actions", () => {
+  workflow({
+    id: "github-pr",
+    trigger: () =>
+      github({
+        checkName: "Test",
+        events: [{ type: "pull_request", actions: ["opened", "synchronize"] }],
+      }),
+  }).handler(async (_ctx, event) => {
+    expectTypeOf(event).toEqualTypeOf<{
+      readonly type: "pull_request";
+      readonly action: "opened" | "synchronize";
+      readonly repository: {
+        readonly id: number;
+        readonly name: string;
+        readonly fullName: string;
+      };
+      readonly number: number;
+      readonly ref: string;
+      readonly sha: string;
+    }>();
+  });
+});
+
+test("a combined GitHub trigger types the selected event union", () => {
+  workflow({
+    id: "github-combined",
+    trigger: () =>
+      github({
+        checkName: "Check",
+        events: [
+          { type: "push", branches: ["main", "release"] },
+          { type: "pull_request", actions: ["reopened"] },
+        ],
+      }),
+  }).handler(async (_ctx, event) => {
+    expectTypeOf(event).toEqualTypeOf<
+      | {
+          readonly type: "push";
+          readonly repository: {
+            readonly id: number;
+            readonly name: string;
+            readonly fullName: string;
+          };
+          readonly ref: string;
+          readonly sha: string;
+        }
+      | {
+          readonly type: "pull_request";
+          readonly action: "reopened";
+          readonly repository: {
+            readonly id: number;
+            readonly name: string;
+            readonly fullName: string;
+          };
+          readonly number: number;
+          readonly ref: string;
+          readonly sha: string;
+        }
+    >();
+  });
+});
+
+test("a GitHub trigger requires a non-empty check name", () => {
+  expect(() =>
+    workflow({
+      id: "github-empty-check",
+      trigger: () => github({ checkName: "   ", events: [{ type: "push", branches: ["main"] }] }),
+    }),
+  ).toThrow("invalid workflow GitHub trigger: checkName is required");
+});
+
+test("a GitHub trigger requires at least one event filter", () => {
+  expect(() =>
+    workflow({
+      id: "github-empty-events",
+      trigger: () => github({ checkName: "Check", events: [] as never }),
+    }),
+  ).toThrow("invalid workflow GitHub trigger: at least one event is required");
+});
+
+test("a GitHub trigger rejects unsupported event types", () => {
+  expect(() =>
+    workflow({
+      id: "github-unsupported-event",
+      trigger: () =>
+        github({
+          checkName: "Check",
+          events: [{ type: "issues", actions: ["opened"] }] as never,
+        }),
+    }),
+  ).toThrow('invalid workflow GitHub trigger event type "issues"');
+});
+
+test("a GitHub trigger rejects unsupported pull request actions", () => {
+  expect(() =>
+    workflow({
+      id: "github-unsupported-action",
+      trigger: () =>
+        github({
+          checkName: "Check",
+          events: [{ type: "pull_request", actions: ["closed"] }] as never,
+        }),
+    }),
+  ).toThrow('invalid workflow GitHub pull_request action "closed"');
+});
+
+test("a GitHub pull request filter requires at least one action", () => {
+  expect(() =>
+    workflow({
+      id: "github-empty-actions",
+      trigger: () =>
+        github({
+          checkName: "Check",
+          events: [{ type: "pull_request", actions: [] }] as never,
+        }),
+    }),
+  ).toThrow("invalid workflow GitHub pull_request actions: at least one action is required");
+});
+
+test("a GitHub push filter requires non-empty branch names", () => {
+  expect(() =>
+    workflow({
+      id: "github-empty-branches",
+      trigger: () =>
+        github({ checkName: "Check", events: [{ type: "push", branches: [] }] as never }),
+    }),
+  ).toThrow("invalid workflow GitHub push branches: at least one branch is required");
+
+  expect(() =>
+    workflow({
+      id: "github-empty-branch",
+      trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: [" "] }] }),
+    }),
+  ).toThrow("invalid workflow GitHub push branch: branch name is required");
+});
+
+test("a GitHub trigger rejects duplicate event filters", () => {
+  expect(() =>
+    workflow({
+      id: "github-duplicate-push",
+      trigger: () =>
+        github({
+          checkName: "Check",
+          events: [
+            { type: "push", branches: ["main"] },
+            { type: "push", branches: ["release"] },
+          ],
+        }),
+    }),
+  ).toThrow('duplicate workflow GitHub event filter "push"');
 });
 
 test("step.exec delegates string and options commands with their durable ids", async () => {

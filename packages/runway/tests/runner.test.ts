@@ -97,8 +97,83 @@ test("repository commands prepare once and reconstruct after Sandbox replacement
   await expect(result).resolves.toEqual({
     checkoutRuns: 2,
     commandRuns: 3,
+    authenticationTokenMintEvidence: ["false", "false"],
     commitsSeen: [repositoryFixture.commit, repositoryFixture.commit, repositoryFixture.commit],
     repositoryFiles: ["/workspace/.git/HEAD"],
+  });
+});
+
+test("authenticated repository preparation remints only after Sandbox replacement", async () => {
+  using result = disposable(adapterHarness.authenticatedRepositoryRecovery());
+
+  await expect(result).resolves.toEqual({
+    tokenMints: 2,
+    tokenPurposes: ["checkout", "checkout"],
+    authenticationTokenMintEvidence: ["true", "true"],
+    checkoutRuns: 2,
+    commandRuns: 3,
+    commitsSeen: [
+      "2328fb0d0e8629a84abc11d820715cb5c78b629c",
+      "2328fb0d0e8629a84abc11d820715cb5c78b629c",
+    ],
+    checkoutEnvironmentKeys: [
+      [
+        "CI",
+        "GIT_ASKPASS",
+        "GIT_TERMINAL_PROMPT",
+        "RUNWAY_AUTHENTICATION_TOKEN_MINTED",
+        "RUNWAY_GITHUB_TOKEN",
+        "RUNWAY_PREPARE_STARTED_AT_MS",
+        "RUNWAY_SANDBOX_READY_AT_MS",
+      ],
+      [
+        "CI",
+        "GIT_ASKPASS",
+        "GIT_TERMINAL_PROMPT",
+        "RUNWAY_AUTHENTICATION_TOKEN_MINTED",
+        "RUNWAY_GITHUB_TOKEN",
+        "RUNWAY_PREPARE_STARTED_AT_MS",
+        "RUNWAY_SANDBOX_READY_AT_MS",
+      ],
+    ],
+    credentialFreeRemote: true,
+    disablesRedirects: true,
+    metricsUseAuthenticationTokenMintEvidence: true,
+    disablesTerminalPrompt: true,
+    helperRemoved: true,
+    leakedToken: false,
+    logsContainMask: true,
+  });
+});
+
+test("authenticated checkout failures redact ephemeral credentials", async () => {
+  using result = disposable(adapterHarness.authenticatedRepositoryFailure());
+
+  await expect(result).resolves.toEqual({
+    message: "Sandbox start exposed ***",
+    commandContainsToken: false,
+  });
+});
+
+test("authenticated checkout reconnect suppresses logs from the original token owner", async () => {
+  using result = disposable(adapterHarness.authenticatedRepositoryReconnect());
+
+  await expect(result).resolves.toEqual({
+    result: { exitCode: 0, stdout: "", stderr: "", durationMs: expect.any(Number) },
+    tokenMints: 1,
+    streams: 2,
+    logsContainToken: false,
+  });
+});
+
+test("a concurrent authenticated checkout loser cannot expose the owner token", async () => {
+  using result = disposable(adapterHarness.concurrentAuthenticatedRepositoryBootstrap());
+
+  await expect(result).resolves.toEqual({
+    tokenMints: 2,
+    checkoutRuns: 1,
+    logsContainOwnerToken: false,
+    logsContainMask: true,
   });
 });
 

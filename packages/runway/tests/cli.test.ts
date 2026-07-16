@@ -5,13 +5,13 @@ import path from "node:path";
 import { expect, test } from "vitest";
 
 const repo = path.resolve(import.meta.dirname, "../../..");
-const example = path.join(repo, "example");
+const fixtureRoot = path.join(repo, "packages/runway");
 const bin = path.join(repo, "packages/runway/bin/runway.ts");
 
 const run = async (
   args: ReadonlyArray<string>,
   env: Record<string, string | undefined> = {},
-  cwd = example,
+  cwd = repo,
 ): Promise<{ code: number | null; output: string }> => {
   const child = spawn(process.execPath, [bin, ...args], {
     cwd,
@@ -34,7 +34,7 @@ const run = async (
 const project = async (
   files: Record<string, string>,
 ): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
-  const cwd = await mkdtemp(path.join(example, ".tmp-cli-test-"));
+  const cwd = await mkdtemp(path.join(fixtureRoot, ".tmp-cli-test-"));
   for (const [file, contents] of Object.entries(files)) {
     await mkdir(path.dirname(path.join(cwd, file)), { recursive: true });
     await writeFile(path.join(cwd, file), contents);
@@ -88,6 +88,28 @@ test("deploy discovers workflows without config", async () => {
     expect(result.code).toBe(1);
     expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
     expect(result.output).not.toMatch(/IGNORED_SECRET/);
+  } finally {
+    await app.cleanup();
+  }
+});
+
+test("deploy discovers a GitHub-triggered workflow", async () => {
+  const app = await project({
+    ".runway/workflows/check.ts": `import { github, workflow } from "runway";
+
+export default workflow({
+  id: "check",
+  trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
+}).handler(async () => {});
+`,
+  });
+
+  try {
+    const result = await run(["deploy"], {}, app.cwd);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
+    expect(result.output).not.toMatch(/invalid workflow GitHub trigger/);
   } finally {
     await app.cleanup();
   }

@@ -12,17 +12,28 @@ import type { Registry } from "runway";
 import { buildDeployment } from "../src/deploy-build.ts";
 import { artifactBucketName } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
-import { resolveRepositorySource } from "../src/repository-source.ts";
-import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
+import { createGitHubProvider } from "../src/github.ts";
+import { githubRepositoryRemote, resolveRepositorySource } from "../src/repository-source.ts";
+import type { RepositorySource } from "../src/repository-source.ts";
+import { GITHUB_COORDINATOR_CLASS, SANDBOX_CLASS } from "../src/runner-config.ts";
+import {
+  COMPATIBILITY_DATE,
+  GITHUB_APP_ID_BINDING,
+  GITHUB_PRIVATE_KEY_BINDING,
+} from "../src/worker-contract.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
 
 const execFileAsync = promisify(execFile);
-const WORKFLOW_ID = "repository-recovery-smoke";
+const OPT_IN = "RUNWAY_LIVE_GITHUB_RECOVERY";
+const REPOSITORY_ENV = "RUNWAY_LIVE_GITHUB_REPOSITORY";
+const SHA_ENV = "RUNWAY_LIVE_GITHUB_SHA";
+const WORKFLOW_ID = "github-recovery-smoke";
 const WEBHOOK_PATH = "/smoke";
 const SIGNATURE_HEADER = "x-smoke-signature";
 const SECRET_NAMES = ["HOOK_SECRET", "DRIVER_TOKEN"] as const;
 const hookSecret = `hook-${randomUUID()}`;
 const driverToken = `driver-${randomUUID()}`;
+const githubTokenPattern = /\bgh[opsu]_[A-Za-z0-9_]{20,}\b/g;
 
 interface SmokeEvent {
   readonly destroyUrl: string;
@@ -40,6 +51,7 @@ interface InstanceDetails {
 interface CheckoutMetrics {
   readonly commit: string;
   readonly generation: number;
+  readonly authenticationTokenMinted: boolean;
   readonly prepareStartedAtMs: number;
   readonly sandboxReadyAtMs: number;
   readonly startedAtMs: number;
@@ -50,8 +62,24 @@ interface CheckoutMetrics {
 
 interface Observation {
   readonly head: string;
+  readonly placement: string;
   readonly observedAtMs: number;
+  readonly authEnvironmentClean: boolean;
   readonly metrics: CheckoutMetrics;
+}
+
+interface LiveConfig {
+  readonly appId: string;
+  readonly privateKey: string;
+  readonly repositoryName: string;
+  readonly sha: string;
+}
+
+interface DurableNamespace {
+  readonly id?: string;
+  readonly className?: string;
+  readonly name?: string;
+  readonly script?: string;
 }
 
 const smokeDefinition = workflow({
@@ -80,7 +108,16 @@ const measurementCommand = (): string => {
 const { execFileSync } = require("node:child_process");
 const metrics = JSON.parse(fs.readFileSync("/tmp/runway-repository-metrics", "utf8"));
 const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-process.stdout.write(JSON.stringify({ head, observedAtMs: Date.now(), metrics }));`;
+const placement = execFileSync("hostname", [], { encoding: "utf8" }).trim();
+const authEnvironmentClean = !process.env.RUNWAY_GITHUB_TOKEN && !process.env.GIT_ASKPASS &&
+  !fs.existsSync("/tmp/runway-git-askpass");
+process.stdout.write(JSON.stringify({
+  head,
+  placement,
+  observedAtMs: Date.now(),
+  authEnvironmentClean,
+  metrics,
+}));`;
   return `node -e ${shellQuote(source)}`;
 };
 
@@ -102,9 +139,8 @@ export default workflow({
     signatureHeader: ${JSON.stringify(SIGNATURE_HEADER)},
   }),
 }).handler(async (ctx, event) => {
-  const coldStartedAtMs = await ctx.step.do("cold-started", () => Date.now());
   const cold = observe((await ctx.step.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("cold-report", () => ({ coldStartedAtMs, cold }));
+  await ctx.step.do("cold-report", () => cold);
   await ctx.step.do("force-destroy", async () => {
     const response = await fetch(event.destroyUrl, {
       method: "POST",
@@ -117,16 +153,9 @@ export default workflow({
     if (!response.ok) throw new Error(\`destroy driver returned \${response.status}\`);
     return await response.json();
   });
-  const recoveryStartedAtMs = await ctx.step.do("recovery-started", () => Date.now());
   const recovered = observe((await ctx.step.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reusedStartedAtMs = await ctx.step.do("reused-started", () => Date.now());
   const reused = observe((await ctx.step.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("recovery-report", () => ({
-    recoveryStartedAtMs,
-    reusedStartedAtMs,
-    recovered,
-    reused,
-  }));
+  await ctx.step.do("recovery-report", () => ({ recovered, reused }));
 });
 `;
 
@@ -136,8 +165,7 @@ const hex = (bytes) => [...new Uint8Array(bytes)]
   .join("");
 
 const runnerId = async (runId) => {
-  const bytes = new TextEncoder().encode(runId);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(runId));
   return \`runway-\${hex(digest).slice(0, 32)}\`;
 };
 
@@ -158,7 +186,54 @@ export default {
 };
 `;
 
+const liveConfig = (): LiveConfig | undefined => {
+  if (process.env[OPT_IN] !== "1") {
+    console.log(
+      JSON.stringify(
+        {
+          outcome: "skipped",
+          smoke: "github-recovery",
+          reason: `Set ${OPT_IN}=1 and the documented GitHub App/repository credentials to run`,
+          required: [
+            GITHUB_APP_ID_BINDING,
+            GITHUB_PRIVATE_KEY_BINDING,
+            REPOSITORY_ENV,
+            SHA_ENV,
+            "Wrangler auth or CLOUDFLARE_API_TOKEN with Workers, Workflows, Containers, R2, and Durable Objects access",
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+    return undefined;
+  }
+  const values = {
+    appId: process.env[GITHUB_APP_ID_BINDING],
+    privateKey: process.env[GITHUB_PRIVATE_KEY_BINDING],
+    repositoryName: process.env[REPOSITORY_ENV],
+    sha: process.env[SHA_ENV],
+  };
+  const missing = Object.entries(values)
+    .filter(([, value]) => !value)
+    .map(
+      ([name]) =>
+        (({ appId: GITHUB_APP_ID_BINDING, privateKey: GITHUB_PRIVATE_KEY_BINDING }) as const)[
+          name as "appId" | "privateKey"
+        ] ?? (name === "repositoryName" ? REPOSITORY_ENV : SHA_ENV),
+    );
+  if (missing.length > 0)
+    throw new Error(`Missing live GitHub recovery config: ${missing.join(", ")}`);
+  if (!/^[1-9][0-9]*$/.test(values.appId!)) throw new Error("Invalid GitHub App ID");
+  if (!/^[0-9a-f]{40}$/.test(values.sha!)) throw new Error(`Invalid ${SHA_ENV}`);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(values.repositoryName!)) {
+    throw new Error(`Invalid ${REPOSITORY_ENV}`);
+  }
+  return values as LiveConfig;
+};
+
 const tokenOf = async (): Promise<string> => {
+  if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN;
   const { stdout } = await execFileAsync("wrangler", ["auth", "token", "--json"], {
     timeout: 10_000,
   });
@@ -281,6 +356,73 @@ const relatedWorkflows = async (
   return matches;
 };
 
+const durableNamespaces = async (
+  cf: Cloudflare,
+  accountId: string,
+): Promise<ReadonlyArray<DurableNamespace>> => {
+  const namespaces: DurableNamespace[] = [];
+  for await (const namespace of cf.durableObjects.namespaces.list({ account_id: accountId })) {
+    namespaces.push({
+      ...(typeof namespace.id === "string" ? { id: namespace.id } : {}),
+      ...(typeof namespace.class === "string" ? { className: namespace.class } : {}),
+      ...(typeof namespace.name === "string" ? { name: namespace.name } : {}),
+      ...(typeof namespace.script === "string" ? { script: namespace.script } : {}),
+    });
+  }
+  return namespaces;
+};
+
+const namespaceNames = (scriptName: string): ReadonlySet<string> =>
+  new Set([`${scriptName}-${SANDBOX_CLASS}`, `${scriptName}-${GITHUB_COORDINATOR_CLASS}`]);
+
+const relatedNamespaces = async (
+  cf: Cloudflare,
+  accountId: string,
+  scriptName: string,
+): Promise<ReadonlyArray<DurableNamespace>> => {
+  const names = namespaceNames(scriptName);
+  return (await durableNamespaces(cf, accountId)).filter(
+    (namespace) => namespace.script === scriptName || (namespace.name && names.has(namespace.name)),
+  );
+};
+
+const namespaceObjectCount = async (
+  cf: Cloudflare,
+  accountId: string,
+  namespaceId: string,
+): Promise<number> => {
+  let count = 0;
+  for await (const _object of cf.durableObjects.namespaces.objects.list(namespaceId, {
+    account_id: accountId,
+  })) {
+    count += 1;
+  }
+  return count;
+};
+
+const waitForNamespaceAbsence = async (
+  cf: Cloudflare,
+  accountId: string,
+  scriptName: string,
+  createdIds: ReadonlySet<string>,
+): Promise<ReadonlyArray<DurableNamespace>> => {
+  const deadline = Date.now() + 30_000;
+  let remaining: ReadonlyArray<DurableNamespace> = [];
+  do {
+    const namespaces = await durableNamespaces(cf, accountId);
+    const names = namespaceNames(scriptName);
+    remaining = namespaces.filter(
+      (namespace) =>
+        namespace.script === scriptName ||
+        (namespace.name !== undefined && names.has(namespace.name)) ||
+        (namespace.id !== undefined && createdIds.has(namespace.id)),
+    );
+    if (remaining.length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  } while (Date.now() < deadline);
+  return remaining;
+};
+
 const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
   const body = JSON.stringify(event);
   const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
@@ -365,10 +507,14 @@ const observationOf = (value: unknown): Observation => {
   const metrics = observation.metrics;
   if (
     typeof observation.head !== "string" ||
+    typeof observation.placement !== "string" ||
+    observation.placement.length === 0 ||
     typeof observation.observedAtMs !== "number" ||
+    observation.authEnvironmentClean !== true ||
     !metrics ||
     typeof metrics.commit !== "string" ||
     typeof metrics.generation !== "number" ||
+    typeof metrics.authenticationTokenMinted !== "boolean" ||
     typeof metrics.prepareStartedAtMs !== "number" ||
     typeof metrics.sandboxReadyAtMs !== "number" ||
     typeof metrics.startedAtMs !== "number" ||
@@ -381,10 +527,54 @@ const observationOf = (value: unknown): Observation => {
   return observation;
 };
 
-const run = async (): Promise<void> => {
+const assertNoCredentialDiagnostics = (details: InstanceDetails, config: LiveConfig): void => {
+  const diagnostics = JSON.stringify(details);
+  const privateKeyBodies = config.privateKey
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith("---"));
+  const forbidden = [hookSecret, driverToken, config.privateKey, ...privateKeyBodies];
+  if (forbidden.some((value) => value.length >= 8 && diagnostics.includes(value))) {
+    throw new Error("Workflow diagnostics contained a configured credential");
+  }
+  if (githubTokenPattern.test(diagnostics) || /BEGIN (?:RSA )?PRIVATE KEY/.test(diagnostics)) {
+    throw new Error("Workflow diagnostics contained GitHub credential material");
+  }
+};
+
+const authenticatedSource = async (
+  project: string,
+  config: LiveConfig,
+): Promise<{
+  readonly source: RepositorySource;
+  readonly installationId: number;
+  readonly repositoryId: number;
+}> => {
+  const local = await resolveRepositorySource(project);
+  if (local.commit !== config.sha) {
+    throw new Error(`Local checkout SHA ${local.commit} does not match ${SHA_ENV}=${config.sha}`);
+  }
+  const resolved = await createGitHubProvider({
+    appId: config.appId,
+    privateKey: config.privateKey,
+  }).resolveRepository(config.repositoryName);
+  if (resolved.repository.fullName.toLowerCase() !== config.repositoryName.toLowerCase()) {
+    throw new Error("GitHub App resolved an unexpected repository identity");
+  }
+  return {
+    source: {
+      remote: githubRepositoryRemote(resolved.repository),
+      commit: config.sha,
+      authentication: { type: "github", ...resolved },
+    },
+    installationId: resolved.installationId,
+    repositoryId: resolved.repository.id,
+  };
+};
+
+const run = async (config: LiveConfig): Promise<void> => {
   const startedAt = Date.now();
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
-  const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-recovery-smoke-${suffix}`;
+  const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-github-recovery-${suffix}`;
   const driverName = `${scriptName}-driver`;
   const containerName = `${scriptName}-Sandbox`;
   const token = await tokenOf();
@@ -399,15 +589,19 @@ const run = async (): Promise<void> => {
     ...(await containerApplications(token, accountId))
       .filter((candidate) => candidate.name === containerName)
       .map((candidate) => `container ${candidate.name}`),
+    ...(await relatedNamespaces(cf, accountId, scriptName)).map(
+      (namespace) => `Durable Object namespace ${namespace.name ?? namespace.id ?? "<unknown>"}`,
+    ),
   ];
   if (collisions.length > 0) {
     throw new Error(`Refusing to overwrite pre-existing smoke resources: ${collisions.join(", ")}`);
   }
   const project = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-recovery-smoke-"),
+    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-github-recovery-smoke-"),
   );
   const workflowPath = path.join(project, ".runway/workflows/smoke.ts");
   const createdObjectKeys = new Set<string>();
+  const createdNamespaceIds = new Set<string>();
   let smokeError: unknown;
   let cleanupError: Error | undefined;
   let report: Record<string, unknown> | undefined;
@@ -416,11 +610,11 @@ const run = async (): Promise<void> => {
     await mkdir(path.dirname(workflowPath), { recursive: true });
     await writeFile(path.join(project, "package.json"), JSON.stringify({ name: scriptName }));
     await writeFile(workflowPath, workflowSource());
-    const repository = await resolveRepositorySource(project);
+    const identity = await authenticatedSource(project, config);
     const prepared = await buildDeployment(registry(project), {
       cwd: project,
       scriptName,
-      repository,
+      repository: identity.source,
       snapshotKeyAvailable: false,
     });
     for (const artifact of prepared.artifacts) {
@@ -437,6 +631,8 @@ const run = async (): Promise<void> => {
         RUNWAY_SCRIPT_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         DRIVER_TOKEN: driverToken,
+        [GITHUB_APP_ID_BINDING]: config.appId,
+        [GITHUB_PRIVATE_KEY_BINDING]: config.privateKey,
       },
     });
     if (
@@ -444,6 +640,28 @@ const run = async (): Promise<void> => {
       JSON.stringify(prepared.artifacts.map(({ artifactVersion }) => artifactVersion))
     ) {
       throw new Error("Deploy returned unexpected workflow artifacts");
+    }
+    const deployedNamespaces = await relatedNamespaces(cf, accountId, scriptName);
+    for (const namespace of deployedNamespaces) {
+      if (namespace.id) createdNamespaceIds.add(namespace.id);
+    }
+    const namespaceByClass = new Map(
+      deployedNamespaces
+        .filter(
+          (namespace): namespace is DurableNamespace & { id: string; className: string } =>
+            namespace.script === scriptName &&
+            typeof namespace.id === "string" &&
+            typeof namespace.className === "string",
+        )
+        .map((namespace) => [namespace.className, namespace]),
+    );
+    if (
+      deployedNamespaces.length !== 2 ||
+      namespaceByClass.size !== 2 ||
+      !namespaceByClass.has(SANDBOX_CLASS) ||
+      !namespaceByClass.has(GITHUB_COORDINATOR_CLASS)
+    ) {
+      throw new Error("Deploy did not create exactly the owned Sandbox and coordinator namespaces");
     }
     const webhookUrl = deployment.urls[0]?.url;
     if (!webhookUrl) throw new Error("Deploy returned no webhook URL");
@@ -454,29 +672,16 @@ const run = async (): Promise<void> => {
     const destroyUrl = `https://${driverName}.${host.slice(prefix.length)}/destroy`;
     const runId = await trigger(webhookUrl, { destroyUrl });
     const completed = await waitForCompletion(cf, accountId, scriptName, runId);
-    const coldReport = JSON.parse(stepOutput(completed, "cold-report")) as {
-      coldStartedAtMs?: unknown;
-      cold?: unknown;
-    };
-    const recoveryReport = JSON.parse(stepOutput(completed, "recovery-report")) as {
-      recoveryStartedAtMs?: unknown;
-      reusedStartedAtMs?: unknown;
+    const cold = observationOf(JSON.parse(stepOutput(completed, "cold-report")));
+    const recovery = JSON.parse(stepOutput(completed, "recovery-report")) as {
       recovered?: unknown;
       reused?: unknown;
     };
-    if (
-      typeof coldReport.coldStartedAtMs !== "number" ||
-      typeof recoveryReport.recoveryStartedAtMs !== "number" ||
-      typeof recoveryReport.reusedStartedAtMs !== "number"
-    ) {
-      throw new Error("Smoke report omitted phase timestamps");
-    }
-    const cold = observationOf(coldReport.cold);
-    const recovered = observationOf(recoveryReport.recovered);
-    const reused = observationOf(recoveryReport.reused);
+    const recovered = observationOf(recovery.recovered);
+    const reused = observationOf(recovery.reused);
     for (const observation of [cold, recovered, reused]) {
-      if (observation.head !== observation.metrics.commit) {
-        throw new Error("A command observed a checkout other than the pinned commit");
+      if (observation.head !== config.sha || observation.metrics.commit !== config.sha) {
+        throw new Error("A command observed a checkout other than the opted-in exact SHA");
       }
       if (
         observation.metrics.prepareStartedAtMs > observation.metrics.sandboxReadyAtMs ||
@@ -487,54 +692,80 @@ const run = async (): Promise<void> => {
       }
       if (observation.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
     }
-    if (cold.metrics.startedAtMs === recovered.metrics.startedAtMs) {
-      throw new Error("Recovery reused checkout metrics from the destroyed Sandbox");
+    if (cold.placement === recovered.placement) {
+      throw new Error("Sandbox.destroy() did not produce a changed placement hostname");
+    }
+    if (recovered.placement !== reused.placement) {
+      throw new Error("The post-recovery command unexpectedly changed Sandbox placement");
+    }
+    if (cold.metrics.generation !== 1 || recovered.metrics.generation !== 1) {
+      throw new Error("Replacement did not reconstruct a fresh authenticated checkout");
+    }
+    if (!cold.metrics.authenticationTokenMinted || !recovered.metrics.authenticationTokenMinted) {
+      throw new Error("Initial and replacement checkout did not both mint installation auth");
     }
     if (JSON.stringify(recovered.metrics) !== JSON.stringify(reused.metrics)) {
-      throw new Error("A reused Sandbox performed more than one recovery checkout");
+      throw new Error("A reused Sandbox performed an extra checkout");
     }
+    assertNoCredentialDiagnostics(completed, config);
+    const authenticationTokenMintEvidence = [
+      cold.metrics.authenticationTokenMinted,
+      recovered.metrics.authenticationTokenMinted,
+    ];
+    const namespaceObjects = Object.fromEntries(
+      await Promise.all(
+        [SANDBOX_CLASS, GITHUB_COORDINATOR_CLASS].map(async (className) => {
+          const namespace = namespaceByClass.get(className)!;
+          return [className, await namespaceObjectCount(cf, accountId, namespace.id)] as const;
+        }),
+      ),
+    );
     report = {
       outcome: "passed",
       accountId,
       scriptName,
       driverName,
       runId,
-      commit: cold.head,
-      cold: {
-        workflowToRunnerMs: cold.metrics.prepareStartedAtMs - coldReport.coldStartedAtMs,
-        sandboxReadyMs: cold.metrics.sandboxReadyAtMs - cold.metrics.prepareStartedAtMs,
-        checkoutProcessStartMs: cold.metrics.startedAtMs - cold.metrics.sandboxReadyAtMs,
-        checkoutMs: cold.metrics.checkoutMs,
-        fetchMs: cold.metrics.fetchMs,
-        packBytes: cold.metrics.packBytes,
-        commandReadyMs: cold.observedAtMs - cold.metrics.prepareStartedAtMs,
-      },
-      recovery: {
-        workflowToRunnerMs:
-          recovered.metrics.prepareStartedAtMs - recoveryReport.recoveryStartedAtMs,
-        sandboxReadyMs: recovered.metrics.sandboxReadyAtMs - recovered.metrics.prepareStartedAtMs,
-        checkoutProcessStartMs: recovered.metrics.startedAtMs - recovered.metrics.sandboxReadyAtMs,
-        checkoutMs: recovered.metrics.checkoutMs,
-        fetchMs: recovered.metrics.fetchMs,
-        packBytes: recovered.metrics.packBytes,
-        commandReadyMs: recovered.observedAtMs - recovered.metrics.prepareStartedAtMs,
-        overheadMs:
-          recovered.observedAtMs -
-          recoveryReport.recoveryStartedAtMs -
-          (reused.observedAtMs - recoveryReport.reusedStartedAtMs),
-      },
+      repository: config.repositoryName,
+      repositoryId: identity.repositoryId,
+      installationId: identity.installationId,
+      sha: config.sha,
+      initialPlacement: cold.placement,
+      replacementPlacement: recovered.placement,
+      placementChanged: cold.placement !== recovered.placement,
+      tokenReminted: authenticationTokenMintEvidence.every(Boolean),
+      authenticationTokenMintEvidence,
+      credentialDiagnosticsClean: true,
+      durableNamespaces: Object.fromEntries(
+        [SANDBOX_CLASS, GITHUB_COORDINATOR_CLASS].map((className) => [
+          className,
+          {
+            id: namespaceByClass.get(className)!.id,
+            objectCountBeforeCleanup: namespaceObjects[className],
+          },
+        ]),
+      ),
+      cleanupScope: [
+        "Worker-owned Sandbox and coordinator namespaces",
+        "Dynamic Workflow and instances",
+        "Sandbox container application",
+        "artifact R2 object",
+      ],
       totalMs: Date.now() - startedAt,
     };
   } catch (error) {
     smokeError = error;
   } finally {
     const cleanupErrors: string[] = [];
-    for (const name of [driverName, scriptName]) {
-      try {
-        await cf.workers.scripts.delete(name, { account_id: accountId });
-      } catch (error) {
-        if (!isStatus(error, 404)) cleanupErrors.push(`${name}: ${String(error)}`);
-      }
+    try {
+      await cf.workers.scripts.delete(driverName, { account_id: accountId });
+    } catch (error) {
+      if (!isStatus(error, 404)) cleanupErrors.push(`${driverName}: ${String(error)}`);
+    }
+    try {
+      await cf.workers.scripts.delete(scriptName, { account_id: accountId, force: true });
+    } catch (error) {
+      if (!isStatus(error, 404)) cleanupErrors.push(`${scriptName}: ${String(error)}`);
     }
     try {
       await cf.workflows.delete(scriptName, { account_id: accountId });
@@ -550,11 +781,15 @@ const run = async (): Promise<void> => {
       cleanupErrors.push(`container: ${String(error)}`);
     }
     try {
-      for (const key of createdObjectKeys) {
-        await cf.r2.buckets.objects.delete(bucketName, key, { account_id: accountId });
-      }
-      if (!bucketExisted && (await objectKeys(cf, accountId, bucketName)).size === 0) {
-        await cf.r2.buckets.delete(bucketName, { account_id: accountId });
+      if (await bucketExists(cf, accountId, bucketName)) {
+        for (const key of createdObjectKeys) {
+          if (await objectExists(cf, accountId, bucketName, key)) {
+            await cf.r2.buckets.objects.delete(bucketName, key, { account_id: accountId });
+          }
+        }
+        if (!bucketExisted && (await objectKeys(cf, accountId, bucketName)).size === 0) {
+          await cf.r2.buckets.delete(bucketName, { account_id: accountId });
+        }
       }
     } catch (error) {
       cleanupErrors.push(`R2: ${String(error)}`);
@@ -566,6 +801,12 @@ const run = async (): Promise<void> => {
       const remainingContainer = (await containerApplications(token, accountId)).some(
         (candidate) => candidate.name === containerName,
       );
+      const remainingNamespaces = await waitForNamespaceAbsence(
+        cf,
+        accountId,
+        scriptName,
+        createdNamespaceIds,
+      );
       const bucketRemains = await bucketExists(cf, accountId, bucketName);
       const remainingKeys = bucketRemains
         ? await objectKeys(cf, accountId, bucketName)
@@ -573,6 +814,11 @@ const run = async (): Promise<void> => {
       for (const name of remainingScripts) cleanupErrors.push(`Worker still exists: ${name}`);
       for (const name of remainingWorkflows) cleanupErrors.push(`Workflow still exists: ${name}`);
       if (remainingContainer) cleanupErrors.push(`container still exists: ${containerName}`);
+      for (const namespace of remainingNamespaces) {
+        cleanupErrors.push(
+          `Durable Object namespace still exists: ${namespace.name ?? namespace.id ?? "<unknown>"}`,
+        );
+      }
       for (const key of createdObjectKeys) {
         if (remainingKeys.has(key)) cleanupErrors.push(`R2 object still exists: ${key}`);
       }
@@ -592,13 +838,29 @@ const run = async (): Promise<void> => {
   if (cleanupError) throw cleanupError;
   if (smokeError) throw smokeError;
   if (!report) throw new Error("Smoke completed without a report");
-  console.log(JSON.stringify(report, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        ...report,
+        cleanupVerified: true,
+        durableNamespaceAbsenceVerified: true,
+      },
+      null,
+      2,
+    ),
+  );
 };
 
-await run().catch((error) => {
-  const message = (error instanceof Error ? (error.stack ?? error.message) : String(error))
-    .replaceAll(hookSecret, "***")
-    .replaceAll(driverToken, "***");
-  console.error(message);
-  process.exitCode = 1;
-});
+const config = liveConfig();
+if (config) {
+  await run(config).catch((error) => {
+    const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    const sanitized = raw
+      .replaceAll(config.privateKey, "***")
+      .replaceAll(hookSecret, "***")
+      .replaceAll(driverToken, "***")
+      .replace(githubTokenPattern, "***");
+    console.error(sanitized);
+    process.exitCode = 1;
+  });
+}

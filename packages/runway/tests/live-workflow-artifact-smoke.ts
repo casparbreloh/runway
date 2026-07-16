@@ -372,7 +372,7 @@ const run = async (): Promise<void> => {
     throw new Error(`Refusing to overwrite pre-existing smoke resources: ${collisions.join(", ")}`);
   }
   const project = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-immutable-smoke-"),
+    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-immutable-smoke-"),
   );
   const workflowPath = path.join(project, ".runway/workflows/smoke.ts");
   const createdObjectKeys = new Set<string>();

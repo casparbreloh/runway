@@ -1,6 +1,6 @@
 import { parseSSEStream } from "@cloudflare/sandbox";
 
-import type { RepositorySource } from "./repository-source.ts";
+import type { GitHubRepositoryAuthentication, RepositorySource } from "./repository-source.ts";
 import type { RunnerBridge } from "./runner.ts";
 import { redactError, StreamingRedactor } from "./secret-redaction.ts";
 import type { ExecResult } from "./types.ts";
@@ -11,6 +11,7 @@ const REPOSITORY_GENERATION = "/tmp/runway-checkout-generation";
 const REPOSITORY_MARKER = "/tmp/runway-repository";
 const REPOSITORY_METRICS = "/tmp/runway-repository-metrics";
 const REPOSITORY_GIT_DIRECTORY = "/workspace/.git";
+const REPOSITORY_ASKPASS = "/tmp/runway-git-askpass";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -73,6 +74,10 @@ interface OutputCollector {
 interface RunnerAdapterOptions {
   readonly sandbox: (runnerId: string) => RunnerSandbox | Promise<RunnerSandbox>;
   readonly repository: RepositorySource;
+  readonly installationToken?: (request: {
+    readonly purpose: "checkout";
+    readonly authentication: GitHubRepositoryAuthentication;
+  }) => Promise<string>;
   readonly log: (entry: RunnerLog) => void;
   readonly status?: (runId: string) => Promise<{ status: string }>;
   readonly waitUntil?: (promise: Promise<void>) => void;
@@ -107,11 +112,19 @@ const managedCommand = (command: string): string =>
 
 const repositoryMarker = (repository: RepositorySource): string => JSON.stringify(repository);
 
+const askpassHelper = `#!/bin/sh
+case "$1" in
+  "Username for 'https://github.com': ") printf '%s\\n' 'x-access-token' ;;
+  "Password for 'https://x-access-token@github.com': ") printf '%s\\n' "$RUNWAY_GITHUB_TOKEN" ;;
+  *) exit 1 ;;
+esac`;
+
 const checkoutCommand = (repository: RepositorySource, generation: number): string => {
   const remote = shellQuote(repository.remote);
   const commit = shellQuote(repository.commit);
   const marker = shellQuote(repositoryMarker(repository));
-  return `set -eu; started_at=$(date +%s%3N); rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; fetch_started_at=$(date +%s%3N); git -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; fetch_completed_at=$(date +%s%3N); git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; completed_at=$(date +%s%3N); pack_bytes=$(find /workspace/.git/objects/pack -type f -name '*.pack' -exec wc -c {} + | awk '{ total += $1 } END { print total + 0 }'); printf '{"commit":"%s","generation":%s,"prepareStartedAtMs":%s,"sandboxReadyAtMs":%s,"startedAtMs":%s,"fetchMs":%s,"checkoutMs":%s,"packBytes":%s}' ${commit} ${generation} "$RUNWAY_PREPARE_STARTED_AT_MS" "$RUNWAY_SANDBOX_READY_AT_MS" "$started_at" "$((fetch_completed_at - fetch_started_at))" "$((completed_at - started_at))" "$pack_bytes" > ${REPOSITORY_METRICS}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
+  const helper = shellQuote(askpassHelper);
+  return `set -eu; helper="${"${GIT_ASKPASS:-}"}"; cleanup_checkout() { [ -z "$helper" ] || rm -f "$helper"; }; trap cleanup_checkout EXIT; if [ -n "${"${RUNWAY_GITHUB_TOKEN:-}"}" ]; then umask 077; printf %s ${helper} > "$helper"; chmod 700 "$helper"; fi; started_at=$(date +%s%3N); rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; fetch_started_at=$(date +%s%3N); git -c http.followRedirects=false -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; fetch_completed_at=$(date +%s%3N); git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; completed_at=$(date +%s%3N); pack_bytes=$(find /workspace/.git/objects/pack -type f -name '*.pack' -exec wc -c {} + | awk '{ total += $1 } END { print total + 0 }'); printf '{"commit":"%s","generation":%s,"authenticationTokenMinted":%s,"prepareStartedAtMs":%s,"sandboxReadyAtMs":%s,"startedAtMs":%s,"fetchMs":%s,"checkoutMs":%s,"packBytes":%s}' ${commit} ${generation} "$RUNWAY_AUTHENTICATION_TOKEN_MINTED" "$RUNWAY_PREPARE_STARTED_AT_MS" "$RUNWAY_SANDBOX_READY_AT_MS" "$started_at" "$((fetch_completed_at - fetch_started_at))" "$((completed_at - started_at))" "$pack_bytes" > ${REPOSITORY_METRICS}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
 };
 
 const killProcessGroup = async (sandbox: RunnerSandbox, process: SandboxProcess): Promise<void> => {
@@ -243,6 +256,31 @@ const collectResult = async (
   };
 };
 
+const collectRecoveredCheckoutResult = async (
+  sandbox: RunnerSandbox,
+  process: SandboxProcess,
+): Promise<ExecResult> => {
+  try {
+    let exitCode = process.exitCode;
+    const stream = await sandbox.streamProcessLogs(process.id);
+    for await (const event of parseSSEStream<ProcessLogEvent>(stream)) {
+      if (event.type === "error") throw new Error("repository checkout recovery failed");
+      if (event.type === "exit" || event.type === "complete") {
+        exitCode = streamExitCode(event.exitCode, exitCode);
+      }
+    }
+    const endTime = process.endTime?.getTime() ?? Date.now();
+    return {
+      exitCode: await resolveExitCode(sandbox, process, exitCode),
+      stdout: "",
+      stderr: "",
+      durationMs: Math.max(0, endTime - process.startTime.getTime()),
+    };
+  } catch {
+    throw new Error("repository checkout recovery failed");
+  }
+};
+
 const checkoutGeneration = async (sandbox: RunnerSandbox): Promise<number> => {
   const exists = await sandbox.exists(REPOSITORY_GENERATION);
   if (!exists.exists) return 0;
@@ -255,6 +293,7 @@ const prepareRepository = async (
   sandbox: RunnerSandbox,
   request: RunnerRequest,
   repository: RepositorySource,
+  installationToken: RunnerAdapterOptions["installationToken"],
   log: RunnerAdapterOptions["log"],
 ): Promise<void> => {
   const prepareStartedAtMs = Date.now();
@@ -274,28 +313,53 @@ const prepareRepository = async (
   const processId = await hashId("checkout", [request.runId, generation]);
   const command = managedCommand(checkoutCommand(repository, generation));
   let process = await sandbox.getProcess(processId);
+  let token: string | undefined;
+  let ownsAuthenticatedCheckout = false;
   if (!process) {
     try {
+      const env: Record<string, string> = {
+        CI: "true",
+        RUNWAY_AUTHENTICATION_TOKEN_MINTED: "false",
+        RUNWAY_PREPARE_STARTED_AT_MS: String(prepareStartedAtMs),
+        RUNWAY_SANDBOX_READY_AT_MS: String(sandboxReadyAtMs),
+      };
+      if (repository.authentication.type === "github") {
+        if (!installationToken) throw new Error("missing GitHub repository authentication");
+        token = await installationToken({
+          purpose: "checkout",
+          authentication: repository.authentication,
+        });
+        if (!token) throw new Error("missing GitHub repository authentication");
+        env.GIT_ASKPASS = REPOSITORY_ASKPASS;
+        env.GIT_TERMINAL_PROMPT = "0";
+        env.RUNWAY_AUTHENTICATION_TOKEN_MINTED = "true";
+        env.RUNWAY_GITHUB_TOKEN = token;
+      }
       process = await sandbox.startProcess(command, {
         processId,
         autoCleanup: false,
         cwd: "/",
-        env: {
-          CI: "true",
-          RUNWAY_PREPARE_STARTED_AT_MS: String(prepareStartedAtMs),
-          RUNWAY_SANDBOX_READY_AT_MS: String(sandboxReadyAtMs),
-        },
+        env,
       });
+      ownsAuthenticatedCheckout = repository.authentication.type === "github";
     } catch (error) {
       process = await sandbox.getProcess(processId);
-      if (!process) throw error;
+      if (!process) throw redactError(error, [...request.secrets, ...(token ? [token] : [])]);
     }
   }
   if (process.command !== command) throw new Error("repository checkout process collision");
   const timeout = cancellableDelay(REPOSITORY_CHECKOUT_TIMEOUT_MS);
+  const redactedCheckoutRequest = {
+    ...checkoutRequest,
+    secrets: [...checkoutRequest.secrets, ...(token ? [token] : [])],
+  };
+  const recoveredAuthenticatedCheckout =
+    repository.authentication.type === "github" && !ownsAuthenticatedCheckout;
   try {
     const result = await Promise.race([
-      collectResult(sandbox, process, checkoutRequest, log),
+      recoveredAuthenticatedCheckout
+        ? collectRecoveredCheckoutResult(sandbox, process)
+        : collectResult(sandbox, process, redactedCheckoutRequest, log),
       timeout.promise.then(async () => {
         await killProcessGroup(sandbox, process);
         await sandbox.destroy();
@@ -316,6 +380,9 @@ const prepareRepository = async (
       await sandbox.destroy();
       throw new Error("repository checkout did not prepare the expected source");
     }
+  } catch (error) {
+    if (recoveredAuthenticatedCheckout) throw new Error("repository checkout recovery failed");
+    throw redactError(error, redactedCheckoutRequest.secrets);
   } finally {
     timeout.cancel();
   }
@@ -331,7 +398,13 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
       const processId = await hashId("step", [request.runId, request.step.id, request.step.count]);
       const command = managedCommand(request.options.command);
       const sandbox = await options.sandbox(runnerId);
-      await prepareRepository(sandbox, request, options.repository, options.log);
+      await prepareRepository(
+        sandbox,
+        request,
+        options.repository,
+        options.installationToken,
+        options.log,
+      );
       let process = await sandbox.getProcess(processId);
       if (!process) {
         try {

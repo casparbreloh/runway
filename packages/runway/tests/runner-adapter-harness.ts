@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { createRunnerAdapter } from "../src/runner-adapter.ts";
-import { repositoryFixture } from "./repository-fixture.ts";
+import { authenticatedRepositoryFixture, repositoryFixture } from "./repository-fixture.ts";
 
 const repository = repositoryFixture;
 const repositoryMarker = "/tmp/runway-repository";
@@ -20,7 +20,7 @@ interface SandboxHooks {
   getProcess?(id: string, sandbox: TestSandbox): Promise<HarnessProcess | null>;
   startProcess?(
     command: string,
-    options: { processId: string },
+    options: { processId: string; env: Record<string, string> },
     sandbox: TestSandbox,
   ): Promise<HarnessProcess>;
   streamProcessLogs?(id: string, sandbox: TestSandbox): Promise<ReadableStream<Uint8Array>>;
@@ -57,7 +57,10 @@ class TestSandbox {
         : null;
   }
 
-  async startProcess(command: string, options: { processId: string }): Promise<HarnessProcess> {
+  async startProcess(
+    command: string,
+    options: { processId: string; env: Record<string, string> },
+  ): Promise<HarnessProcess> {
     this.starts += 1;
     this.commands.push(command);
     this.process = this.hooks.startProcess
@@ -151,6 +154,286 @@ const adapterOf = (
 };
 
 export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
+  async authenticatedRepositoryReconnect(): Promise<unknown> {
+    const token = "github-token-original-process";
+    const logs: string[] = [];
+    let streams = 0;
+    let tokenMints = 0;
+    const sandbox = new TestSandbox({
+      startProcess: async (command, options) => ({
+        id: options.processId,
+        command,
+        status: "running",
+        startTime: new Date(),
+      }),
+      streamProcessLogs: async (id, current) => {
+        if (!id.startsWith("checkout-")) return processStream([{ type: "exit", exitCode: 0 }]);
+        streams += 1;
+        if (streams === 1) {
+          return new ReadableStream({
+            start(controller) {
+              controller.error(new Error("checkout stream disconnected"));
+            },
+          });
+        }
+        current.files.set(repositoryMarker, JSON.stringify(authenticatedRepositoryFixture));
+        current.files.set(repositoryHead, authenticatedRepositoryFixture.commit);
+        if (current.process) {
+          current.process.status = "completed";
+          current.process.exitCode = 0;
+        }
+        return processStream([
+          { type: "stdout", data: `replayed ${token}\n` },
+          { type: "stderr", data: `replayed ${token}\n` },
+          { type: "exit", exitCode: 0 },
+        ]);
+      },
+    });
+    const adapter = createRunnerAdapter({
+      sandbox: async () => sandbox,
+      repository: authenticatedRepositoryFixture,
+      installationToken: async () => {
+        tokenMints += 1;
+        return token;
+      },
+      log: ({ chunk }) => logs.push(chunk),
+    });
+
+    await adapter.exec(requestOf("first", { runId: "run-private-reconnect" })).catch(() => {});
+    const result = await adapter.exec(
+      requestOf("second", { runId: "run-private-reconnect", attempt: 2 }),
+    );
+    return {
+      result,
+      tokenMints,
+      streams,
+      logsContainToken: logs.join("").includes(token),
+    };
+  }
+
+  async concurrentAuthenticatedRepositoryBootstrap(): Promise<unknown> {
+    const tokens = ["github-token-concurrent-first", "github-token-concurrent-second"];
+    const logs: string[] = [];
+    let markerChecks = 0;
+    let release = (): void => {};
+    const checked = new Promise<void>((resolve) => (release = resolve));
+    let tokenMints = 0;
+    let checkoutRuns = 0;
+    let process: HarnessProcess | null = null;
+    let ownerToken = "";
+    let checkoutLookups = 0;
+    let releaseLookups = (): void => {};
+    const lookedUp = new Promise<void>((resolve) => (releaseLookups = resolve));
+    const sandbox = new TestSandbox({
+      exists: async (path, current) => {
+        if (path !== repositoryMarker) return { exists: current.hasPath(path) };
+        if (current.files.has(path)) return { exists: true };
+        markerChecks += 1;
+        if (markerChecks === 2) release();
+        await checked;
+        return { exists: false };
+      },
+      startProcess: async (command, options) => {
+        if (!options.processId.startsWith("checkout-")) {
+          return {
+            id: options.processId,
+            command,
+            status: "completed",
+            startTime: new Date(),
+            exitCode: 0,
+          };
+        }
+        if (process) throw new Error("duplicate checkout process");
+        checkoutRuns += 1;
+        ownerToken = options.env.RUNWAY_GITHUB_TOKEN!;
+        process = {
+          id: options.processId,
+          command,
+          status: "completed",
+          startTime: new Date(),
+          exitCode: 0,
+        };
+        return process;
+      },
+      getProcess: async (id) => {
+        if (id.startsWith("checkout-") && checkoutLookups < 2) {
+          checkoutLookups += 1;
+          if (checkoutLookups === 2) releaseLookups();
+          await lookedUp;
+          return null;
+        }
+        return process?.id === id ? process : null;
+      },
+      streamProcessLogs: async (id, current) => {
+        if (!id.startsWith("checkout-")) return processStream([{ type: "exit", exitCode: 0 }]);
+        current.files.set(repositoryMarker, JSON.stringify(authenticatedRepositoryFixture));
+        current.files.set(repositoryHead, authenticatedRepositoryFixture.commit);
+        return processStream([
+          { type: "stdout", data: `owner ${ownerToken}\n` },
+          { type: "stderr", data: `owner ${ownerToken}\n` },
+          { type: "exit", exitCode: 0 },
+        ]);
+      },
+    });
+    const adapter = createRunnerAdapter({
+      sandbox: async () => sandbox,
+      repository: authenticatedRepositoryFixture,
+      installationToken: async () => {
+        const token = tokens[tokenMints++]!;
+        return token;
+      },
+      log: ({ chunk }) => logs.push(chunk),
+    });
+
+    await Promise.all([
+      adapter.exec(requestOf("first", { runId: "run-private-concurrent", stepId: "first" })),
+      adapter.exec(requestOf("second", { runId: "run-private-concurrent", stepId: "second" })),
+    ]);
+    return {
+      tokenMints,
+      checkoutRuns,
+      logsContainOwnerToken: logs.join("").includes(ownerToken),
+      logsContainMask: logs.join("").includes("***"),
+    };
+  }
+
+  async authenticatedRepositoryRecovery(): Promise<unknown> {
+    const tokens = ["github-token-initial", "github-token-replacement"];
+    const checkoutEnvironments: Array<Record<string, string>> = [];
+    const logs: string[] = [];
+    let tokenMints = 0;
+    const tokenPurposes: string[] = [];
+    let checkoutRuns = 0;
+    let commandRuns = 0;
+    const sandbox = new TestSandbox({
+      startProcess: async (command, options, current) => {
+        if (options.processId.startsWith("checkout-")) {
+          const token = options.env.RUNWAY_GITHUB_TOKEN!;
+          checkoutRuns += 1;
+          checkoutEnvironments.push(options.env);
+          current.files.set(repositoryMarker, JSON.stringify(authenticatedRepositoryFixture));
+          current.files.set(repositoryHead, authenticatedRepositoryFixture.commit);
+          current.files.set(
+            "/tmp/runway-repository-metrics",
+            JSON.stringify({
+              commit: authenticatedRepositoryFixture.commit,
+              generation: checkoutRuns,
+              authenticationTokenMinted: options.env.RUNWAY_AUTHENTICATION_TOKEN_MINTED === "true",
+            }),
+          );
+          current.files.set("/tmp/runway-checkout-generation", String(checkoutRuns));
+          current.files.delete(options.env.GIT_ASKPASS!);
+          current.process = {
+            id: options.processId,
+            command,
+            status: "completed",
+            startTime: new Date(),
+            exitCode: 0,
+          };
+          current.files.set(`/tmp/log-${checkoutRuns}`, token);
+        } else {
+          commandRuns += 1;
+        }
+        return {
+          id: options.processId,
+          command,
+          status: "completed",
+          startTime: new Date(),
+          exitCode: 0,
+        };
+      },
+      streamProcessLogs: async (id, current) => {
+        if (!id.startsWith("checkout-")) return processStream([{ type: "exit", exitCode: 0 }]);
+        const token = current.files.get(`/tmp/log-${checkoutRuns}`)!;
+        return processStream([
+          { type: "stdout", data: `checkout ${token.slice(0, 8)}` },
+          { type: "stdout", data: `${token.slice(8)}\n` },
+          { type: "stderr", data: `credential=${token}\n` },
+          { type: "exit", exitCode: 0 },
+        ]);
+      },
+    });
+    const adapter = createRunnerAdapter({
+      sandbox: async () => sandbox,
+      repository: authenticatedRepositoryFixture,
+      installationToken: async ({ purpose }) => {
+        tokenPurposes.push(purpose);
+        const token = tokens[tokenMints];
+        tokenMints += 1;
+        if (!token) throw new Error("unexpected token mint");
+        return token;
+      },
+      log: ({ chunk }) => logs.push(chunk),
+    });
+
+    await adapter.exec(requestOf("first", { runId: "run-private", stepId: "first" }));
+    await adapter.exec(requestOf("second", { runId: "run-private", stepId: "second" }));
+    sandbox.replace();
+    await adapter.exec(requestOf("third", { runId: "run-private", stepId: "third" }));
+
+    const serializedBoundary = JSON.stringify({
+      commands: sandbox.commands,
+      marker: sandbox.files.get(repositoryMarker),
+      metrics: sandbox.files.get("/tmp/runway-repository-metrics"),
+      logs,
+    });
+    const checkoutCommands = sandbox.commands.filter((command) =>
+      command.includes("git init -q /workspace"),
+    );
+    return {
+      tokenMints,
+      tokenPurposes,
+      authenticationTokenMintEvidence: checkoutEnvironments.map(
+        (env) => env.RUNWAY_AUTHENTICATION_TOKEN_MINTED,
+      ),
+      checkoutRuns,
+      commandRuns,
+      commitsSeen: checkoutEnvironments.map(() => sandbox.files.get(repositoryHead)),
+      checkoutEnvironmentKeys: checkoutEnvironments.map((env) => Object.keys(env).sort()),
+      credentialFreeRemote: checkoutCommands.every((command) =>
+        command.includes("https://github.com/casparbreloh/runway"),
+      ),
+      disablesRedirects: checkoutCommands.every((command) =>
+        command.includes("http.followRedirects=false"),
+      ),
+      metricsUseAuthenticationTokenMintEvidence: checkoutCommands.every(
+        (command) =>
+          command.includes('"authenticationTokenMinted":%s') &&
+          command.includes('"$RUNWAY_AUTHENTICATION_TOKEN_MINTED"'),
+      ),
+      disablesTerminalPrompt: checkoutEnvironments.every((env) => env.GIT_TERMINAL_PROMPT === "0"),
+      helperRemoved: checkoutEnvironments.every((env) => !sandbox.files.has(env.GIT_ASKPASS!)),
+      leakedToken: tokens.some((token) => serializedBoundary.includes(token)),
+      logsContainMask: logs.some((chunk) => chunk.includes("***")),
+    };
+  }
+
+  async authenticatedRepositoryFailure(): Promise<unknown> {
+    const token = "github-token-must-be-redacted";
+    const commands: string[] = [];
+    const sandbox = new TestSandbox({
+      startProcess: async (command) => {
+        commands.push(command);
+        throw new Error(`Sandbox start exposed ${token}`);
+      },
+      getProcess: async () => null,
+    });
+    try {
+      await createRunnerAdapter({
+        sandbox: async () => sandbox,
+        repository: authenticatedRepositoryFixture,
+        installationToken: async () => token,
+        log: () => {},
+      }).exec(requestOf("private", { runId: "run-private-failure" }));
+      return null;
+    } catch (error) {
+      return {
+        message: error instanceof Error ? error.message : String(error),
+        commandContainsToken: commands.some((command) => command.includes(token)),
+      };
+    }
+  }
+
   async concurrentRepositoryBootstrap(): Promise<unknown> {
     let markerChecks = 0;
     let release = (): void => {};
@@ -209,10 +492,12 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     let checkoutRuns = 0;
     let commandRuns = 0;
     const commitsSeen: Array<string | undefined> = [];
+    const authenticationTokenMintEvidence: string[] = [];
     const sandbox = new TestSandbox({
       startProcess: async (command, options, current) => {
         if (options.processId.startsWith("checkout-")) {
           checkoutRuns += 1;
+          authenticationTokenMintEvidence.push(options.env.RUNWAY_AUTHENTICATION_TOKEN_MINTED!);
           current.files.set(repositoryMarker, JSON.stringify(repository));
           current.files.set(repositoryHead, repository.commit);
           current.files.set("/tmp/runway-checkout-generation", "1");
@@ -240,6 +525,7 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     return {
       checkoutRuns,
       commandRuns,
+      authenticationTokenMintEvidence,
       commitsSeen,
       repositoryFiles: [...sandbox.files.keys()].filter((path) => path.startsWith("/workspace/")),
     };

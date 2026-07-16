@@ -1,6 +1,8 @@
 import { collectResultItems, resultOf } from "./cloudflare-api.ts";
 import type { CloudflareApi } from "./cloudflare-api.ts";
 import {
+  GITHUB_COORDINATOR_CLASS,
+  GITHUB_COORDINATOR_MIGRATION_TAG,
   RUNNER_APPLICATION,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
@@ -129,5 +131,26 @@ export const reconcileSandboxContainer = async (
   });
 };
 
-export const needsSandboxMigration = (tag: string | undefined): boolean =>
-  tag !== SANDBOX_MIGRATION_TAG;
+export interface RunwayMigration {
+  readonly old_tag?: string;
+  readonly new_tag: string;
+  readonly new_sqlite_classes: ReadonlyArray<string>;
+}
+
+export const runwayMigration = (tag: string | undefined): RunwayMigration | undefined => {
+  if (tag === undefined) {
+    return {
+      new_tag: GITHUB_COORDINATOR_MIGRATION_TAG,
+      new_sqlite_classes: [SANDBOX_CLASS, GITHUB_COORDINATOR_CLASS],
+    };
+  }
+  if (tag === SANDBOX_MIGRATION_TAG) {
+    return {
+      old_tag: SANDBOX_MIGRATION_TAG,
+      new_tag: GITHUB_COORDINATOR_MIGRATION_TAG,
+      new_sqlite_classes: [GITHUB_COORDINATOR_CLASS],
+    };
+  }
+  if (tag === GITHUB_COORDINATOR_MIGRATION_TAG) return undefined;
+  throw new Error(`unsupported Runway Worker migration tag: ${tag}`);
+};

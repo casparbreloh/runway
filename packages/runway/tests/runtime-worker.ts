@@ -1,10 +1,319 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { WorkerEntrypoint } from "cloudflare:workers";
-import { cron, ExecError, webhook, workflow } from "runway";
+import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { cron, ExecError, github, webhook, workflow } from "runway";
 import type { ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
 import { createRouter } from "../src/router.ts";
+
+let githubEffectEvents: string[] = [];
+
+const githubProviderState = {
+  tokenStarts: [] as Array<{ purpose: string; repositoryId: number }>,
+  tokens: [] as Array<{ purpose: string; repositoryId: number }>,
+  checks: [] as Array<{
+    id: number;
+    name: string;
+    headSha: string;
+    externalId: string;
+    status: "queued" | "in_progress" | "completed";
+    conclusion: string | null;
+  }>,
+  completions: [] as Array<{ checkRunId: number; conclusion: string }>,
+  reconciliations: [] as Array<{ name: string; headSha: string; runId: string }>,
+  updates: [] as Array<{ checkRunId: number; state: string }>,
+  unavailableRepositoryId: undefined as number | undefined,
+  loseCheckCreateResponse: false,
+  losePatchResponse: false,
+  failTokenAttempts: 0,
+  failTokenRepositoryId: undefined as number | undefined,
+  tokenDelayMs: 0,
+  checkTokenDelayMs: 0,
+};
+
+export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
+  async createInstallationToken(options: {
+    purpose: string;
+    repository: { id: number };
+  }): Promise<{ token: string; expiresAt: string }> {
+    githubProviderState.tokenStarts.push({
+      purpose: options.purpose,
+      repositoryId: options.repository.id,
+    });
+    if (
+      githubProviderState.failTokenAttempts > 0 &&
+      (githubProviderState.failTokenRepositoryId === undefined ||
+        githubProviderState.failTokenRepositoryId === options.repository.id)
+    ) {
+      githubProviderState.failTokenAttempts -= 1;
+      throw new Error("transient GitHub provider outage");
+    }
+    const delay =
+      options.purpose === "checks" && githubProviderState.checkTokenDelayMs > 0
+        ? githubProviderState.checkTokenDelayMs
+        : githubProviderState.tokenDelayMs;
+    if (delay > 0) {
+      await scheduler.wait(delay);
+    }
+    githubProviderState.tokens.push({
+      purpose: options.purpose,
+      repositoryId: options.repository.id,
+    });
+    if (githubProviderState.unavailableRepositoryId === options.repository.id) {
+      const error = new Error("GitHub repository is unavailable to the installation");
+      error.name = "GitHubRepositoryUnavailableError";
+      throw error;
+    }
+    return { token: "test-token", expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  }
+
+  async createQueuedCheck(options: {
+    name: string;
+    headSha: string;
+    runId: string;
+  }): Promise<(typeof githubProviderState.checks)[number]> {
+    const check = {
+      id: githubProviderState.checks.length + 501,
+      name: options.name,
+      headSha: options.headSha,
+      externalId: options.runId,
+      status: "queued" as const,
+      conclusion: null,
+    };
+    githubProviderState.checks.push(check);
+    if (githubProviderState.loseCheckCreateResponse) {
+      githubProviderState.loseCheckCreateResponse = false;
+      throw new Error("lost Check create response");
+    }
+    return check;
+  }
+
+  async reconcileCheck(options: {
+    name: string;
+    headSha: string;
+    runId: string;
+  }): Promise<(typeof githubProviderState.checks)[number] | undefined> {
+    githubProviderState.reconciliations.push(options);
+    return githubProviderState.checks.find(
+      (check) =>
+        check.name === options.name &&
+        check.headSha === options.headSha &&
+        check.externalId === options.runId,
+    );
+  }
+
+  async completeCheck(options: {
+    checkRunId: number;
+    conclusion: string;
+  }): Promise<(typeof githubProviderState.checks)[number]> {
+    const check = githubProviderState.checks.find(({ id }) => id === options.checkRunId);
+    if (!check) throw new Error("missing Check");
+    check.status = "completed";
+    check.conclusion = options.conclusion;
+    githubProviderState.completions.push({
+      checkRunId: options.checkRunId,
+      conclusion: options.conclusion,
+    });
+    githubProviderState.updates.push({ checkRunId: options.checkRunId, state: options.conclusion });
+    githubEffectEvents.push(`check:${options.checkRunId}:${options.conclusion}`);
+    if (githubProviderState.losePatchResponse) {
+      githubProviderState.losePatchResponse = false;
+      throw new Error("lost Check PATCH response");
+    }
+    return check;
+  }
+
+  async markCheckInProgress(options: {
+    checkRunId: number;
+  }): Promise<(typeof githubProviderState.checks)[number]> {
+    const check = githubProviderState.checks.find(({ id }) => id === options.checkRunId);
+    if (!check) throw new Error("missing Check");
+    check.status = "in_progress";
+    check.conclusion = null;
+    githubProviderState.updates.push({ checkRunId: options.checkRunId, state: "in_progress" });
+    githubEffectEvents.push(`check:${options.checkRunId}:in_progress`);
+    if (githubProviderState.losePatchResponse) {
+      githubProviderState.losePatchResponse = false;
+      throw new Error("lost Check PATCH response");
+    }
+    return check;
+  }
+
+  reset(): void {
+    githubProviderState.tokens = [];
+    githubProviderState.tokenStarts = [];
+    githubProviderState.checks = [];
+    githubProviderState.completions = [];
+    githubProviderState.reconciliations = [];
+    githubProviderState.updates = [];
+    githubProviderState.unavailableRepositoryId = undefined;
+    githubProviderState.loseCheckCreateResponse = false;
+    githubProviderState.losePatchResponse = false;
+    githubProviderState.failTokenAttempts = 0;
+    githubProviderState.failTokenRepositoryId = undefined;
+    githubProviderState.tokenDelayMs = 0;
+    githubProviderState.checkTokenDelayMs = 0;
+    githubEffectEvents = [];
+  }
+
+  configure(options: {
+    unavailableRepositoryId?: number;
+    loseCheckCreateResponse?: boolean;
+    losePatchResponse?: boolean;
+    failTokenAttempts?: number;
+    failTokenRepositoryId?: number;
+    tokenDelayMs?: number;
+    checkTokenDelayMs?: number;
+  }): void {
+    githubProviderState.unavailableRepositoryId = options.unavailableRepositoryId;
+    githubProviderState.loseCheckCreateResponse = options.loseCheckCreateResponse ?? false;
+    githubProviderState.losePatchResponse = options.losePatchResponse ?? false;
+    githubProviderState.failTokenAttempts = options.failTokenAttempts ?? 0;
+    githubProviderState.failTokenRepositoryId = options.failTokenRepositoryId;
+    githubProviderState.tokenDelayMs = options.tokenDelayMs ?? 0;
+    githubProviderState.checkTokenDelayMs = options.checkTokenDelayMs ?? 0;
+  }
+
+  state(): typeof githubProviderState & { effectEvents: string[] } {
+    return { ...githubProviderState, effectEvents: githubEffectEvents };
+  }
+}
+
+let githubClockOffset = 0;
+
+export class GitHubClockProbe extends WorkerEntrypoint<Cloudflare.Env> {
+  now(): number {
+    return Date.now() + githubClockOffset;
+  }
+
+  reset(): void {
+    githubClockOffset = 0;
+  }
+
+  advance(milliseconds: number): void {
+    githubClockOffset += milliseconds;
+  }
+}
+
+const githubWorkflowState = {
+  runs: new Map<string, unknown>(),
+  creates: [] as Array<{ id: string; params: unknown }>,
+  terminations: [] as string[],
+  loseCreateResponse: false,
+  instanceCreateResponse: false,
+  statusResponse: undefined as Record<string, unknown> | undefined,
+  failTerminateAttempts: 0,
+  terminationAttempts: [] as string[],
+};
+
+class GitHubWorkflowInstanceProbe extends RpcTarget {
+  #id: string;
+
+  constructor(id: string) {
+    super();
+    this.#id = id;
+  }
+
+  get id(): string {
+    return this.#id;
+  }
+
+  status(): { status: "running"; output: null; platformTrace: string } {
+    return { status: "running", output: null, platformTrace: "instance-probe" };
+  }
+
+  async pause(): Promise<void> {}
+
+  async resume(): Promise<void> {}
+
+  async terminate(): Promise<void> {}
+
+  async restart(): Promise<void> {}
+
+  async sendEvent(): Promise<void> {}
+}
+
+export class GitHubWorkflowProbe extends WorkerEntrypoint<Cloudflare.Env> {
+  async create(options: {
+    id: string;
+    params: unknown;
+  }): Promise<{ id: string } | GitHubWorkflowInstanceProbe> {
+    if (!githubWorkflowState.runs.has(options.id)) {
+      githubWorkflowState.runs.set(options.id, options.params);
+      githubWorkflowState.creates.push(options);
+    }
+    if (githubWorkflowState.loseCreateResponse) {
+      githubWorkflowState.loseCreateResponse = false;
+      throw new Error("lost Workflow create response");
+    }
+    return githubWorkflowState.instanceCreateResponse
+      ? new GitHubWorkflowInstanceProbe(options.id)
+      : { id: options.id };
+  }
+
+  status(id: string): Record<string, unknown> {
+    if (!githubWorkflowState.runs.has(id)) return { status: "unknown" };
+    return githubWorkflowState.statusResponse ?? { status: "running" };
+  }
+
+  terminate(id: string): void {
+    githubWorkflowState.terminationAttempts.push(id);
+    githubEffectEvents.push(`terminate:${id}:attempt`);
+    if (githubWorkflowState.failTerminateAttempts > 0) {
+      githubWorkflowState.failTerminateAttempts -= 1;
+      githubEffectEvents.push(`terminate:${id}:failure`);
+      throw new Error("transient Workflow terminate failure");
+    }
+    if (
+      githubWorkflowState.statusResponse?.status === "errored" ||
+      githubWorkflowState.statusResponse?.status === "terminated" ||
+      githubWorkflowState.statusResponse?.status === "complete"
+    ) {
+      throw new Error("cannot terminate a terminal Workflow instance");
+    }
+    if (githubWorkflowState.runs.has(id) && !githubWorkflowState.terminations.includes(id)) {
+      githubWorkflowState.terminations.push(id);
+      githubEffectEvents.push(`terminate:${id}:success`);
+    }
+  }
+
+  reset(): void {
+    githubWorkflowState.runs.clear();
+    githubWorkflowState.creates = [];
+    githubWorkflowState.terminations = [];
+    githubWorkflowState.loseCreateResponse = false;
+    githubWorkflowState.instanceCreateResponse = false;
+    githubWorkflowState.statusResponse = undefined;
+    githubWorkflowState.failTerminateAttempts = 0;
+    githubWorkflowState.terminationAttempts = [];
+  }
+
+  configure(options: {
+    loseCreateResponse?: boolean;
+    instanceCreateResponse?: boolean;
+    statusResponse?: Record<string, unknown>;
+    failTerminateAttempts?: number;
+  }): void {
+    githubWorkflowState.loseCreateResponse = options.loseCreateResponse ?? false;
+    githubWorkflowState.instanceCreateResponse = options.instanceCreateResponse ?? false;
+    githubWorkflowState.statusResponse = options.statusResponse;
+    githubWorkflowState.failTerminateAttempts = options.failTerminateAttempts ?? 0;
+  }
+
+  state(): {
+    runs: Array<[string, unknown]>;
+    creates: typeof githubWorkflowState.creates;
+    terminations: string[];
+    terminationAttempts: string[];
+  } {
+    return {
+      runs: [...githubWorkflowState.runs],
+      creates: githubWorkflowState.creates,
+      terminations: githubWorkflowState.terminations,
+      terminationAttempts: githubWorkflowState.terminationAttempts,
+    };
+  }
+}
 
 export { RunnerAdapterHarness } from "./runner-adapter-harness.ts";
 
@@ -32,6 +341,7 @@ const runnerState = {
   destroys: [] as string[],
   kills: [] as string[],
 };
+let runtimeLifecycleEvents: string[] = [];
 const activeExecutions = new Map<string, () => void>();
 const runnerWorkspaces = new Map<string, string>();
 const secretSnapshots = new Map<string, Readonly<Record<string, string>>>();
@@ -39,6 +349,9 @@ let destroyAttempts = 0;
 let failNextDestroy = false;
 let currentHostSecret = "runner-secret";
 let lastHostDestroySecrets: ReadonlyArray<string> = [];
+let failSecretCapture = false;
+let failNextSecretRestore = false;
+let failNextSecretValidation = false;
 
 export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
   async exec(request: RunnerRequest): Promise<ExecResult> {
@@ -89,9 +402,11 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
   }
 
   async destroy(runId: string, _secrets: ReadonlyArray<string>): Promise<void> {
+    runtimeLifecycleEvents.push("cleanup:start");
     destroyAttempts += 1;
     if (failNextDestroy) {
       failNextDestroy = false;
+      runtimeLifecycleEvents.push("cleanup:failure");
       throw new Error("transient destroy failure");
     }
     const unblock = activeExecutions.get(runId);
@@ -102,6 +417,7 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     }
     runnerState.destroys.push(runId);
     runnerWorkspaces.delete(runId);
+    runtimeLifecycleEvents.push("cleanup:success");
   }
 
   state(): typeof runnerState {
@@ -116,6 +432,7 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     runnerWorkspaces.clear();
     destroyAttempts = 0;
     failNextDestroy = false;
+    runtimeLifecycleEvents = [];
   }
 
   failDestroyOnce(): void {
@@ -132,17 +449,31 @@ interface TestHostProps {
 }
 
 export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
+  async reportRunLifecycle(_runId: string, state: string): Promise<boolean> {
+    runtimeLifecycleEvents.push(`lifecycle:${state}`);
+    return true;
+  }
+
   async secrets(): Promise<Readonly<Record<string, string>>> {
     return { ...this.ctx.props.secrets, RUNNER_SECRET: currentHostSecret };
   }
 
   async captureSecrets(runId: string): Promise<string> {
+    if (failSecretCapture) throw new Error("setup capture failure");
     const snapshot = crypto.randomUUID();
     secretSnapshots.set(`${runId}:${snapshot}`, await this.secrets());
     return snapshot;
   }
 
   async restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>> {
+    if (failNextSecretRestore) {
+      failNextSecretRestore = false;
+      throw new Error("setup restore failure");
+    }
+    if (failNextSecretValidation) {
+      failNextSecretValidation = false;
+      return {};
+    }
     const secrets = secretSnapshots.get(`${runId}:${snapshot}`);
     if (!secrets) throw new Error("invalid secret snapshot");
     return secrets;
@@ -184,10 +515,29 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     currentHostSecret = "runner-secret";
     lastHostDestroySecrets = [];
     secretSnapshots.clear();
+    failSecretCapture = false;
+    failNextSecretRestore = false;
+    failNextSecretValidation = false;
+  }
+
+  failSecretCapturePermanently(): void {
+    failSecretCapture = true;
+  }
+
+  failSecretRestoreOnce(): void {
+    failNextSecretRestore = true;
+  }
+
+  failSecretValidationOnce(): void {
+    failNextSecretValidation = true;
   }
 
   destroySecrets(): ReadonlyArray<string> {
     return lastHostDestroySecrets;
+  }
+
+  lifecycleEvents(): ReadonlyArray<string> {
+    return runtimeLifecycleEvents;
   }
 }
 
@@ -220,6 +570,7 @@ const issueSchema: StandardSchemaV1<unknown, { action: string; normalized: true 
 };
 
 let issueGateEvaluations = 0;
+let runLoaderExecutions = 0;
 
 export const issueCreated = workflow({
   id: "issue-created",
@@ -236,6 +587,7 @@ export const issueCreated = workflow({
       return event.action === "create";
     }),
 }).handler(async (ctx, event) => {
+  await ctx.step.do("run-loader-state", () => ++runLoaderExecutions);
   await ctx.step.do("trigger-loader-state", () => issueGateEvaluations);
   await ctx.step.do("record-issue", (step) => ({
     stepId: step.id,
@@ -258,6 +610,26 @@ export const suspendedIssueCreated = workflow({
 
 export class IssueCreatedWorkflow extends toEntrypoint(issueCreated) {}
 
+const githubEvents = [
+  {
+    type: "push" as const,
+    branches: ["main", "develop", "release-a", "release-b", "prune-trigger"],
+  },
+  { type: "pull_request" as const, actions: ["opened", "reopened", "synchronize"] as const },
+] as const;
+
+export const githubCheck = workflow({
+  id: "github-check",
+  trigger: () => github({ checkName: "Check", events: githubEvents }),
+}).handler(async () => {});
+
+export const githubTest = workflow({
+  id: "github-test",
+  trigger: () => github({ checkName: "Test", events: githubEvents }),
+}).handler(async () => {
+  throw new Error("GitHub handler failure");
+});
+
 const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(
   async (ctx, event) => {
     await ctx.step.do("record-schedule", () => event);
@@ -270,6 +642,8 @@ interface RunnerEvent {
   commands: ReadonlyArray<string | ExecOptions>;
   catchErrors?: boolean;
   pauseMs?: number;
+  throwAfterCommands?: boolean;
+  throwUndefinedAfterCommands?: boolean;
 }
 
 const runner = workflow({
@@ -277,7 +651,9 @@ const runner = workflow({
   secrets: ["RUNNER_SECRET"],
   trigger: () => cron("0 0 * * *"),
 }).handler(async (ctx, event) => {
-  const { catchErrors, commands, pauseMs } = event as unknown as RunnerEvent;
+  const { catchErrors, commands, pauseMs, throwAfterCommands, throwUndefinedAfterCommands } =
+    event as unknown as RunnerEvent;
+  runtimeLifecycleEvents.push("handler:start");
   for (const [index, command] of commands.entries()) {
     try {
       using _result = (await ctx.step.exec(`command-${index}`, command)) as ExecResult & Disposable;
@@ -300,6 +676,9 @@ const runner = workflow({
     }
     if (index === 0 && pauseMs !== undefined) await ctx.step.sleep("pause", pauseMs);
   }
+  if (throwAfterCommands) throw new Error("handler failure");
+  if (throwUndefinedAfterCommands) throw undefined;
+  runtimeLifecycleEvents.push("handler:success");
 });
 
 export class RunnerWorkflow extends toEntrypoint(runner) {}

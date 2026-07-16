@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../.tsbuild/runway-workflows",
+    "declarationDir": "../.tsbuild/runway-workflows",
+    "tsBuildInfoFile": "../.tsbuild/runway-workflows.tsbuildinfo"
+  },
+  "references": [{ "path": "../packages/runway" }],
+  "include": ["workflows"]
+}

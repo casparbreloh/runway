@@ -4,6 +4,10 @@ import { secretNameOf } from "./secrets.ts";
 import type { SecretRef } from "./secrets.ts";
 import type {
   CronTrigger,
+  GitHubEventFilter,
+  GitHubEventOf,
+  GitHubOptions,
+  GitHubTrigger,
   WebhookOptions,
   WebhookTimestamp,
   WebhookTrigger,
@@ -17,11 +21,56 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
     throw new Error("invalid workflow trigger");
   }
   const type = (trigger as { type?: unknown }).type;
-  if (type !== "cron" && type !== "webhook") {
+  if (type !== "cron" && type !== "webhook" && type !== "github") {
     throw new Error(`invalid workflow trigger type: ${String(type)}`);
   }
   if (trigger.type === "cron" && trigger.expression.trim().length === 0) {
     throw new Error("invalid workflow cron trigger: expression is required");
+  }
+  if (trigger.type === "github" && trigger.checkName.trim().length === 0) {
+    throw new Error("invalid workflow GitHub trigger: checkName is required");
+  }
+  if (trigger.type === "github" && trigger.events.length === 0) {
+    throw new Error("invalid workflow GitHub trigger: at least one event is required");
+  }
+  if (trigger.type === "github") {
+    const eventTypes = new Set<string>();
+    for (const event of trigger.events) {
+      const eventType = (event as { type?: unknown }).type;
+      if (eventType !== "push" && eventType !== "pull_request") {
+        throw new Error(`invalid workflow GitHub trigger event type ${JSON.stringify(eventType)}`);
+      }
+      if (eventTypes.has(eventType)) {
+        throw new Error(`duplicate workflow GitHub event filter ${JSON.stringify(eventType)}`);
+      }
+      eventTypes.add(eventType);
+      if (eventType === "push") {
+        const branches = (event as { branches?: unknown }).branches;
+        if (!Array.isArray(branches) || branches.length === 0) {
+          throw new Error("invalid workflow GitHub push branches: at least one branch is required");
+        }
+        for (const branch of branches) {
+          if (typeof branch !== "string" || branch.trim().length === 0) {
+            throw new Error("invalid workflow GitHub push branch: branch name is required");
+          }
+        }
+      }
+      if (eventType === "pull_request") {
+        const actions = (event as { actions?: unknown }).actions;
+        if (!Array.isArray(actions) || actions.length === 0) {
+          throw new Error(
+            "invalid workflow GitHub pull_request actions: at least one action is required",
+          );
+        }
+        for (const action of actions) {
+          if (action !== "opened" && action !== "reopened" && action !== "synchronize") {
+            throw new Error(
+              `invalid workflow GitHub pull_request action ${JSON.stringify(action)}`,
+            );
+          }
+        }
+      }
+    }
   }
   if (trigger.type === "webhook") {
     if (!trigger.path.startsWith("/")) {
@@ -99,3 +148,12 @@ export const cron = (expression: string): CronTrigger =>
     type: "cron",
     expression,
   }) as CronTrigger;
+
+export const github = <const F extends readonly [GitHubEventFilter, ...GitHubEventFilter[]]>(
+  options: GitHubOptions<F>,
+): GitHubTrigger<GitHubEventOf<F[number]>> =>
+  ({
+    type: "github",
+    checkName: options.checkName,
+    events: options.events,
+  }) as unknown as GitHubTrigger<GitHubEventOf<F[number]>>;
