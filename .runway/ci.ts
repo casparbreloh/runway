@@ -14,4 +14,4 @@ const downloads = cacheParts.map(
 
 export const setupCiToolchain = `${downloads.join(" && ")} && cat /tmp/runway-ci-0 /tmp/runway-ci-1 /tmp/runway-ci-2 > /tmp/runway-ci.tar.gz && echo '${cacheArchive}  /tmp/runway-ci.tar.gz' | sha256sum --check --status && tar -xzf /tmp/runway-ci.tar.gz -C / && ldconfig`;
 
-export const installCiDependencies = `if echo '${lockfile}  pnpm-lock.yaml' | sha256sum --check --status; then pnpm install --offline --frozen-lockfile --trust-lockfile --store-dir /opt/runway/pnpm-store --reporter=append-only --child-concurrency=1; else pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16; fi`;
+export const installCiDependencies = `if echo '${lockfile}  pnpm-lock.yaml' | sha256sum --check --status; then NODE_OPTIONS=--max-old-space-size=256 pnpm install --offline --frozen-lockfile --trust-lockfile --store-dir /opt/runway/pnpm-store --reporter=append-only --child-concurrency=1; else NODE_OPTIONS=--max-old-space-size=256 pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16; fi`;
