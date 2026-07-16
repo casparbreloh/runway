@@ -11,6 +11,7 @@ export default workflow({
       ],
     }),
 }).handler(async (ctx) => {
+  await ctx.step.exec("setup-pnpm", "npm install --global pnpm@11.5.0");
   await ctx.step.exec("install", "pnpm install --frozen-lockfile");
   await ctx.step.exec("format-check", "pnpm format-check");
   await ctx.step.exec("lint", "pnpm lint");
