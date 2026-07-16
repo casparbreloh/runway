@@ -3,7 +3,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
-import type { RunOperations } from "./run.ts";
+import type { CacheResult, RunOperations } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
@@ -50,6 +50,8 @@ const makeRunRuntime = (
     secrets,
     source: exactSource,
     placement: {
+      cache: async ({ secrets: _secrets, ...request }) =>
+        await binding.restoreCache({ ...request, secrets }),
       exec: async ({
         step: durableStep,
         source: prepared,
@@ -154,6 +156,30 @@ const makeRunRuntime = (
             },
           },
           command,
+        ),
+      cache: (id, declaration) =>
+        sandbox.cache(
+          {
+            id,
+            run: async (digest, work) => {
+              const recorded: unknown = await step.do(
+                id,
+                { retries: { limit: 5, delay: 0 } },
+                async () => ({ digest, result: await work() }) as never,
+              );
+              if (
+                !recorded ||
+                typeof recorded !== "object" ||
+                Array.isArray(recorded) ||
+                Object.keys(recorded).sort().join(",") !== "digest,result" ||
+                typeof (recorded as { digest?: unknown }).digest !== "string"
+              ) {
+                throw new Error("invalid durable cache evidence");
+              }
+              return recorded as { readonly digest: string; readonly result: CacheResult };
+            },
+          },
+          declaration,
         ),
       sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
     },

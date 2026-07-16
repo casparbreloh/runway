@@ -31,6 +31,9 @@ export interface GitHubRunSource {
   readonly deliveryId: string;
   readonly runId: string;
   readonly generation: number;
+  readonly admission:
+    | { readonly type: "push"; readonly ref: string; readonly defaultRef: string }
+    | { readonly type: "pull_request"; readonly number: number; readonly defaultRef: string };
   readonly check: {
     readonly id: number;
     readonly name: string;
@@ -71,6 +74,27 @@ const positiveInteger = (value: unknown): value is number =>
 
 const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean =>
   Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+
+const invalidRefCharacter = (character: string): boolean => {
+  const code = character.charCodeAt(0);
+  return code <= 0x20 || code === 0x7f || "\\~^:?*[".includes(character);
+};
+
+const branchRef = (value: unknown): value is string => {
+  if (typeof value !== "string" || !value.startsWith("refs/heads/")) return false;
+  const name = value.slice("refs/heads/".length);
+  return (
+    name.length > 0 &&
+    !name.startsWith(".") &&
+    !name.endsWith(".") &&
+    !name.endsWith("/") &&
+    !name.includes("..") &&
+    !name.includes("//") &&
+    !name.includes("@{") &&
+    !Array.from(name).some(invalidRefCharacter) &&
+    name.split("/").every((part) => part && !part.startsWith(".") && !part.endsWith(".lock"))
+  );
+};
 
 export const githubRepositoryRemote = (repository: GitHubRepository): string => {
   const parts = repository.fullName.split("/");
@@ -179,6 +203,7 @@ export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {
       "deliveryId",
       "runId",
       "generation",
+      "admission",
       "check",
     ]) ||
     value.type !== "github" ||
@@ -190,6 +215,7 @@ export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {
     typeof value.runId !== "string" ||
     value.runId.length === 0 ||
     !positiveInteger(value.generation) ||
+    !isRecord(value.admission) ||
     !isRecord(value.check) ||
     !exactKeys(value.check, ["id", "name", "repository"]) ||
     !positiveInteger(value.check.id) ||
@@ -198,6 +224,24 @@ export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {
   ) {
     throw new Error("invalid GitHub run source");
   }
+  const admission = value.admission;
+  const parsedAdmission =
+    exactKeys(admission, ["type", "ref", "defaultRef"]) &&
+    admission.type === "push" &&
+    branchRef(admission.ref) &&
+    branchRef(admission.defaultRef)
+      ? ({ type: "push", ref: admission.ref, defaultRef: admission.defaultRef } as const)
+      : exactKeys(admission, ["type", "number", "defaultRef"]) &&
+          admission.type === "pull_request" &&
+          positiveInteger(admission.number) &&
+          branchRef(admission.defaultRef)
+        ? ({
+            type: "pull_request",
+            number: admission.number,
+            defaultRef: admission.defaultRef,
+          } as const)
+        : undefined;
+  if (!parsedAdmission) throw new Error("invalid GitHub run source");
   return {
     type: "github",
     installationId: value.installationId,
@@ -206,6 +250,7 @@ export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {
     deliveryId: value.deliveryId,
     runId: value.runId,
     generation: value.generation,
+    admission: parsedAdmission,
     check: {
       id: value.check.id,
       name: value.check.name,

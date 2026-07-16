@@ -5,7 +5,15 @@ export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
 
 export type { SecretRef } from "./secrets.ts";
-export type { ExecOptions, ExecResult, Run } from "./run.ts";
+export type {
+  Budget,
+  CacheDeclaration,
+  CacheKey,
+  CacheResult,
+  ExecOptions,
+  ExecResult,
+  Run,
+} from "./run.ts";
 export type {
   CronParams,
   CronTrigger,

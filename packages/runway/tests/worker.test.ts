@@ -35,7 +35,12 @@ const githubSignatureOf = async (body: string): Promise<string> => {
     .join("")}`;
 };
 
-const baseRepository = { id: 101, name: "runway", full_name: "casparbreloh/runway" };
+const baseRepository = {
+  id: 101,
+  name: "runway",
+  full_name: "casparbreloh/runway",
+  default_branch: "main",
+};
 
 const pushPayload = (sha: string, ref = "refs/heads/main") => ({
   ref,
@@ -47,7 +52,10 @@ const pushPayload = (sha: string, ref = "refs/heads/main") => ({
 
 const pullRequestPayload = (
   sha: string,
-  options: { number?: number; headRepository?: typeof baseRepository } = {},
+  options: {
+    number?: number;
+    headRepository?: { id: number; name: string; full_name: string };
+  } = {},
 ) => ({
   action: "synchronize",
   number: options.number ?? 17,
@@ -91,6 +99,7 @@ const deliverManyGitHub = async (deliveryId: string): Promise<Response> => {
       id: 102,
       name: "runway-many",
       full_name: "casparbreloh/runway-many",
+      default_branch: "main",
     },
   };
   const body = JSON.stringify(payload);
@@ -389,6 +398,7 @@ const githubRunSource = () => ({
   deliveryId: "123e4567-e89b-42d3-a456-426614174000",
   runId: "run-github",
   generation: 1,
+  admission: { type: "push" as const, ref: "refs/heads/main", defaultRef: "refs/heads/main" },
   check: {
     id: 501,
     name: "Check",
@@ -459,6 +469,7 @@ test("corrupted durable identities and contradictory flags fail closed before pr
     installationId: 42,
     checkRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
     checkoutRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
+    defaultRef: "refs/heads/main",
     event: {
       type: "push",
       repository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
@@ -617,6 +628,7 @@ test("a duplicate delivery cannot cross the coordinator account authority", asyn
     installationId: 42,
     checkRepository: repository,
     checkoutRepository: repository,
+    defaultRef: "refs/heads/main",
     event: {
       type: "push" as const,
       repository,
@@ -1338,7 +1350,7 @@ test("a generated host evaluates authored webhook gates inside the artifact", as
   expect(stale.status).toBe(401);
 });
 
-test("a generated start persists only its artifact version beside the event", async () => {
+test("a generated start persists its artifact version and authenticated trigger kind beside the event", async () => {
   await env.GENERATED_WORKFLOW_CAPTURE.reset();
   await putActiveArtifact();
   const body = JSON.stringify({ action: "create" });
@@ -1351,7 +1363,10 @@ test("a generated start persists only its artifact version beside the event", as
 
   expect(response.status).toBe(202);
   await expect(env.GENERATED_WORKFLOW_CAPTURE.captured()).resolves.toEqual({
-    __dispatcherMetadata: { artifactVersion: env.ACTIVE_ARTIFACT_VERSION },
+    __dispatcherMetadata: {
+      artifactVersion: env.ACTIVE_ARTIFACT_VERSION,
+      trigger: "webhook",
+    },
     params: { action: "create", normalized: true },
   });
 });

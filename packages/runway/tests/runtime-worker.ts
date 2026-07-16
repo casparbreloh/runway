@@ -1,9 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { cron, ExecError, github, webhook, workflow } from "runway";
-import type { ExecOptions, ExecResult } from "runway";
+import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
+import { Cache } from "../src/cache.ts";
 import { createRouter } from "../src/router.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "../src/terminal.ts";
@@ -355,6 +356,36 @@ let lastHostDestroySecrets: ReadonlyArray<string> = [];
 let failSecretCapture = false;
 let failNextSecretRestore = false;
 let failNextSecretValidation = false;
+let cacheRequests: unknown[] = [];
+let cacheFileInspections: unknown[] = [];
+let traceCacheExec = false;
+const cacheSessions = new Map<string, Cache>();
+
+class RuntimeCacheRefs {
+  readonly objects = new Map<string, { etag: string; text: string }>();
+  #version = 0;
+
+  async get(key: string) {
+    const object = this.objects.get(key);
+    return object ? { etag: object.etag, text: async () => object.text } : null;
+  }
+
+  async put(
+    key: string,
+    text: string,
+    options: { onlyIf: { etagMatches?: string; etagDoesNotMatch?: string } },
+  ) {
+    const current = this.objects.get(key);
+    if (options.onlyIf.etagDoesNotMatch === "*" && current) return null;
+    if (options.onlyIf.etagMatches !== undefined && current?.etag !== options.onlyIf.etagMatches) {
+      return null;
+    }
+    const etag = `cache-${++this.#version}`;
+    this.objects.set(key, { etag, text });
+    return { etag };
+  }
+}
+const runtimeCacheRefs = new RuntimeCacheRefs();
 
 export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
   source(): SourceIdentity {
@@ -385,6 +416,10 @@ export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
   async exec(request: SandboxRequest): Promise<ExecResult> {
     const { runId, step, options, secrets } = request;
     sandboxState.executions.push({ runId, step, options, secrets });
+    if (traceCacheExec) {
+      runtimeLifecycleEvents.push(`exec:${options.command}`);
+      traceCacheExec = false;
+    }
     if (options.command === "ambiguous-start") {
       const error = new Error("run continuity was lost: ambiguous command start");
       error.name = "RunLostError";
@@ -581,6 +616,58 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     });
   }
 
+  async restoreCache(request: {
+    runId: string;
+    id: string;
+    declaration: CacheDeclaration;
+    secrets: Readonly<Record<string, string>>;
+    source: PreparedSource;
+  }): Promise<CacheResult> {
+    cacheRequests.push(structuredClone(request));
+    const cache =
+      cacheSessions.get(request.runId) ??
+      new Cache({
+        context: {
+          repositoryId: `remote:${repositoryFixture.remote}`,
+          workflowId: "commands",
+          generation: 1,
+          admission: { type: "cron" },
+          platform: {
+            schema: 1,
+            os: "linux",
+            architecture: "x86_64",
+            imageDigest: `sha256:${"1".repeat(64)}`,
+            runnerAbi: "runway-1",
+          },
+        },
+        refs: runtimeCacheRefs,
+        files: {
+          inspect: async (path) => {
+            cacheFileInspections.push({ path, revision: request.source.result.revision });
+            return path === "present.input"
+              ? { type: "file" as const, bytes: new TextEncoder().encode("exact source bytes") }
+              : { type: "missing" as const };
+          },
+        },
+        current: async () => true,
+        restore: {
+          inspect: async () => "absent",
+          stage: async ({ object }) => ({ state: "ready", bytes: 37, digest: object.digest }),
+          remove: async () => {},
+          rename: async () => {},
+        },
+      });
+    cacheSessions.set(request.runId, cache);
+    if (request.declaration.key === "hit") {
+      const lookup = await cache.lookup(request.id, request.declaration);
+      if (lookup.revision) await cache.publish(lookup.revision, { digest: "a".repeat(64) });
+    }
+    const result = await cache.restore(request.id, request.declaration);
+    runtimeLifecycleEvents.push(`cache:${result.state}:${request.source.result.revision}`);
+    if (result.state === "hit") traceCacheExec = true;
+    return result;
+  }
+
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
     lastHostDestroySecrets = Object.values(secrets);
     await this.env.RUNWAY_TEST_SANDBOX.destroy(runId, lastHostDestroySecrets);
@@ -597,6 +684,11 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     failSecretCapture = false;
     failNextSecretRestore = false;
     failNextSecretValidation = false;
+    cacheRequests = [];
+    cacheFileInspections = [];
+    traceCacheExec = false;
+    cacheSessions.clear();
+    runtimeCacheRefs.objects.clear();
   }
 
   failSecretCapturePermanently(): void {
@@ -617,6 +709,10 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
 
   lifecycleEvents(): ReadonlyArray<string> {
     return runtimeLifecycleEvents;
+  }
+
+  cacheState(): { readonly requests: unknown[]; readonly fileInspections: unknown[] } {
+    return { requests: cacheRequests, fileInspections: cacheFileInspections };
   }
 }
 
@@ -718,6 +814,7 @@ const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).run(
 export class DailyWorkflow extends toEntrypoint(daily) {}
 
 interface CommandEvent {
+  caches?: ReadonlyArray<{ readonly id: string; readonly declaration: CacheDeclaration }>;
   commands: ReadonlyArray<string | ExecOptions>;
   catchErrors?: boolean;
   pauseMs?: number;
@@ -730,9 +827,16 @@ const commands = workflow({
   secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
 }).run(async (run, event) => {
-  const { catchErrors, commands, pauseMs, throwAfterCommands, throwUndefinedAfterCommands } =
-    event as unknown as CommandEvent;
+  const {
+    caches = [],
+    catchErrors,
+    commands,
+    pauseMs,
+    throwAfterCommands,
+    throwUndefinedAfterCommands,
+  } = event as unknown as CommandEvent;
   runtimeLifecycleEvents.push("handler:start");
+  for (const cache of caches) await run.cache(cache.id, cache.declaration);
   for (const [index, command] of commands.entries()) {
     try {
       await run.exec(`command-${index}`, command);

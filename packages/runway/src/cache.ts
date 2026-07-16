@@ -1,11 +1,6 @@
 const encoder = new TextEncoder();
 
-type CacheKey = string | { readonly files: readonly string[]; readonly salt?: string };
-
-interface CacheDeclaration {
-  readonly key: CacheKey;
-  readonly path: string;
-}
+import type { CacheDeclaration, CacheKey } from "./run.ts";
 
 interface CacheContext {
   readonly repositoryId: string;
@@ -22,7 +17,7 @@ interface CacheContext {
     readonly schema: number;
     readonly os: string;
     readonly architecture: string;
-    readonly imageDigest: string;
+    readonly imageDigest?: string;
     readonly runnerAbi: string;
   };
 }
@@ -54,6 +49,24 @@ interface CacheOptions {
   readonly files: CacheFiles;
   readonly refs: CacheRefs;
   readonly current: () => Promise<boolean>;
+  readonly restore?: CacheRestore;
+}
+
+interface CacheRestore {
+  inspect(path: string): Promise<"absent" | "empty" | "nonempty">;
+  stage(request: {
+    readonly object: { readonly digest: string };
+    readonly path: string;
+    readonly budget: CacheDeclaration["budget"];
+  }): Promise<
+    | { readonly state: "ready"; readonly bytes: number; readonly digest: string }
+    | {
+        readonly state: "miss";
+        readonly reason: "absent" | "budget" | "corrupt" | "unavailable";
+      }
+  >;
+  remove(path: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
 }
 
 const bytes = (value: string | Uint8Array): Uint8Array =>
@@ -129,21 +142,67 @@ const validateKeyDefinition = (key: CacheKey): void => {
   if (key.salt !== undefined && !validText(key.salt, 0, 512)) invalid();
 };
 
-const normalizedTarget = (target: string): string => {
-  const parts = (target.startsWith("/") ? target : `/workspace/${target}`).split("/");
+export const normalizedCacheTarget = (target: string): string => {
+  if (!validText(target, 1, 512) || target.includes("\\")) invalid();
+  const relative = !target.startsWith("/");
+  const parts = (relative ? `/workspace/${target}` : target).split("/");
   const normalized: string[] = [];
   for (const part of parts) {
     if (!part || part === ".") continue;
-    if (part === "..") normalized.pop();
-    else normalized.push(part);
+    if (part === "..") invalid();
+    normalized.push(part);
   }
-  return `/${normalized.join("/")}`;
+  const result = `/${normalized.join("/")}`;
+  if (
+    !(
+      (result.startsWith("/workspace/") && result !== "/workspace") ||
+      (result.startsWith("/cache/") && result !== "/cache")
+    ) ||
+    normalized.some((part) => part === ".git" || part === ".runway")
+  ) {
+    invalid();
+  }
+  return result;
 };
 
 const keyDefinition = (key: CacheKey): Array<string> =>
   typeof key === "string"
     ? ["string", key]
     : ["files", key.salt ?? "", String(key.files.length), ...key.files];
+
+export const cacheDeclarationEvidence = async (
+  declaration: CacheDeclaration,
+): Promise<{ readonly digest: string; readonly target: string }> => {
+  validateKeyDefinition(declaration.key);
+  const target = normalizedCacheTarget(declaration.path);
+  const budget = declaration.budget;
+  if (budget) {
+    if (
+      (budget.maxBytes !== undefined &&
+        (!Number.isSafeInteger(budget.maxBytes) || budget.maxBytes < 0)) ||
+      (budget.maxDurationMs !== undefined &&
+        (!Number.isSafeInteger(budget.maxDurationMs) || budget.maxDurationMs < 0)) ||
+      (budget.maxEstimatedCostUsd !== undefined &&
+        (!Number.isFinite(budget.maxEstimatedCostUsd) || budget.maxEstimatedCostUsd < 0))
+    )
+      invalid();
+  }
+  return {
+    digest: await digest([
+      "cache-declaration",
+      target,
+      ...keyDefinition(declaration.key),
+      budget?.maxBytes === undefined ? "maxBytes:unset" : `maxBytes:${budget.maxBytes}`,
+      budget?.maxDurationMs === undefined
+        ? "maxDurationMs:unset"
+        : `maxDurationMs:${budget.maxDurationMs}`,
+      budget?.maxEstimatedCostUsd === undefined
+        ? "maxEstimatedCostUsd:unset"
+        : `maxEstimatedCostUsd:${budget.maxEstimatedCostUsd}`,
+    ]),
+    target,
+  };
+};
 
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -282,12 +341,95 @@ export class Cache {
   >();
   readonly #files: CacheFiles;
   readonly #refs: CacheRefs;
+  readonly #restore: CacheRestore | undefined;
 
   constructor(options: CacheOptions) {
     this.#context = options.context;
     this.#current = options.current;
     this.#files = options.files;
     this.#refs = options.refs;
+    this.#restore = options.restore;
+  }
+
+  async restore(id: string, declaration: CacheDeclaration) {
+    validateId(id);
+    await cacheDeclarationEvidence(declaration);
+    let lookup: Awaited<ReturnType<Cache["lookup"]>>;
+    try {
+      lookup = await this.lookup(id, declaration);
+    } catch (error) {
+      if (error instanceof CacheError) {
+        if (error.message === "invalid cache ref") {
+          return { state: "miss" as const, reason: "corrupt" as const };
+        }
+        throw error;
+      }
+      return { state: "miss" as const, reason: "unavailable" as const };
+    }
+    if (lookup.state === "skipped") {
+      return { state: "skipped" as const, reason: lookup.reason };
+    }
+    if (lookup.state === "miss") {
+      return { state: "miss" as const, reason: lookup.reason ?? ("absent" as const) };
+    }
+    const restore = this.#restore;
+    if (!restore) return { state: "miss" as const, reason: "unavailable" as const };
+    const target = normalizedCacheTarget(declaration.path);
+    let targetState: Awaited<ReturnType<CacheRestore["inspect"]>>;
+    try {
+      targetState = await restore.inspect(target);
+    } catch {
+      return { state: "miss" as const, reason: "unavailable" as const };
+    }
+    if (!(["absent", "empty", "nonempty"] as const).includes(targetState)) {
+      return { state: "miss" as const, reason: "corrupt" as const };
+    }
+    if (targetState === "nonempty") {
+      return { state: "skipped" as const, reason: "target" as const };
+    }
+    const slash = target.lastIndexOf("/");
+    const staging = `${target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}`;
+    let staged: Awaited<ReturnType<CacheRestore["stage"]>>;
+    try {
+      staged = await restore.stage({
+        object: lookup.object,
+        path: staging,
+        budget: declaration.budget,
+      });
+    } catch {
+      await restore.remove(staging).catch(() => {});
+      return { state: "miss" as const, reason: "unavailable" as const };
+    }
+    if (staged.state === "miss") {
+      await restore.remove(staging).catch(() => {});
+      if (
+        Object.keys(staged).sort().join(",") === "reason,state" &&
+        ["absent", "budget", "corrupt", "unavailable"].includes(staged.reason)
+      ) {
+        return staged;
+      }
+      return { state: "miss" as const, reason: "corrupt" as const };
+    }
+    if (
+      Object.keys(staged).sort().join(",") !== "bytes,digest,state" ||
+      staged.digest !== lookup.object.digest ||
+      !Number.isSafeInteger(staged.bytes) ||
+      staged.bytes < 0
+    ) {
+      await restore.remove(staging).catch(() => {});
+      return { state: "miss" as const, reason: "corrupt" as const };
+    }
+    if (declaration.budget?.maxBytes !== undefined && staged.bytes > declaration.budget.maxBytes) {
+      await restore.remove(staging).catch(() => {});
+      return { state: "miss" as const, reason: "budget" as const };
+    }
+    try {
+      await restore.rename(staging, target);
+    } catch {
+      await restore.remove(staging).catch(() => {});
+      return { state: "miss" as const, reason: "unavailable" as const };
+    }
+    return { state: "hit" as const, bytes: staged.bytes };
   }
 
   async lookup(id: string, declaration: CacheDeclaration) {
@@ -297,7 +439,10 @@ export class Cache {
     if ("policy" in scopePlan) {
       return { state: "skipped" as const, reason: "policy" as const, revision: null };
     }
-    const target = normalizedTarget(declaration.path);
+    if (!/^sha256:[0-9a-f]{64}$/.test(this.#context.platform.imageDigest ?? "")) {
+      return { state: "miss" as const, reason: "unavailable" as const, revision: null };
+    }
+    const target = normalizedCacheTarget(declaration.path);
     const declarationDigest = await digest([
       "declaration",
       id,
@@ -328,7 +473,7 @@ export class Cache {
         String(this.#context.platform.schema),
         this.#context.platform.os,
         this.#context.platform.architecture,
-        this.#context.platform.imageDigest,
+        this.#context.platform.imageDigest!,
         this.#context.platform.runnerAbi,
       ]),
     ]);
@@ -403,7 +548,7 @@ export class Cache {
         String(this.#context.platform.schema),
         this.#context.platform.os,
         this.#context.platform.architecture,
-        this.#context.platform.imageDigest,
+        this.#context.platform.imageDigest!,
         this.#context.platform.runnerAbi,
       ]),
     ]);

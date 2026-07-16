@@ -12,9 +12,36 @@ export interface ExecResult {
   readonly durationMs: number;
 }
 
+export interface Budget {
+  readonly maxBytes: number;
+  readonly maxDurationMs: number;
+  readonly maxEstimatedCostUsd: number;
+}
+
+export type CacheKey =
+  | string
+  | {
+      readonly files: readonly [string, ...string[]];
+      readonly salt?: string;
+    };
+
+export interface CacheDeclaration {
+  readonly key: CacheKey;
+  readonly path: string;
+  readonly budget?: Partial<Budget>;
+}
+
+export type CacheResult =
+  | { readonly state: "hit"; readonly bytes: number }
+  | {
+      readonly state: "miss" | "skipped";
+      readonly reason: "absent" | "budget" | "corrupt" | "unavailable" | "policy" | "target";
+    };
+
 export interface RunOperations {
   do<T>(id: string, work: () => Promise<T>): Promise<T>;
   exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
+  cache(id: string, declaration: CacheDeclaration): Promise<CacheResult>;
   sleep(id: string, durationMs: number): Promise<void>;
 }
 
@@ -24,6 +51,7 @@ export interface Run<Secrets extends string = string> {
 
   do<T>(id: string, work: () => T | Promise<T>): Promise<T>;
   exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
+  cache(id: string, declaration: CacheDeclaration): Promise<CacheResult>;
   sleep(id: string, durationMs: number): Promise<void>;
 }
 
@@ -49,6 +77,9 @@ export const makeRun = <Secrets extends string>(
   secrets: meta.secrets,
   do: (id, work) => operations.do(authorId(id), () => Promise.resolve(work())),
   exec: (id, command) => operations.exec(authorId(id), command),
+  cache: (id, declaration) => {
+    return operations.cache(authorId(id), declaration);
+  },
   sleep: (id, durationMs) => operations.sleep(authorId(id), durationMs),
 });
 

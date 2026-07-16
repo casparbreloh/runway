@@ -20,6 +20,7 @@ export interface GitHubAcceptedDelivery {
   readonly installationId: number;
   readonly checkRepository: GitHubRepository;
   readonly checkoutRepository: GitHubRepository;
+  readonly defaultRef: string;
   readonly event: GitHubPushEvent | GitHubPullRequestEvent;
   readonly concurrency:
     | { readonly type: "push"; readonly repositoryId: number; readonly ref: string }
@@ -139,6 +140,17 @@ const parseRepository = (value: unknown, label: string): GitHubRepository => {
   return { id, name, fullName };
 };
 
+const parseDefaultRef = (value: unknown, label: string): string => {
+  if (
+    !isRecord(value) ||
+    typeof value.default_branch !== "string" ||
+    !REF_PART.test(value.default_branch)
+  ) {
+    throw new Error(`invalid GitHub ${label} payload`);
+  }
+  return `refs/heads/${value.default_branch}`;
+};
+
 const sameRepository = (left: GitHubRepository, right: GitHubRepository): boolean =>
   left.id === right.id && left.fullName === right.fullName;
 
@@ -206,6 +218,7 @@ export const normalizeGitHubDelivery = async (
       installationId,
       checkRepository: config.repository,
       checkoutRepository: config.repository,
+      defaultRef: parseDefaultRef(payload.repository, "push"),
       event: {
         type: "push",
         repository: config.repository,
@@ -263,6 +276,7 @@ export const normalizeGitHubDelivery = async (
       installationId,
       checkRepository: config.repository,
       checkoutRepository: headRepository,
+      defaultRef: parseDefaultRef(payload.repository, "pull request"),
       event: {
         type: "pull_request",
         action,

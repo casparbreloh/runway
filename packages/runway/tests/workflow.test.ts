@@ -58,7 +58,9 @@ test("a workflow run types secrets, events, and flat durable operations", () => 
     secrets: ["API_KEY"],
     trigger: () => cron("0 9 * * *"),
   }).run(async (run, event) => {
-    expectTypeOf<keyof typeof run>().toEqualTypeOf<"runId" | "secrets" | "do" | "exec" | "sleep">();
+    expectTypeOf<keyof typeof run>().toEqualTypeOf<
+      "runId" | "secrets" | "do" | "exec" | "cache" | "sleep"
+    >();
     expectTypeOf(run.secrets.API_KEY).toEqualTypeOf<string>();
     expectTypeOf(event).toEqualTypeOf<CronParams>();
     expectTypeOf<Parameters<typeof run.do>>().toMatchTypeOf<[id: string, work: () => unknown]>();
@@ -67,6 +69,30 @@ test("a workflow run types secrets, events, and flat durable operations", () => 
     >();
     expectTypeOf<Parameters<typeof run.sleep>>().toEqualTypeOf<[id: string, durationMs: number]>();
   });
+});
+
+test("a cache miss permits the next authored operation", async () => {
+  const calls: string[] = [];
+  const operations: RunOperations = {
+    do: async (_id, work) => await work(),
+    exec: async (id) => {
+      calls.push(id);
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 0 };
+    },
+    cache: async (id) => {
+      calls.push(id);
+      return { state: "miss", reason: "absent" };
+    },
+    sleep: async () => {},
+  };
+  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+
+  await expect(run.cache("build", { key: "v1", path: ".build" })).resolves.toEqual({
+    state: "miss",
+    reason: "absent",
+  });
+  await run.exec("compile", "compile");
+  expect(calls).toEqual(["build", "compile"]);
 });
 
 test("workflow authoring exposes no legacy handler or nested context", () => {
@@ -97,7 +123,9 @@ test("the authoring API types secrets, runs, raw webhooks, and cron events", () 
     },
   }).run(async (run, event) => {
     type SleepParams = Parameters<typeof run.sleep>;
-    expectTypeOf<keyof typeof run>().toEqualTypeOf<"runId" | "secrets" | "do" | "exec" | "sleep">();
+    expectTypeOf<keyof typeof run>().toEqualTypeOf<
+      "runId" | "secrets" | "do" | "exec" | "cache" | "sleep"
+    >();
     expectTypeOf<SleepParams>().toEqualTypeOf<[id: string, durationMs: number]>();
     expectTypeOf(run.secrets.API_KEY).toEqualTypeOf<string>();
     expectTypeOf(event).toBeUnknown();
@@ -299,6 +327,7 @@ test("run.exec delegates string and options commands with their durable ids", as
       calls.push([id, command]);
       return result;
     },
+    cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
   };
   const run = makeRun(operations, { runId: "run-1", secrets: {} });
@@ -321,6 +350,7 @@ test("workflow runs cannot use Runway's internal id namespace", () => {
   const operations: RunOperations = {
     do: async (_id, work) => await work(),
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
+    cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
   };
   const run = makeRun(operations, { runId: "run-1", secrets: {} });
@@ -330,6 +360,9 @@ test("workflow runs cannot use Runway's internal id namespace", () => {
   );
   expect(() => run.exec("runway:command", "true")).toThrow(
     'operation id "runway:command" is reserved by Runway',
+  );
+  expect(() => run.cache("runway:cache", { key: "v1", path: "/cache/tree" })).toThrow(
+    'operation id "runway:cache" is reserved by Runway',
   );
   expect(() => run.sleep("runway:wait", 1)).toThrow(
     'operation id "runway:wait" is reserved by Runway',
@@ -344,6 +377,7 @@ test("operation ids contain between 1 and 128 UTF-8 bytes", async () => {
       return await work();
     },
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
+    cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
   };
   const run = makeRun(operations, { runId: "run-1", secrets: {} });

@@ -1,4 +1,4 @@
-import type { ExecResult } from "./run.ts";
+import type { CacheDeclaration, CacheResult, ExecResult } from "./run.ts";
 import type { NormalizedExecOptions } from "./sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
@@ -19,6 +19,13 @@ export interface RuntimeBinding {
     readonly secrets: Readonly<Record<string, string>>;
     readonly allowReconstruct: boolean;
   }): Promise<PreparedSource>;
+  restoreCache(request: {
+    readonly runId: string;
+    readonly id: string;
+    readonly declaration: CacheDeclaration;
+    readonly secrets: Readonly<Record<string, string>>;
+    readonly source: PreparedSource;
+  }): Promise<CacheResult>;
   execute(request: {
     readonly runId: string;
     readonly step: { readonly id: string; readonly count: number; readonly attempt: number };

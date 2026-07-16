@@ -6,6 +6,7 @@ import {
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+import { Cache } from "./cache.ts";
 import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
 import type {
   GitHubCoordinatorAdmission,
@@ -25,7 +26,7 @@ import {
   type GitHubRunSource,
   type RepositorySource,
 } from "./repository-source.ts";
-import type { ExecResult } from "./run.ts";
+import type { CacheResult, ExecResult } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
@@ -87,6 +88,19 @@ interface HostProps {
   readonly secretSnapshotKey: string;
   readonly snapshotScope: string;
   readonly terminal: Omit<TerminalIdentity, "runId">;
+  readonly cache: {
+    readonly admission: {
+      readonly type: string;
+      readonly ref?: string;
+      readonly defaultRef?: string;
+      readonly number?: number;
+      readonly headRepositoryId?: string;
+    };
+    readonly repositoryId: string;
+    readonly workflowId: string;
+    readonly generation: number;
+    readonly imageDigest?: string;
+  };
 }
 
 interface LoaderContext {
@@ -132,6 +146,7 @@ export class RunwaySandboxBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
   implements RuntimeBinding
 {
+  readonly #caches = new Map<string, Cache>();
   async startRun(runId: string): Promise<boolean> {
     this.#assertRun(runId);
     const source = this.ctx.props.source;
@@ -373,14 +388,68 @@ export class RunwaySandboxBinding
     });
   }
 
+  async restoreCache(request: Parameters<RuntimeBinding["restoreCache"]>[0]): Promise<CacheResult> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    const expected = sourceIdentity(this.ctx.props.repository);
+    if (request.source.result.revision !== expected.revision) {
+      throw new Error("cache source does not match the bound repository");
+    }
+    let cache = this.#caches.get(request.runId);
+    if (!cache) {
+      const config = this.ctx.props.cache;
+      cache = new Cache({
+        context: {
+          repositoryId: config.repositoryId,
+          workflowId: config.workflowId,
+          generation: config.generation,
+          admission: config.admission,
+          platform: {
+            schema: 1,
+            os: "linux",
+            architecture: "x86_64",
+            ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
+            runnerAbi: "runway-1",
+          },
+        },
+        refs: {
+          get: async (key) => {
+            const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
+            return object ? { etag: object.httpEtag, text: async () => await object.text() } : null;
+          },
+          put: async (key, text, options) => {
+            void key;
+            void text;
+            void options;
+            throw new Error("cache publication is unavailable before durable success");
+          },
+        },
+        files: {
+          inspect: async (path) =>
+            await this.#sandbox().inspectCacheFile({
+              runId: request.runId,
+              source: request.source,
+              path,
+              secrets: this.#snapshotValues(request.secrets),
+            }),
+        },
+        current: async () => false,
+      });
+      this.#caches.set(request.runId, cache);
+    }
+    return await cache.restore(request.id, request.declaration);
+  }
+
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
     await this.#sandbox().destroy(runId, this.#snapshotValues(secrets));
+    this.#caches.delete(runId);
   }
 }
 
 interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
   readonly artifactVersion: string;
   readonly source?: GitHubRunSource;
+  readonly trigger?: "webhook" | "cron";
 }
 
 type LoaderPurpose = "trigger" | "run";
@@ -396,14 +465,17 @@ const metadataOf = (value: unknown): WorkflowMetadata => {
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    !["artifactVersion", "artifactVersion,source"].includes(Object.keys(value).sort().join(","))
+    !["artifactVersion", "artifactVersion,source", "artifactVersion,trigger"].includes(
+      Object.keys(value).sort().join(","),
+    )
   ) {
     throw new Error("invalid workflow metadata");
   }
-  const { artifactVersion, source } = value as Record<string, unknown>;
+  const { artifactVersion, source, trigger } = value as Record<string, unknown>;
   if (typeof artifactVersion !== "string" || !/^[0-9a-f]{64}$/.test(artifactVersion)) {
     throw new Error("invalid workflow metadata");
   }
+  if (trigger === "webhook" || trigger === "cron") return { artifactVersion, trigger };
   if (source === undefined) return { artifactVersion };
   try {
     return { artifactVersion, source: parseGitHubRunSource(source) };
@@ -444,6 +516,23 @@ const loadWorker = async (
     ? repositorySourceForRun(metadata.source)
     : artifact.repository;
   const repositoryId = sourceIdentity(repository).repositoryId;
+  const cacheRepositoryId = metadata.source
+    ? `github:${metadata.source.check.repository.id}`
+    : repositoryId;
+  const admission = metadata.source
+    ? metadata.source.admission.type === "push"
+      ? {
+          type: "push",
+          ref: metadata.source.admission.ref,
+          defaultRef: metadata.source.admission.defaultRef,
+        }
+      : {
+          type: "pull_request",
+          number: metadata.source.admission.number,
+          headRepositoryId: `github:${metadata.source.repository.id}`,
+          defaultRef: metadata.source.admission.defaultRef,
+        }
+    : { type: metadata.trigger ?? "webhook" };
   const identity = new TextEncoder().encode(
     JSON.stringify([purpose, metadata.artifactVersion, config.deploymentId, metadata.source]),
   );
@@ -466,6 +555,12 @@ const loadWorker = async (
             repositoryId,
             workflowId: artifact.workflowId,
             trustId: repositoryId,
+            generation: metadata.source?.generation ?? 1,
+          },
+          cache: {
+            admission,
+            repositoryId: cacheRepositoryId,
+            workflowId: artifact.workflowId,
             generation: metadata.source?.generation ?? 1,
           },
         },
@@ -496,7 +591,11 @@ const dynamicFetch = async (
   ctx: LoaderContext,
   config: HostConfig,
 ): Promise<Response> => {
-  const loaded = await readArtifact(env, { artifactVersion: route.artifactVersion }, config);
+  const loaded = await readArtifact(
+    env,
+    { artifactVersion: route.artifactVersion, trigger: route.type },
+    config,
+  );
   if (loaded.artifact.workflowId !== route.id) {
     throw new Error("workflow artifact does not match route");
   }

@@ -1,5 +1,6 @@
+import { cacheDeclarationEvidence } from "./cache.ts";
 import { ExecError } from "./exec-error.ts";
-import type { ExecOptions, ExecResult } from "./run.ts";
+import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
 import type { PreparedSource, Source } from "./source.ts";
 import type { Finalization, Terminal } from "./terminal.ts";
@@ -39,7 +40,22 @@ export interface DurableStep {
   >;
 }
 
+export interface DurableCache {
+  readonly id: string;
+  run(
+    digest: string,
+    work: () => Promise<CacheResult>,
+  ): Promise<{ readonly digest: string; readonly result: CacheResult }>;
+}
+
 export interface Placement {
+  cache?(request: {
+    readonly runId: string;
+    readonly id: string;
+    readonly declaration: CacheDeclaration;
+    readonly source: PreparedSource;
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<CacheResult>;
   exec(request: {
     readonly runId: string;
     readonly step: {
@@ -63,12 +79,17 @@ export class ExecTimeoutError extends Error {
 }
 
 export class Sandbox {
+  readonly #cacheDeclarations = new Map<
+    string,
+    { readonly digest: string; readonly target: string }
+  >();
   #cleaned = false;
   #cleaning: Promise<void> | undefined;
   #preparation: Promise<PreparedSource> | undefined;
   #lost: RunLostError | undefined;
   #priorStart = false;
   #started = false;
+  #used = false;
   readonly #placement: Placement;
   readonly #runId: string;
   readonly #secrets: ReadonlyArray<string>;
@@ -89,6 +110,43 @@ export class Sandbox {
     this.#terminal = options.terminal;
   }
 
+  async cache(step: DurableCache, declaration: CacheDeclaration): Promise<CacheResult> {
+    if (this.#started) throw new Error("cache restore must be declared before command execution");
+    const evidence = await cacheDeclarationEvidence(declaration);
+    const previous = this.#cacheDeclarations.get(step.id);
+    if (previous && previous.digest !== evidence.digest) {
+      throw new Error(`cache declaration collision for ${step.id}`);
+    }
+    for (const [id, candidate] of this.#cacheDeclarations) {
+      if (
+        id !== step.id &&
+        (candidate.target === evidence.target ||
+          candidate.target.startsWith(`${evidence.target}/`) ||
+          evidence.target.startsWith(`${candidate.target}/`))
+      ) {
+        throw new Error(`cache target overlaps ${id}`);
+      }
+    }
+    this.#cacheDeclarations.set(step.id, evidence);
+    const digest = evidence.digest;
+    if (this.#placement.cache) this.#used = true;
+    const outcome = await step.run(digest, async () => {
+      if (!this.#placement.cache) return { state: "miss", reason: "unavailable" };
+      const prepared = await this.#prepare(true);
+      return await this.#placement.cache({
+        runId: this.#runId,
+        id: step.id,
+        declaration: { ...declaration, path: evidence.target },
+        source: prepared,
+        secrets: this.#secrets,
+      });
+    });
+    if (outcome.digest !== digest) {
+      throw new Error("cache declaration changed across durable retry");
+    }
+    return cacheResult(outcome.result);
+  }
+
   #prepare(allowReconstruct: boolean): Promise<PreparedSource> {
     if (this.#preparation) return this.#preparation;
     const preparation = this.#source.prepare({ allowReconstruct });
@@ -104,6 +162,7 @@ export class Sandbox {
     const options = normalize(command);
     const digest = await digestCommand(options);
     this.#started = true;
+    this.#used = true;
     let outcome: Awaited<ReturnType<DurableStep["run"]>>;
     try {
       outcome = await step.run(
@@ -162,7 +221,7 @@ export class Sandbox {
   }
 
   async cleanup(): Promise<void> {
-    if (!this.#started || this.#cleaned) return;
+    if (!this.#used || this.#cleaned) return;
     if (this.#cleaning) return await this.#cleaning;
     const cleaning = (async () => {
       await this.#placement.destroy(this.#runId, this.#secrets);
@@ -205,4 +264,29 @@ export const digestCommand = async (command: NormalizedExecOptions): Promise<str
   );
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
+const cacheResult = (value: unknown): CacheResult => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid durable cache result");
+  }
+  const result = value as Record<string, unknown>;
+  if (
+    result.state === "hit" &&
+    Object.keys(result).sort().join(",") === "bytes,state" &&
+    Number.isSafeInteger(result.bytes) &&
+    (result.bytes as number) >= 0
+  ) {
+    return { state: "hit", bytes: result.bytes as number };
+  }
+  if (
+    (result.state === "miss" || result.state === "skipped") &&
+    Object.keys(result).sort().join(",") === "reason,state" &&
+    ["absent", "budget", "corrupt", "unavailable", "policy", "target"].includes(
+      result.reason as string,
+    )
+  ) {
+    return result as CacheResult;
+  }
+  throw new Error("invalid durable cache result");
 };

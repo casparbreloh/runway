@@ -60,6 +60,17 @@ export interface CloudflareSandbox {
     readonly allowReconstruct: boolean;
   }): Promise<PreparedSource>;
   execute(request: SandboxCommand): Promise<ExecResult>;
+  inspectCacheFile(request: {
+    readonly runId: string;
+    readonly source: PreparedSource;
+    readonly path: string;
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<
+    | { readonly type: "file"; readonly bytes: Uint8Array }
+    | { readonly type: "missing" }
+    | { readonly type: "symlink" }
+    | { readonly type: "directory" }
+  >;
   destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
 }
 
@@ -75,6 +86,17 @@ interface SandboxProcess {
 interface PlatformSandbox {
   exists(path: string): Promise<{ readonly exists: boolean }>;
   readFile(path: string): Promise<{ readonly success: boolean; readonly content: string }>;
+  readFileStream?(path: string): Promise<ReadableStream<Uint8Array>>;
+  listFiles?(
+    path: string,
+    options?: { readonly recursive?: boolean; readonly includeHidden?: boolean },
+  ): Promise<{
+    readonly success: boolean;
+    readonly files: ReadonlyArray<{
+      readonly absolutePath: string;
+      readonly type: "file" | "directory" | "symlink" | "other";
+    }>;
+  }>;
   getProcess(id: string): Promise<SandboxProcess | null>;
   startProcess(
     command: string,
@@ -617,6 +639,57 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
       finish();
     }
   };
+  const inspectCacheFile: CloudflareSandbox["inspectCacheFile"] = async (request) => {
+    try {
+      if (request.source.result.revision !== options.repository.commit) {
+        throw new Error("cache source does not match the exact repository revision");
+      }
+      const sandbox = await options.placement(await hashId("runway", [request.runId]));
+      const storedMarker = await sandbox.readFile(REPOSITORY_MARKER);
+      const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
+      if (
+        !storedMarker.success ||
+        storedMarker.content !== repositoryMarker(options.repository, request.source.placement) ||
+        !checkout.exists
+      ) {
+        throw lost("the cache placement was replaced");
+      }
+      const absolute = `/workspace/${request.path}`;
+      const slash = absolute.lastIndexOf("/");
+      const parent = absolute.slice(0, slash) || "/workspace";
+      if (!sandbox.listFiles || !sandbox.readFileStream) {
+        throw new Error("cache source inspection is unavailable");
+      }
+      const listed = await sandbox.listFiles(parent, { recursive: false, includeHidden: true });
+      if (!listed.success) return { type: "missing" };
+      const entry = listed.files.find((candidate) => candidate.absolutePath === absolute);
+      if (!entry) return { type: "missing" };
+      if (entry.type === "directory") return { type: "directory" };
+      if (entry.type !== "file") return { type: "symlink" };
+      const reader = (await sandbox.readFileStream(absolute)).getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          length += value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { type: "file", bytes };
+    } catch (error) {
+      throw redactFailure(error, request.secrets);
+    }
+  };
   const destroy = async (runId: string, secrets: ReadonlyArray<string>): Promise<void> => {
     try {
       const sandbox = await options.placement(await hashId("runway", [runId]));
@@ -632,6 +705,7 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
   return {
     prepare,
     execute,
+    inspectCacheFile,
     destroy,
   };
 };

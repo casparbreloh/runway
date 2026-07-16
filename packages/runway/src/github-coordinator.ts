@@ -251,6 +251,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
       "installationId",
       "checkRepository",
       "checkoutRepository",
+      "defaultRef",
       "event",
       "concurrency",
     ]) ||
@@ -266,6 +267,8 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
   assertRecord(concurrency);
   const checkRepository = parseRepository(value.checkRepository);
   const checkoutRepository = parseRepository(value.checkoutRepository);
+  const defaultRef = parseString(value.defaultRef);
+  if (!defaultRef.startsWith("refs/heads/")) invariant();
   if (event.type === "push") {
     if (
       !exactKeys(event, ["type", "repository", "ref", "sha"]) ||
@@ -291,6 +294,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
       installationId,
       checkRepository,
       checkoutRepository,
+      defaultRef,
       event: {
         type: "push",
         repository,
@@ -325,6 +329,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
     installationId,
     checkRepository,
     checkoutRepository,
+    defaultRef,
     event: {
       type: "pull_request",
       action,
@@ -1062,6 +1067,13 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (
       source.runId !== run.runId ||
       source.generation !== run.generation ||
+      source.admission.type !== run.delivery.event.type ||
+      source.admission.defaultRef !== run.delivery.defaultRef ||
+      (source.admission.type === "push" &&
+        (run.delivery.event.type !== "push" || source.admission.ref !== run.delivery.event.ref)) ||
+      (source.admission.type === "pull_request" &&
+        (run.delivery.event.type !== "pull_request" ||
+          source.admission.number !== run.delivery.event.number)) ||
       source.deliveryId !== run.delivery.deliveryId ||
       source.installationId !== run.delivery.installationId ||
       source.commit !== run.delivery.event.sha ||
@@ -1411,6 +1423,18 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         deliveryId: run.delivery.deliveryId,
         runId: run.runId,
         generation: run.generation,
+        admission:
+          run.delivery.event.type === "push"
+            ? {
+                type: "push",
+                ref: run.delivery.event.ref,
+                defaultRef: run.delivery.defaultRef,
+              }
+            : {
+                type: "pull_request",
+                number: run.delivery.event.number,
+                defaultRef: run.delivery.defaultRef,
+              },
         check: {
           id: run.checkRunId,
           name: run.checkName,

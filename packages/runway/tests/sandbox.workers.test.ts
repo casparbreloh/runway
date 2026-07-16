@@ -134,6 +134,61 @@ test("the Workflow host prepares only its exact credential-free source capabilit
   }
 });
 
+test("a cache hit inspects the exact run source and completes before the first exec", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  const host = exports.TestHost({
+    props: {
+      secrets: {
+        API_KEY: "test-api-key",
+        HOOK_SECRET: "test-secret",
+        SANDBOX_SECRET: "sandbox-secret",
+      },
+    },
+  });
+  try {
+    await env.COMMANDS.create({
+      params: {
+        caches: [
+          {
+            id: "tree",
+            declaration: {
+              key: { files: ["missing.input", "present.input"], salt: "v1" },
+              path: "/cache/tree",
+            },
+          },
+          { id: "archive", declaration: { key: "hit", path: "/cache/archive" } },
+        ],
+        commands: ["true"],
+      },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using cacheStateResult = disposable(host.cacheState());
+    const state = (await cacheStateResult) as {
+      requests: unknown[];
+      fileInspections: unknown[];
+    };
+    expect(state.requests).toHaveLength(2);
+    expect(state.requests[0]).toMatchObject({
+      id: "tree",
+      declaration: { key: { files: ["missing.input", "present.input"], salt: "v1" } },
+      source: { result: { revision: repositoryFixture.commit } },
+    });
+    expect(state.fileInspections).toEqual([
+      { path: "missing.input", revision: repositoryFixture.commit },
+      { path: "present.input", revision: repositoryFixture.commit },
+    ]);
+    using lifecycleResult = disposable(host.lifecycleEvents());
+    const lifecycle = await lifecycleResult;
+    expect(lifecycle.indexOf(`cache:hit:${repositoryFixture.commit}`)).toBeGreaterThan(-1);
+    expect(lifecycle.indexOf("exec:true")).toBeGreaterThan(
+      lifecycle.indexOf(`cache:hit:${repositoryFixture.commit}`),
+    );
+  } finally {
+    await introspector.dispose();
+  }
+});
+
 test("Sandbox startup is lazy and workspaces are reused per run but isolated between runs", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {

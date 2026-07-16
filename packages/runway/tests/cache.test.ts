@@ -160,6 +160,128 @@ test("string and exact-source file keys have stable canonical identities, includ
   expect(revisionOf(present).ref).not.toBe(revisionOf(changed).ref);
 });
 
+test("a hit stages beside its target and becomes visible only after verified rename", async () => {
+  const refs = new MemoryRefs();
+  const events: string[] = [];
+  let target: "absent" | "empty" | "nonempty" = "absent";
+  const create = (restore = true) =>
+    new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+      ...(restore
+        ? {
+            restore: {
+              inspect: async (path: string) => {
+                events.push(`inspect:${path}:${target}`);
+                return target;
+              },
+              stage: async ({ object, path }: { object: { digest: string }; path: string }) => {
+                events.push(`stage:${object.digest}:${path}`);
+                return { state: "ready" as const, bytes: 37, digest: object.digest };
+              },
+              remove: async (path: string) => {
+                events.push(`remove:${path}`);
+                target = "absent";
+              },
+              rename: async (from: string, to: string) => {
+                events.push(`rename:${from}:${to}`);
+                target = "nonempty";
+              },
+            },
+          }
+        : {}),
+    });
+  const declaration = { key: "v1", path: "/cache/tree" } as const;
+  const miss = await create(false).lookup("tree", declaration);
+  if (!miss.revision) throw new Error("expected observation");
+  seed(refs, miss.revision, { objectDigest: "c".repeat(64) });
+
+  await expect(create().restore("tree", declaration)).resolves.toEqual({ state: "hit", bytes: 37 });
+  expect(events[0]).toBe("inspect:/cache/tree:absent");
+  expect(events[1]).toMatch(/^stage:c{64}:\/cache\/\.runway-cache-[0-9a-f-]+$/);
+  expect(events[2]).toMatch(/^rename:\/cache\/\.runway-cache-[0-9a-f-]+:\/cache\/tree$/);
+});
+
+test("a failed atomic rename preserves an existing empty target", async () => {
+  const refs = new MemoryRefs();
+  const declaration = { key: "v1", path: "/cache/tree" } as const;
+  const base = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+  });
+  const miss = await base.lookup("tree", declaration);
+  if (!miss.revision) throw new Error("expected observation");
+  seed(refs, miss.revision, { objectDigest: "d".repeat(64) });
+  let target = "empty" as "empty" | "absent";
+  const removals: string[] = [];
+  const cache = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+    restore: {
+      inspect: async () => target,
+      stage: async ({ object }) => ({ state: "ready", bytes: 1, digest: object.digest }),
+      remove: async (path) => {
+        removals.push(path);
+        if (path === "/cache/tree") target = "absent";
+      },
+      rename: async () => {
+        throw new Error("rename lost");
+      },
+    },
+  });
+
+  await expect(cache.restore("tree", declaration)).resolves.toEqual({
+    state: "miss",
+    reason: "unavailable",
+  });
+  expect(target).toBe("empty");
+  expect(removals).toHaveLength(1);
+  expect(removals[0]).toMatch(/^\/cache\/\.runway-cache-/);
+});
+
+test("a nonempty target is left unchanged without staging a hit", async () => {
+  const refs = new MemoryRefs();
+  const declaration = { key: "v1", path: "/cache/tree" } as const;
+  const base = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+  });
+  const miss = await base.lookup("tree", declaration);
+  if (!miss.revision) throw new Error("expected observation");
+  seed(refs, miss.revision, { objectDigest: "e".repeat(64) });
+  const cache = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+    restore: {
+      inspect: async () => "nonempty",
+      stage: async () => {
+        throw new Error("must not stage over a nonempty target");
+      },
+      remove: async () => {
+        throw new Error("must not remove a nonempty target");
+      },
+      rename: async () => {
+        throw new Error("must not rename over a nonempty target");
+      },
+    },
+  });
+
+  await expect(cache.restore("tree", declaration)).resolves.toEqual({
+    state: "skipped",
+    reason: "target",
+  });
+});
+
 test("cache identifiers and file keys reject invalid lengths, paths, and file kinds before ref access", async () => {
   const refs = new MemoryRefs();
   const cache = new Cache({
@@ -180,11 +302,11 @@ test("cache identifiers and file keys reject invalid lengths, paths, and file ki
     ["runway:owned", { key: "valid", path: "/cache/x" }],
     ["valid", { key: "", path: "/cache/x" }],
     ["valid", { key: "é".repeat(257), path: "/cache/x" }],
-    ["valid", { key: { files: [] }, path: "/cache/x" }],
+    ["valid", { key: { files: [] as never }, path: "/cache/x" }],
     [
       "valid",
       {
-        key: { files: Array.from({ length: 65 }, (_, index) => `file-${index}`) },
+        key: { files: Array.from({ length: 65 }, (_, index) => `file-${index}`) as never },
         path: "/cache/x",
       },
     ],
@@ -287,6 +409,30 @@ test("authenticated admissions derive the exact cache read scopes and fork polic
     headRepositoryId: "github:99",
     defaultRef: "refs/heads/main",
   });
+  const forkWithoutPlatform = await (async () => {
+    const refs = new MemoryRefs();
+    const cache = new Cache({
+      context: {
+        ...context,
+        admission: {
+          type: "pull_request",
+          number: 43,
+          headRepositoryId: "github:99",
+          defaultRef: "refs/heads/main",
+        },
+        platform: {
+          schema: context.platform.schema,
+          os: context.platform.os,
+          architecture: context.platform.architecture,
+          runnerAbi: context.platform.runnerAbi,
+        },
+      },
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => false,
+    });
+    return { result: await cache.restore("tools", declaration), reads: refs.reads };
+  })();
 
   expect(trusted.reads).toHaveLength(1);
   expect(branch.reads).toHaveLength(2);
@@ -298,6 +444,41 @@ test("authenticated admissions derive the exact cache read scopes and fork polic
   expect(webhook.reads).toHaveLength(1);
   expect(webhook.reads[0]).not.toBe(trusted.reads[0]);
   expect(fork).toMatchObject({ result: { state: "skipped", reason: "policy" }, reads: [] });
+  expect(forkWithoutPlatform).toEqual({
+    result: { state: "skipped", reason: "policy" },
+    reads: [],
+  });
+});
+
+test("an unavailable platform identity misses before source or ref access", async () => {
+  const refs = new MemoryRefs();
+  let fileInspections = 0;
+  const cache = new Cache({
+    context: {
+      ...context,
+      platform: {
+        schema: context.platform.schema,
+        os: context.platform.os,
+        architecture: context.platform.architecture,
+        runnerAbi: context.platform.runnerAbi,
+      },
+    },
+    refs,
+    files: {
+      inspect: async () => {
+        fileInspections += 1;
+        return { type: "missing" as const };
+      },
+    },
+    current: async () => false,
+  });
+
+  await expect(cache.restore("tools", { key: "v1", path: "/cache/tools" })).resolves.toEqual({
+    state: "miss",
+    reason: "unavailable",
+  });
+  expect(fileInspections).toBe(0);
+  expect(refs.reads).toEqual([]);
 });
 
 test("a ref carrying another repository identity is rejected as poisoning", async () => {
