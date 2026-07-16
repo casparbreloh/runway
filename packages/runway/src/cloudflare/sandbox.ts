@@ -1,10 +1,8 @@
-import { parseSSEStream } from "@cloudflare/sandbox";
-
-import type { GitHubRepositoryAuthentication, RepositorySource } from "./repository-source.ts";
-import type { ExecResult } from "./run.ts";
-import type { RunnerBridge } from "./runner.ts";
-import { redactError, StreamingRedactor } from "./secret-redaction.ts";
-import type { SourceResult } from "./source.ts";
+import type { GitHubRepositoryAuthentication, RepositorySource } from "../repository-source.ts";
+import type { ExecResult } from "../run.ts";
+import type { NormalizedExecOptions } from "../sandbox.ts";
+import { redactError, StreamingRedactor } from "../secret-redaction.ts";
+import type { SourceResult } from "../source.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
@@ -16,7 +14,49 @@ const REPOSITORY_ASKPASS = "/tmp/runway-git-askpass";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-type RunnerRequest = Omit<Parameters<RunnerBridge["exec"]>[0], "source">;
+const processEvents = async function* <T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
+  const reader = stream.getReader();
+  const streamDecoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += done ? streamDecoder.decode() : streamDecoder.decode(value, { stream: true });
+      let separator: RegExpExecArray | null;
+      while ((separator = /\r?\n\r?\n/.exec(buffer))) {
+        const event = buffer.slice(0, separator.index);
+        buffer = buffer.slice(separator.index + separator[0].length);
+        const data = event
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) yield JSON.parse(data) as T;
+      }
+      if (done) return;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+};
+
+export interface SandboxCommand {
+  readonly runId: string;
+  readonly step: { readonly id: string; readonly count: number; readonly attempt: number };
+  readonly options: NormalizedExecOptions;
+  readonly secrets: ReadonlyArray<string>;
+  readonly source: SourceResult;
+}
+
+export interface CloudflareSandbox {
+  prepare(request: {
+    readonly runId: string;
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<SourceResult>;
+  execute(request: SandboxCommand): Promise<ExecResult>;
+  destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
+}
+
 interface SandboxProcess {
   readonly id: string;
   readonly command: string;
@@ -26,7 +66,7 @@ interface SandboxProcess {
   readonly exitCode?: number | undefined;
 }
 
-interface RunnerSandbox {
+interface PlatformSandbox {
   exists(path: string): Promise<{ readonly exists: boolean }>;
   readFile(path: string): Promise<{ readonly success: boolean; readonly content: string }>;
   getProcess(id: string): Promise<SandboxProcess | null>;
@@ -45,7 +85,7 @@ interface RunnerSandbox {
   destroy(): Promise<unknown>;
 }
 
-interface RunnerLog {
+interface SandboxLog {
   readonly runId: string;
   readonly stepId: string;
   readonly attempt: number;
@@ -72,14 +112,14 @@ interface OutputCollector {
   result(): Pick<ExecResult, "stdout" | "stderr">;
 }
 
-interface RunnerAdapterOptions {
-  readonly sandbox: (runnerId: string) => RunnerSandbox | Promise<RunnerSandbox>;
+interface CloudflareSandboxOptions {
+  readonly placement: (sandboxId: string) => PlatformSandbox | Promise<PlatformSandbox>;
   readonly repository: RepositorySource;
   readonly installationToken?: (request: {
     readonly purpose: "checkout";
     readonly authentication: GitHubRepositoryAuthentication;
   }) => Promise<string>;
-  readonly log: (entry: RunnerLog) => void;
+  readonly log: (entry: SandboxLog) => void;
   readonly status?: (runId: string) => Promise<{ status: string }>;
   readonly waitUntil?: (promise: Promise<void>) => void;
 }
@@ -128,7 +168,10 @@ const checkoutCommand = (repository: RepositorySource, generation: number): stri
   return `set -eu; helper="${"${GIT_ASKPASS:-}"}"; cleanup_checkout() { [ -z "$helper" ] || rm -f "$helper"; }; trap cleanup_checkout EXIT; if [ -n "${"${RUNWAY_GITHUB_TOKEN:-}"}" ]; then umask 077; printf %s ${helper} > "$helper"; chmod 700 "$helper"; fi; started_at=$(date +%s%3N); rm -rf /workspace; mkdir -p /workspace; git init -q /workspace; git -C /workspace remote add origin ${remote}; fetch_started_at=$(date +%s%3N); git -c http.followRedirects=false -C /workspace fetch --quiet --depth=1 --filter=blob:none origin ${commit}; fetch_completed_at=$(date +%s%3N); git -C /workspace checkout --quiet --detach FETCH_HEAD; test "$(git -C /workspace rev-parse HEAD)" = ${commit}; completed_at=$(date +%s%3N); pack_bytes=$(find /workspace/.git/objects/pack -type f -name '*.pack' -exec wc -c {} + | awk '{ total += $1 } END { print total + 0 }'); printf '{"commit":"%s","generation":%s,"authenticationTokenMinted":%s,"prepareStartedAtMs":%s,"sandboxReadyAtMs":%s,"startedAtMs":%s,"fetchMs":%s,"checkoutMs":%s,"packBytes":%s}' ${commit} ${generation} "$RUNWAY_AUTHENTICATION_TOKEN_MINTED" "$RUNWAY_PREPARE_STARTED_AT_MS" "$RUNWAY_SANDBOX_READY_AT_MS" "$started_at" "$((fetch_completed_at - fetch_started_at))" "$((completed_at - started_at))" "$pack_bytes" > ${REPOSITORY_METRICS}; printf %s ${marker} > ${REPOSITORY_MARKER}; printf %s ${generation} > ${REPOSITORY_GENERATION}`;
 };
 
-const killProcessGroup = async (sandbox: RunnerSandbox, process: SandboxProcess): Promise<void> => {
+const killProcessGroup = async (
+  sandbox: PlatformSandbox,
+  process: SandboxProcess,
+): Promise<void> => {
   await sandbox.killProcess(process.id);
 };
 
@@ -143,10 +186,10 @@ const cancellableDelay = (durationMs: number): { promise: Promise<void>; cancel(
 };
 
 const watchTermination = async (
-  request: RunnerRequest,
-  sandbox: RunnerSandbox,
+  request: SandboxCommand,
+  sandbox: PlatformSandbox,
   process: SandboxProcess,
-  status: NonNullable<RunnerAdapterOptions["status"]>,
+  status: NonNullable<CloudflareSandboxOptions["status"]>,
   completed: () => boolean,
   untilCompleted: Promise<void>,
 ): Promise<void> => {
@@ -169,8 +212,8 @@ const watchTermination = async (
 };
 
 const createOutputCollector = (
-  request: RunnerRequest,
-  log: RunnerAdapterOptions["log"],
+  request: SandboxCommand,
+  log: CloudflareSandboxOptions["log"],
 ): OutputCollector => {
   const redactors = {
     stdout: new StreamingRedactor(request.secrets),
@@ -226,7 +269,7 @@ const streamExitCode = (
 };
 
 const resolveExitCode = async (
-  sandbox: RunnerSandbox,
+  sandbox: PlatformSandbox,
   process: SandboxProcess,
   exitCode: number | undefined,
 ): Promise<number> => {
@@ -238,15 +281,15 @@ const resolveExitCode = async (
 };
 
 const collectResult = async (
-  sandbox: RunnerSandbox,
+  sandbox: PlatformSandbox,
   process: SandboxProcess,
-  request: RunnerRequest,
-  log: RunnerAdapterOptions["log"],
+  request: SandboxCommand,
+  log: CloudflareSandboxOptions["log"],
 ): Promise<ExecResult> => {
   const output = createOutputCollector(request, log);
   let exitCode = process.exitCode;
   const stream = await sandbox.streamProcessLogs(process.id);
-  for await (const event of parseSSEStream<ProcessLogEvent>(stream))
+  for await (const event of processEvents<ProcessLogEvent>(stream))
     exitCode = handleProcessEvent(event, output, exitCode);
   output.flush();
   const endTime = process.endTime?.getTime() ?? Date.now();
@@ -258,13 +301,13 @@ const collectResult = async (
 };
 
 const collectRecoveredCheckoutResult = async (
-  sandbox: RunnerSandbox,
+  sandbox: PlatformSandbox,
   process: SandboxProcess,
 ): Promise<ExecResult> => {
   try {
     let exitCode = process.exitCode;
     const stream = await sandbox.streamProcessLogs(process.id);
-    for await (const event of parseSSEStream<ProcessLogEvent>(stream)) {
+    for await (const event of processEvents<ProcessLogEvent>(stream)) {
       if (event.type === "error") throw new Error("repository checkout recovery failed");
       if (event.type === "exit" || event.type === "complete") {
         exitCode = streamExitCode(event.exitCode, exitCode);
@@ -282,7 +325,7 @@ const collectRecoveredCheckoutResult = async (
   }
 };
 
-const checkoutGeneration = async (sandbox: RunnerSandbox): Promise<number> => {
+const checkoutGeneration = async (sandbox: PlatformSandbox): Promise<number> => {
   const exists = await sandbox.exists(REPOSITORY_GENERATION);
   if (!exists.exists) return 0;
   const stored = await sandbox.readFile(REPOSITORY_GENERATION);
@@ -290,7 +333,7 @@ const checkoutGeneration = async (sandbox: RunnerSandbox): Promise<number> => {
   return Number(stored.content);
 };
 
-const checkoutBytes = async (sandbox: RunnerSandbox): Promise<number> => {
+const checkoutBytes = async (sandbox: PlatformSandbox): Promise<number> => {
   const stored = await sandbox.readFile(REPOSITORY_METRICS);
   if (!stored.success) throw new Error("repository checkout metrics are invalid");
   let metrics: unknown;
@@ -310,11 +353,11 @@ const checkoutBytes = async (sandbox: RunnerSandbox): Promise<number> => {
 };
 
 const prepareRepository = async (
-  sandbox: RunnerSandbox,
-  request: RunnerRequest,
+  sandbox: PlatformSandbox,
+  request: SandboxCommand,
   repository: RepositorySource,
-  installationToken: RunnerAdapterOptions["installationToken"],
-  log: RunnerAdapterOptions["log"],
+  installationToken: CloudflareSandboxOptions["installationToken"],
+  log: CloudflareSandboxOptions["log"],
 ): Promise<SourceResult> => {
   const prepareStartedAtMs = Date.now();
   const marker = await sandbox.exists(REPOSITORY_MARKER);
@@ -326,7 +369,7 @@ const prepareRepository = async (
       return { revision: repository.commit, state: "reused", bytes: 0 };
     }
   }
-  const checkoutRequest: RunnerRequest = {
+  const checkoutRequest: SandboxCommand = {
     ...request,
     step: { ...request.step, id: "runway:checkout" },
   };
@@ -417,11 +460,11 @@ const prepareRepository = async (
   }
 };
 
-export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge => {
-  const prepare = async (request: Parameters<RunnerBridge["prepare"]>[0]) => {
+export const cloudflareSandbox = (options: CloudflareSandboxOptions): CloudflareSandbox => {
+  const prepare: CloudflareSandbox["prepare"] = async (request) => {
     try {
-      const runnerId = await hashId("runway", [request.runId]);
-      const sandbox = await options.sandbox(runnerId);
+      const sandboxId = await hashId("runway", [request.runId]);
+      const sandbox = await options.placement(sandboxId);
       return await prepareRepository(
         sandbox,
         {
@@ -429,6 +472,7 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
           step: { id: "runway:checkout", count: 1, attempt: 1 },
           options: { command: "true", cwd: "/", env: { CI: "true" }, timeoutMs: 1 },
           secrets: request.secrets,
+          source: { revision: options.repository.commit, state: "prepared", bytes: 0 },
         },
         options.repository,
         options.installationToken,
@@ -438,15 +482,15 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
       throw redactError(error, request.secrets);
     }
   };
-  const exec = async (request: Parameters<RunnerBridge["exec"]>[0]): Promise<ExecResult> => {
+  const execute: CloudflareSandbox["execute"] = async (request): Promise<ExecResult> => {
     let completed = false;
     let finish = (): void => {};
     const untilCompleted = new Promise<void>((resolve) => (finish = resolve));
     try {
-      const runnerId = await hashId("runway", [request.runId]);
+      const sandboxId = await hashId("runway", [request.runId]);
       const processId = await hashId("step", [request.runId, request.step.id, request.step.count]);
       const command = managedCommand(request.options.command);
-      const sandbox = await options.sandbox(runnerId);
+      const sandbox = await options.placement(sandboxId);
       if (request.source.revision !== options.repository.commit) {
         throw new Error("command source does not match the exact repository revision");
       }
@@ -507,7 +551,7 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
   };
   const destroy = async (runId: string, secrets: ReadonlyArray<string>): Promise<void> => {
     try {
-      const sandbox = await options.sandbox(await hashId("runway", [runId]));
+      const sandbox = await options.placement(await hashId("runway", [runId]));
       try {
         await sandbox.killAllProcesses();
       } finally {
@@ -519,7 +563,7 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
   };
   return {
     prepare,
-    exec,
+    execute,
     destroy,
   };
 };

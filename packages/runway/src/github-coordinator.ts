@@ -6,7 +6,7 @@ import {
   type GitHubProvider,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
-import type { RunLifecycleState } from "./runner.ts";
+import type { RunLifecycleState } from "./runtime-binding.ts";
 import type { GitHubRepository } from "./types.ts";
 
 const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;

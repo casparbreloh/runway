@@ -37,7 +37,7 @@ const suspendedRunRegistry: Registry = [
     def: {
       ...generatedHostRegistry[0]!.def,
       id: "suspended-workflow",
-      secrets: ["RUNNER_SECRET"],
+      secrets: ["SANDBOX_SECRET"],
       trigger: cron("0 0 * * *"),
     },
   },
@@ -184,7 +184,7 @@ export default defineConfig({
               bindings: {
                 API_KEY: "test-api-key",
                 HOOK_SECRET: "test-secret",
-                RUNNER_SECRET: "runner-secret",
+                SANDBOX_SECRET: "sandbox-secret",
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
                 RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -212,7 +212,7 @@ export default defineConfig({
               bindings: {
                 API_KEY: "test-api-key",
                 HOOK_SECRET: "test-secret",
-                RUNNER_SECRET: "runner-secret",
+                SANDBOX_SECRET: "sandbox-secret",
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
                 RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -354,7 +354,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
           bindings: {
             API_KEY: "raw-api-key",
             HOOK_SECRET: "test-secret",
-            RUNNER_SECRET: "raw-runner-secret",
+            SANDBOX_SECRET: "raw-sandbox-secret",
             RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
             RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
               '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -384,27 +384,27 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
             },
             GENERATED_ISSUE_HOST: {
               name: "generated-runway-host",
-              entrypoint: "RunwayRunnerBinding",
+              entrypoint: "RunwaySandboxBinding",
               props: {
                 secretNames: ["HOOK_SECRET", "API_KEY"],
                 secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
                 snapshotScope: "generated-runway-host:issue-created:direct-capability",
               },
             },
-            RUNWAY_HOST: {
+            RUNWAY_RUNTIME: {
               name: kCurrentWorker,
               entrypoint: "TestHost",
               props: {
                 secrets: {
                   API_KEY: "test-api-key",
                   HOOK_SECRET: "test-secret",
-                  RUNNER_SECRET: "runner-secret",
+                  SANDBOX_SECRET: "sandbox-secret",
                 },
               },
             },
-            RUNWAY_TEST_RUNNER: {
+            RUNWAY_TEST_SANDBOX: {
               name: kCurrentWorker,
-              entrypoint: "TestRunner",
+              entrypoint: "TestSandbox",
             },
             RUNWAY_GITHUB_PROVIDER: {
               name: "github-effects-probe",
@@ -432,9 +432,9 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: "issue-created-test",
               className: "IssueCreatedWorkflow",
             },
-            RUNNER: {
-              name: "runner-test",
-              className: "RunnerWorkflow",
+            COMMANDS: {
+              name: "commands-test",
+              className: "CommandWorkflow",
             },
             SECRET_SNAPSHOT: {
               name: "secret-snapshot-test",
@@ -462,7 +462,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
   ],
   test: {
     name: "runway-workers",
-    include: ["tests/runner.test.ts", "tests/worker.test.ts"],
+    include: ["tests/sandbox.workers.test.ts", "tests/worker.test.ts"],
     testTimeout: 20_000,
   },
 });

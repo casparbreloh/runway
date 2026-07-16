@@ -6,15 +6,15 @@ export const GITHUB_COORDINATOR_BINDING = "RUNWAY_GITHUB_COORDINATOR";
 export const GITHUB_COORDINATOR_CLASS = "RunwayGitHubCoordinator";
 export const GITHUB_COORDINATOR_MIGRATION_TAG = "runway-github-coordinator-v2";
 
-export const RUNNER_CONTAINER = {
+export const SANDBOX_CONTAINER = {
   class_name: SANDBOX_CLASS,
   image: SANDBOX_IMAGE,
   instance_type: "standard-1",
 } as const;
 
-export const RUNNER_APPLICATION = {
+export const SANDBOX_APPLICATION = {
   scheduling_policy: "default",
-  configuration: { image: RUNNER_CONTAINER.image, instance_type: RUNNER_CONTAINER.instance_type },
+  configuration: { image: SANDBOX_CONTAINER.image, instance_type: SANDBOX_CONTAINER.instance_type },
   instances: 0,
   max_instances: 20,
   constraints: { tiers: [1, 2] },

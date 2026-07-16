@@ -3,11 +3,11 @@ import type { CloudflareApi } from "./cloudflare-api.ts";
 import {
   GITHUB_COORDINATOR_CLASS,
   GITHUB_COORDINATOR_MIGRATION_TAG,
-  RUNNER_APPLICATION,
+  SANDBOX_APPLICATION,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
   SANDBOX_MIGRATION_TAG,
-} from "./runner-config.ts";
+} from "./sandbox-config.ts";
 
 const INSTANCE_TYPES = {
   lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },
@@ -24,7 +24,7 @@ const matchesInstanceType = (configuration: {
   memory_mib?: unknown;
   disk?: { size_mb?: unknown };
 }): boolean => {
-  const instanceType = RUNNER_APPLICATION.configuration.instance_type;
+  const instanceType = SANDBOX_APPLICATION.configuration.instance_type;
   if (configuration.instance_type === instanceType) return true;
   const expected = INSTANCE_TYPES[instanceType];
   return (
@@ -158,20 +158,20 @@ export const reconcileSandboxContainer = async (
       throw new Error(`container application ${name} is attached to a different namespace`);
     }
     const matches =
-      application.scheduling_policy === RUNNER_APPLICATION.scheduling_policy &&
-      application.max_instances === RUNNER_APPLICATION.max_instances &&
-      application.configuration?.image === RUNNER_APPLICATION.configuration.image &&
+      application.scheduling_policy === SANDBOX_APPLICATION.scheduling_policy &&
+      application.max_instances === SANDBOX_APPLICATION.max_instances &&
+      application.configuration?.image === SANDBOX_APPLICATION.configuration.image &&
       matchesInstanceType(application.configuration ?? {}) &&
       JSON.stringify(application.constraints?.tiers) ===
-        JSON.stringify(RUNNER_APPLICATION.constraints.tiers) &&
-      application.rollout_active_grace_period === RUNNER_APPLICATION.rollout_active_grace_period;
+        JSON.stringify(SANDBOX_APPLICATION.constraints.tiers) &&
+      application.rollout_active_grace_period === SANDBOX_APPLICATION.rollout_active_grace_period;
     if (matches) return;
     if (typeof application.id !== "string") {
       throw new Error(`container application ${name} has no id`);
     }
     await cf.containers.applications.modify(application.id, {
       account_id: accountId,
-      body: RUNNER_APPLICATION,
+      body: SANDBOX_APPLICATION,
     });
     const rollout = resultOf(
       await cf.containers.rollouts.create(application.id, {
@@ -179,7 +179,7 @@ export const reconcileSandboxContainer = async (
         body: {
           description: "Runway deployment",
           strategy: "rolling",
-          target_configuration: RUNNER_APPLICATION.configuration,
+          target_configuration: SANDBOX_APPLICATION.configuration,
           step_percentage: 25,
           kind: "full_auto",
         },
@@ -196,7 +196,7 @@ export const reconcileSandboxContainer = async (
     account_id: accountId,
     body: {
       name,
-      ...RUNNER_APPLICATION,
+      ...SANDBOX_APPLICATION,
       durable_objects: { namespace_id: namespaceId },
     },
   });

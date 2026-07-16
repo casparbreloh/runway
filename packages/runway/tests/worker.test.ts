@@ -139,13 +139,13 @@ const waitForGitHubCreates = async (runIds: ReadonlyArray<string>): Promise<void
     expect(runIds.every((runId) => created.has(runId))).toBe(true);
   });
 
-const testRunner = exports.TestRunner({ props: {} });
+const testSandbox = exports.TestSandbox({ props: {} });
 const testHost = exports.TestHost({
   props: {
     secrets: {
       API_KEY: "test-api-key",
       HOOK_SECRET: "test-secret",
-      RUNNER_SECRET: "runner-secret",
+      SANDBOX_SECRET: "sandbox-secret",
     },
   },
 });
@@ -154,7 +154,7 @@ beforeEach(async () => {
   await env.RUNWAY_GITHUB_PROVIDER.reset();
   await env.RUNWAY_GITHUB_WORKFLOW.reset();
   await env.RUNWAY_GITHUB_CLOCK.reset();
-  await testRunner.reset();
+  await testSandbox.reset();
   await testHost.resetSecret();
 });
 
@@ -221,9 +221,9 @@ test.each([
     ],
   },
 ])("runtime lifecycle orders $name after cleanup", async ({ params, status, events }) => {
-  const introspector = await introspectWorkflow(env.RUNNER);
+  const introspector = await introspectWorkflow(env.COMMANDS);
   try {
-    await env.RUNNER.create({ params });
+    await env.COMMANDS.create({ params });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus(status)).resolves.not.toThrow();
     await expect(testHost.lifecycleEvents()).resolves.toEqual(events);
@@ -233,10 +233,10 @@ test.each([
 });
 
 test("cleanup failure reports failure before a retry can report late success", async () => {
-  await testRunner.failDestroyOnce();
-  const introspector = await introspectWorkflow(env.RUNNER);
+  await testSandbox.failDestroyOnce();
+  const introspector = await introspectWorkflow(env.COMMANDS);
   try {
-    await env.RUNNER.create({ params: { commands: ["true"] } });
+    await env.COMMANDS.create({ params: { commands: ["true"] } });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     await eventually(async () => {
@@ -258,27 +258,27 @@ test.each([
   ["restore", "setup restore failure", async () => await testHost.failSecretRestoreOnce()],
   [
     "validation",
-    "missing secret: RUNNER_SECRET",
+    "missing secret: SANDBOX_SECRET",
     async () => await testHost.failSecretValidationOnce(),
   ],
 ])(
   "secret %s failure reports failure without entering the handler or cleanup",
   async (_stage, message, fail) => {
     await fail();
-    const introspector = await introspectWorkflow(env.RUNNER);
+    const introspector = await introspectWorkflow(env.COMMANDS);
     try {
-      const run = await env.RUNNER.create({ params: { commands: ["true"] } });
+      const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
       const [instance] = introspector.get();
       await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
       await expect(testHost.lifecycleEvents()).resolves.toEqual([
         "lifecycle:in_progress",
         "lifecycle:failure",
       ]);
-      await expect((await env.RUNNER.get(run.id)).status()).resolves.toMatchObject({
+      await expect((await env.COMMANDS.get(run.id)).status()).resolves.toMatchObject({
         status: "errored",
         error: { message },
       });
-      await expect(testRunner.state()).resolves.toMatchObject({ executions: [], destroys: [] });
+      await expect(testSandbox.state()).resolves.toMatchObject({ executions: [], destroys: [] });
     } finally {
       await introspector.dispose();
     }
@@ -1236,12 +1236,12 @@ test("a Dynamic Workflow loads the artifact version and secrets selected by its 
 
   await expect(instance.waitForStepResult({ name: "artifact-version" })).resolves.toBe("suspended");
   await expect(instance.waitForStepResult({ name: "historical-secret" })).resolves.toBe(
-    "runner-secret",
+    "sandbox-secret",
   );
   await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
 });
 
-test("GitHub run source passes its exact repository commit to the runner instead of the artifact commit", async () => {
+test("GitHub run source passes its exact repository commit to the Sandbox instead of the artifact commit", async () => {
   await putActiveArtifact();
   const artifact = JSON.parse(env.ACTIVE_ARTIFACT) as { repository: { commit: string } };
   const source = githubRunSource();
@@ -1394,14 +1394,14 @@ test("a signed webhook runs a durable workflow in the Workers runtime", async ()
   }
 });
 
-test("a generated host capability returns only declared secrets", async () => {
+test("a generated runtime binding returns only declared secrets", async () => {
   await expect(env.GENERATED_ISSUE_HOST.secrets()).resolves.toEqual({
     API_KEY: "test-api-key",
     HOOK_SECRET: "test-secret",
   });
 });
 
-test("a generated host capability rejects invalid lifecycle RPC states", async () => {
+test("a generated runtime binding rejects invalid lifecycle RPC states", async () => {
   const probe = exports.CapabilityProbe({ props: {} });
   await expect(probe.invoke("reportRunLifecycle", ["run-id", "cancelled"])).resolves.toBe(
     "invalid run lifecycle",

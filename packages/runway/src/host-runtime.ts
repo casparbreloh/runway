@@ -1,11 +1,12 @@
 import {
   createDynamicWorkflowEntrypoint,
   wrapWorkflowBinding,
-  type WorkflowRunner,
+  type WorkflowRunner as DynamicRun,
 } from "@cloudflare/dynamic-workflows";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
 import type {
   GitHubCoordinatorAdmission,
   GitHubCoordinatorRun,
@@ -25,18 +26,17 @@ import {
   type RepositorySource,
 } from "./repository-source.ts";
 import type { ExecResult } from "./run.ts";
-import { createRunnerAdapter } from "./runner-adapter.ts";
-import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
-import type { HostCapability, RunLifecycleState } from "./runner.ts";
+import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
+import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { SourceIdentity, SourceResult } from "./source.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   COMPATIBILITY_DATE,
-  HOST_CAPABILITY_BINDING,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
+  RUNTIME_BINDING,
   RUNWAY_WORKFLOW_CLASS,
   SECRET_SNAPSHOT_KEY_BINDING,
   WORKFLOW_BINDING,
@@ -89,7 +89,7 @@ interface HostProps {
 
 interface LoaderContext {
   exports: {
-    RunwayRunnerBinding(options: { props: HostProps }): HostCapability;
+    RunwaySandboxBinding(options: { props: HostProps }): RuntimeBinding;
   };
 }
 
@@ -125,9 +125,9 @@ export interface HostConfig {
   };
 }
 
-export class RunwayRunnerBinding
+export class RunwaySandboxBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
-  implements HostCapability
+  implements RuntimeBinding
 {
   async reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean> {
     if (
@@ -160,10 +160,10 @@ export class RunwayRunnerBinding
     );
   }
 
-  #adapter(): ReturnType<typeof createRunnerAdapter> {
-    return createRunnerAdapter({
-      sandbox: (runnerId) =>
-        getSandbox(this.env[SANDBOX_BINDING], runnerId, { enableDefaultSession: false }),
+  #sandbox(): ReturnType<typeof cloudflareSandbox> {
+    return cloudflareSandbox({
+      placement: (sandboxId) =>
+        getSandbox(this.env[SANDBOX_BINDING], sandboxId, { enableDefaultSession: false }),
       status: async (runId) => await (await this.env[WORKFLOW_BINDING].get(runId)).status(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       repository: this.ctx.props.repository,
@@ -292,26 +292,22 @@ export class RunwayRunnerBinding
     ) {
       throw new Error("source preparation does not match the bound repository");
     }
-    return await this.#adapter().prepare({
+    return await this.#sandbox().prepare({
       runId: request.runId,
       secrets: this.#snapshotValues(request.secrets),
     });
   }
 
-  async exec(
-    request: Omit<Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0], "secrets"> & {
-      secrets: Readonly<Record<string, string>>;
-    },
-  ): Promise<ExecResult> {
-    const { secrets, ...runnerRequest } = request;
-    return await this.#adapter().exec({
-      ...runnerRequest,
+  async execute(request: Parameters<RuntimeBinding["execute"]>[0]): Promise<ExecResult> {
+    const { secrets, ...command } = request;
+    return await this.#sandbox().execute({
+      ...command,
       secrets: this.#snapshotValues(secrets),
     });
   }
 
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
-    await this.#adapter().destroy(runId, this.#snapshotValues(secrets));
+    await this.#sandbox().destroy(runId, this.#snapshotValues(secrets));
   }
 }
 
@@ -387,7 +383,7 @@ const loadWorker = async (
     mainModule: "index.js",
     modules: { "index.js": artifact.source },
     env: {
-      [HOST_CAPABILITY_BINDING]: ctx.exports.RunwayRunnerBinding({
+      [RUNTIME_BINDING]: ctx.exports.RunwaySandboxBinding({
         props: {
           repository: metadata.source
             ? repositorySourceForRun(metadata.source)
@@ -414,7 +410,7 @@ export const createDynamicWorkflow = (config: HostConfig) =>
       loaded.artifact,
       loaded.metadata,
     );
-    return worker.getEntrypoint(RUNWAY_WORKFLOW_CLASS) as unknown as WorkflowRunner;
+    return worker.getEntrypoint(RUNWAY_WORKFLOW_CLASS) as unknown as DynamicRun;
   });
 
 const dynamicFetch = async (

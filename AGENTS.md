@@ -17,9 +17,11 @@ own dependency graph. A future `run.ai()` may use Cloudflare AI Gateway. Agents 
   - `src/workflow.ts` — `workflow()`.
   - `src/trigger.ts` — webhook and cron triggers.
   - `src/run.ts` — public `Run`, command contracts, and durable operation wiring.
-  - `src/runner.ts` — internal managed command runner.
+  - `src/sandbox.ts` — run-bound command and source lifecycle.
+  - `src/cloudflare/sandbox.ts` — Cloudflare Sandbox process and checkout implementation.
+  - `src/runtime-binding.ts` — internal Worker RPC contract.
   - `src/runtime.ts` — workflow artifact runtime adapter.
-  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runner capability.
+  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runtime binding.
   - `src/workflow-artifact.ts` — immutable content-addressed artifact contract.
   - `src/secret-snapshot.ts` — encrypted durable run-secret snapshots.
   - `src/router.ts` — webhook and cron routing.
@@ -88,7 +90,7 @@ export default workflow({
 - Output is streamed incrementally and only redacted 64 KiB stdout/stderr tails are returned.
 - Timeout and termination kill the command process group. Because Cloudflare rollback was `null`
   for a terminated active step in the live deployment smoke test, termination polling remains
-  internal to the runner adapter.
+  internal to the Cloudflare Sandbox implementation.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
 - Deploy stores each bundled workflow as one immutable content-addressed artifact in the shared
@@ -102,16 +104,16 @@ export default workflow({
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
   up when the run ends. Deploy captures the repository remote and exact commit inside each workflow
   artifact. GitHub deliveries provide an exact run source. Private checkout uses a purpose-scoped,
-  repository-scoped installation token only in the checkout process environment. The runner
+  repository-scoped installation token only in the checkout process environment. The Sandbox
   prepares `/workspace` before the first command and reconstructs the same commit, reminting when
   needed, after a fresh Sandbox loses its matching marker.
 - Repository recovery is deterministic reconstruction, not Sandbox workspace checkpointing. The
   Workers-runtime seam and repeatable public and authenticated live `Sandbox.destroy()` smokes
   cover forced replacement. Sandbox backup/restore still needs R2 credentials/configuration and
   object lifecycle management, so Runway does not enable a partial checkpoint layer.
-- The managed runner uses the `standard-1` container tier. Reconciliation of an existing container
+- The managed Sandbox uses the `standard-1` container tier. Reconciliation of an existing container
   definition must explicitly create and verify its rollout; a successful metadata update does not
-  activate changed runner capacity by itself.
+  activate changed Sandbox capacity by itself.
 - Runway's root workflows fetch a reproducible content-addressed CI bootstrap from a dedicated
   public R2 bucket. Verify each chunk and the complete archive before extraction. Only the Linux
   toolchain and lockfile-resolved dependencies are public; keep artifacts, source, run data, and
@@ -120,7 +122,7 @@ export default workflow({
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
   returns webhook URLs, including one shared `/.runway/github` ingress when configured.
-- Keep Sandbox and container deployment resources internal to the managed command runner.
+- Keep Sandbox and container deployment resources internal to the managed command implementation.
 - Runway's own `Check` and `Test` workflows are the repository CI. The live evidence gate passed,
   and this cutover deletes the duplicate GitHub Actions workflow; do not restore it without a new
   explicit migration.

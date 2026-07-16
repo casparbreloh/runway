@@ -10,7 +10,7 @@ interface RepositoryProbeProps {
   readonly secretNames: ReadonlyArray<string>;
 }
 
-export class RunwayRunnerBinding extends WorkerEntrypoint<Cloudflare.Env, RepositoryProbeProps> {
+export class RunwaySandboxBinding extends WorkerEntrypoint<Cloudflare.Env, RepositoryProbeProps> {
   async reportRunLifecycle(): Promise<boolean> {
     return true;
   }
@@ -44,7 +44,7 @@ export class RunwayRunnerBinding extends WorkerEntrypoint<Cloudflare.Env, Reposi
     return { revision: source.revision, state: "prepared", bytes: 0 };
   }
 
-  async exec(): Promise<never> {
+  async execute(): Promise<never> {
     throw new Error("repository probe does not execute commands");
   }
 

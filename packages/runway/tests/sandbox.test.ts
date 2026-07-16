@@ -209,3 +209,121 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
   await sandbox.cleanup();
   expect({ prepares, destroys }).toEqual({ prepares: 1, destroys: 1 });
 });
+
+test("commands share one prepared source and preserve workspace mutation", async () => {
+  const revision = "4".repeat(40);
+  let preparations = 0;
+  let workspace = "";
+  const sandbox = new Sandbox({
+    runId: "run-shared-workspace",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      {
+        prepare: async () => {
+          preparations += 1;
+          return { revision, state: "prepared", bytes: 10 };
+        },
+      },
+    ),
+    placement: {
+      exec: async ({ command }) => {
+        if (command.command === "write") workspace = "preserved\n";
+        return {
+          exitCode: 0,
+          stdout: command.command === "read" ? workspace : "",
+          stderr: "",
+          durationMs: 1,
+        };
+      },
+      destroy: async () => {},
+    },
+  });
+
+  await expect(sandbox.exec(durable("write"), "write")).resolves.toMatchObject({ exitCode: 0 });
+  await expect(sandbox.exec(durable("read"), "read")).resolves.toMatchObject({
+    stdout: "preserved\n",
+  });
+  expect(preparations).toBe(1);
+});
+
+test("a failed source preparation remains retryable", async () => {
+  const revision = "5".repeat(40);
+  let preparations = 0;
+  const sandbox = new Sandbox({
+    runId: "run-retry-preparation",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      {
+        prepare: async () => {
+          preparations += 1;
+          if (preparations === 1) throw new Error("transient preparation failure");
+          return { revision, state: "prepared", bytes: 10 };
+        },
+      },
+    ),
+    placement: {
+      exec: async () => ({ exitCode: 0, stdout: "ready\n", stderr: "", durationMs: 1 }),
+      destroy: async () => {},
+    },
+  });
+
+  await expect(sandbox.exec(durable("first"), "true")).rejects.toThrow(
+    "transient preparation failure",
+  );
+  await expect(sandbox.exec(durable("retry"), "true")).resolves.toMatchObject({
+    stdout: "ready\n",
+  });
+  expect(preparations).toBe(2);
+});
+
+test("a nonzero result crosses the durable boundary once before becoming an ExecError", async () => {
+  const revision = "6".repeat(40);
+  let executions = 0;
+  let durableResult: unknown;
+  const sandbox = new Sandbox({
+    runId: "run-nonzero",
+    secrets: {},
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      { prepare: async () => ({ revision, state: "prepared", bytes: 0 }) },
+    ),
+    placement: {
+      exec: async () => {
+        executions += 1;
+        return { exitCode: 7, stdout: "", stderr: "failed\n", durationMs: 1 };
+      },
+      destroy: async () => {},
+    },
+  });
+
+  await expect(
+    sandbox.exec(
+      {
+        id: "fail",
+        run: async (work) => {
+          durableResult = await work({ count: 1, attempt: 1 });
+          return durableResult as never;
+        },
+      },
+      "exit 7",
+    ),
+  ).rejects.toMatchObject({ name: "ExecError", result: { exitCode: 7 } });
+  expect({ durableResult, executions }).toEqual({
+    durableResult: { exitCode: 7, stdout: "", stderr: "failed\n", durationMs: 1 },
+    executions: 1,
+  });
+});

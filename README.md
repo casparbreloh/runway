@@ -6,7 +6,7 @@ Runway is a TypeScript-first, general workflow framework on Cloudflare. Author w
 
 Repository execution and managed CI/CD are the first major use case. Runway executes commands in a
 managed, run-scoped workspace and will transport caches for tools such as Turborepo and Nx rather
-than build its own dependency graph. Cloudflare Sandbox remains an internal runner implementation
+than build its own dependency graph. Cloudflare Sandbox remains an internal execution
 detail; agents are deferred. A future `run.ai()` may use Cloudflare AI Gateway.
 
 For product direction and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
@@ -114,7 +114,7 @@ outbox after the ingress response.
 Declare every workflow secret in `secrets`, including webhook signing secrets. In `trigger(ctx)`,
 `ctx.secrets.X` is a branded secret reference. In the run callback it is the runtime string value.
 Deploy fails before upload when a declared secret is missing from both the environment and the repo
-Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal runner and GitHub
+Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal Runtime and GitHub
 bindings.
 
 GitHub triggers use three internal App bindings rather than authored workflow secrets:
@@ -125,17 +125,17 @@ and the managed runtime only; run callbacks and run-secret snapshots never recei
 ## Deploy Model
 
 Runway deploys one orchestration Worker per repository. That Worker owns webhook and cron routing,
-one Dynamic Workflows binding, one Worker Loader binding, an internal command-runner binding, and a
-repo-scoped coordinator whose instances are used only for GitHub triggers. Per-workflow code is loaded through
-Worker Loader and Dynamic Workflows. The runner container starts lazily on the first `step.exec()` in
-a run and is destroyed after workflow completion or failure.
+one Dynamic Workflows binding, one Worker Loader binding, an internal Runtime binding, and a
+repo-scoped coordinator whose instances are used only for GitHub triggers. Per-workflow code is
+loaded through Worker Loader and Dynamic Workflows. The Sandbox starts lazily on the first
+`run.exec()` in a run and is destroyed after workflow completion or failure.
 
 Deploy captures `origin` and exact `HEAD` inside each immutable workflow artifact. Public remotes
 remain unauthenticated. For a GitHub remote with App credentials, deploy resolves and stores only
 its stable repository and installation identity. A verified GitHub delivery overrides the artifact
-source with its exact run repository and SHA. Before the first command, the runner reconstructs that
-commit in `/workspace`. Commands in one run reuse the checkout, including across `step.sleep()`. If
-a fresh Sandbox no longer contains the matching checkout marker, the runner reconstructs the same
+source with its exact run repository and SHA. Before the first command, the Sandbox reconstructs that
+commit in `/workspace`. Commands in one run reuse the checkout, including across `run.sleep()`. If
+a fresh Sandbox no longer contains the matching checkout marker, Runway reconstructs the same
 commit before the next command and mints a new repository-scoped installation token when needed.
 Tokens travel only through the checkout process environment and are redacted from managed output.
 
@@ -152,7 +152,7 @@ remain in private storage. This bootstrap is specific to Runway's own workflows;
 transport through tools such as Turborepo and Nx remains a later milestone.
 
 Cloudflare Workflow rollback cleans up ordinary failed runs, but a live deployment smoke test
-returned `rollback: null` after terminating an active command. The internal runner adapter therefore
+returned `rollback: null` after terminating an active command. The Cloudflare Sandbox implementation
 performs one termination-status check per second while a command is active; there is no separate
 generated-code poller.
 
@@ -163,10 +163,10 @@ name identifies the Worker script, Dynamic Workflow resource, and workers.dev ho
 `runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, reconciles the
 hidden Sandbox and GitHub coordinator Durable Objects and container application, updates its
 Dynamic Workflow, replaces cron schedules, enables workers.dev, and removes stale Workflow
-resources belonging to the same script. The managed runner uses Cloudflare's `standard-1`
+resources belonging to the same script. The managed Sandbox uses Cloudflare's `standard-1`
 container tier. When deployment changes an existing container definition, Runway explicitly starts
 the required rollout and waits for it to complete; updating application metadata alone does not
-activate the new runner configuration.
+activate the new Sandbox configuration.
 
 ## GitHub App Setup
 
@@ -222,7 +222,7 @@ are part of the root TypeScript solution, so ordinary `pnpm typecheck` verifies 
 ## Testing
 
 Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
-integration. The suite tests public SDK, Workers runtime, generated runner adapter, CLI, and
+integration. The suite tests public SDK, Workers runtime, the generated Runtime binding, CLI, and
 Cloudflare API boundaries. Repeatable live smokes also prove public and authenticated exact-SHA
 repository reconstruction after forced Sandbox replacement and audit their owned-resource cleanup.
 

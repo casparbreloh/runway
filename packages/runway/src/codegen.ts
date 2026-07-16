@@ -80,12 +80,12 @@ export const generateHost = (
 import { Sandbox } from "@cloudflare/sandbox";
 import {
   RunwayGitHubCoordinator,
-  RunwayRunnerBinding,
+  RunwaySandboxBinding,
   createDynamicWorkflow,
   createHost,
 } from "runway:host-runtime";
 
-export { DynamicWorkflowBinding, RunwayGitHubCoordinator, RunwayRunnerBinding, Sandbox };
+export { DynamicWorkflowBinding, RunwayGitHubCoordinator, RunwaySandboxBinding, Sandbox };
 
 const config = ${config};
 

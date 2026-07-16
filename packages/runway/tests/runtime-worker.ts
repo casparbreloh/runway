@@ -317,8 +317,6 @@ export class GitHubWorkflowProbe extends WorkerEntrypoint<Cloudflare.Env> {
   }
 }
 
-export { RunnerAdapterHarness } from "./runner-adapter-harness.ts";
-
 interface NormalizedExecOptions {
   command: string;
   cwd: string;
@@ -326,7 +324,7 @@ interface NormalizedExecOptions {
   timeoutMs: number;
 }
 
-interface RunnerRequest {
+interface SandboxRequest {
   runId: string;
   step: { id: string; count: number; attempt: number };
   options: NormalizedExecOptions;
@@ -334,7 +332,7 @@ interface RunnerRequest {
   source: SourceResult;
 }
 
-const runnerState = {
+const sandboxState = {
   executions: [] as Array<{
     runId: string;
     step: { id: string; count: number; attempt: number };
@@ -346,18 +344,18 @@ const runnerState = {
 };
 let runtimeLifecycleEvents: string[] = [];
 const activeExecutions = new Map<string, () => void>();
-const runnerWorkspaces = new Map<string, string>();
+const workspaces = new Map<string, string>();
 let sourcePreparations: unknown[] = [];
 const secretSnapshots = new Map<string, Readonly<Record<string, string>>>();
 let destroyAttempts = 0;
 let failNextDestroy = false;
-let currentHostSecret = "runner-secret";
+let currentHostSecret = "sandbox-secret";
 let lastHostDestroySecrets: ReadonlyArray<string> = [];
 let failSecretCapture = false;
 let failNextSecretRestore = false;
 let failNextSecretValidation = false;
 
-export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
+export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
   source(): SourceIdentity {
     return {
       repositoryId: `remote:${repositoryFixture.remote}`,
@@ -379,16 +377,16 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     return { revision: expected.revision, state: "prepared", bytes: 0 };
   }
 
-  async exec(request: RunnerRequest): Promise<ExecResult> {
+  async exec(request: SandboxRequest): Promise<ExecResult> {
     const { runId, step, options, secrets } = request;
-    runnerState.executions.push({ runId, step, options, secrets });
+    sandboxState.executions.push({ runId, step, options, secrets });
     if (options.command === "block") {
       const blocked = new Promise<void>((resolve) => activeExecutions.set(runId, resolve));
       this.ctx.waitUntil(
         (async () => {
           while (activeExecutions.has(runId)) {
             await scheduler.wait(10);
-            if ((await (await this.env.RUNNER.get(runId)).status()).status === "terminated") {
+            if ((await (await this.env.COMMANDS.get(runId)).status()).status === "terminated") {
               await this.destroy(runId, secrets);
               return;
             }
@@ -400,20 +398,20 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     if (options.command === "exit 7") {
       return { exitCode: 7, stdout: "tail", stderr: "failed", durationMs: 4 };
     }
-    if (options.command.includes("runner-secret")) {
+    if (options.command.includes("sandbox-secret")) {
       return {
         exitCode: 9,
-        stdout: "stdout runner-secret",
-        stderr: "stderr runner-secret",
+        stdout: "stdout sandbox-secret",
+        stderr: "stderr sandbox-secret",
         durationMs: 4,
       };
     }
     if (options.command === "echo hello > state.txt") {
-      runnerWorkspaces.set(runId, "hello\n");
+      workspaces.set(runId, "hello\n");
       return { exitCode: 0, stdout: "", stderr: "", durationMs: 2 };
     }
     if (options.command === "cat state.txt") {
-      const state = runnerWorkspaces.get(runId);
+      const state = workspaces.get(runId);
       return state === undefined
         ? {
             exitCode: 1,
@@ -436,25 +434,25 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     }
     const unblock = activeExecutions.get(runId);
     if (unblock) {
-      runnerState.kills.push(runId);
+      sandboxState.kills.push(runId);
       activeExecutions.delete(runId);
       unblock();
     }
-    runnerState.destroys.push(runId);
-    runnerWorkspaces.delete(runId);
+    sandboxState.destroys.push(runId);
+    workspaces.delete(runId);
     runtimeLifecycleEvents.push("cleanup:success");
   }
 
-  state(): typeof runnerState {
-    return runnerState;
+  state(): typeof sandboxState {
+    return sandboxState;
   }
 
   reset(): void {
-    runnerState.executions = [];
-    runnerState.destroys = [];
-    runnerState.kills = [];
+    sandboxState.executions = [];
+    sandboxState.destroys = [];
+    sandboxState.kills = [];
     activeExecutions.clear();
-    runnerWorkspaces.clear();
+    workspaces.clear();
     sourcePreparations = [];
     destroyAttempts = 0;
     failNextDestroy = false;
@@ -485,7 +483,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
   }
 
   async secrets(): Promise<Readonly<Record<string, string>>> {
-    return { ...this.ctx.props.secrets, RUNNER_SECRET: currentHostSecret };
+    return { ...this.ctx.props.secrets, SANDBOX_SECRET: currentHostSecret };
   }
 
   async captureSecrets(runId: string): Promise<string> {
@@ -510,7 +508,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
   }
 
   async source(): Promise<SourceIdentity> {
-    return await this.env.RUNWAY_TEST_RUNNER.source();
+    return await this.env.RUNWAY_TEST_SANDBOX.source();
   }
 
   async prepareSource(request: {
@@ -518,11 +516,11 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     source: SourceIdentity;
     secrets: Readonly<Record<string, string>>;
   }): Promise<SourceResult> {
-    return await this.env.RUNWAY_TEST_RUNNER.prepareSource(request);
+    return await this.env.RUNWAY_TEST_SANDBOX.prepareSource(request);
   }
 
-  async exec(
-    request: Omit<RunnerRequest, "secrets"> & {
+  async execute(
+    request: Omit<SandboxRequest, "secrets"> & {
       secrets: Readonly<Record<string, string>>;
     },
   ): Promise<ExecResult> {
@@ -532,13 +530,13 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
         exitCode: 0,
         stdout: secrets.reduce(
           (output, secret) => output.replaceAll(secret, "***"),
-          "runner-secret",
+          "sandbox-secret",
         ),
         stderr: "",
         durationMs: 1,
       };
     }
-    return await this.env.RUNWAY_TEST_RUNNER.exec({
+    return await this.env.RUNWAY_TEST_SANDBOX.exec({
       ...request,
       secrets,
     });
@@ -546,7 +544,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
 
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
     lastHostDestroySecrets = Object.values(secrets);
-    await this.env.RUNWAY_TEST_RUNNER.destroy(runId, lastHostDestroySecrets);
+    await this.env.RUNWAY_TEST_SANDBOX.destroy(runId, lastHostDestroySecrets);
   }
 
   rotateSecret(value: string): void {
@@ -554,7 +552,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
   }
 
   resetSecret(): void {
-    currentHostSecret = "runner-secret";
+    currentHostSecret = "sandbox-secret";
     lastHostDestroySecrets = [];
     secretSnapshots.clear();
     failSecretCapture = false;
@@ -643,11 +641,11 @@ export const issueCreated = workflow({
 
 export const suspendedIssueCreated = workflow({
   id: "suspended-workflow",
-  secrets: ["RUNNER_SECRET"],
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
 }).run(async (run) => {
   await run.do("artifact-version", () => "suspended");
-  await run.do("historical-secret", () => run.secrets.RUNNER_SECRET);
+  await run.do("historical-secret", () => run.secrets.SANDBOX_SECRET);
 });
 
 export class IssueCreatedWorkflow extends toEntrypoint(issueCreated) {}
@@ -680,7 +678,7 @@ const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).run(
 
 export class DailyWorkflow extends toEntrypoint(daily) {}
 
-interface RunnerEvent {
+interface CommandEvent {
   commands: ReadonlyArray<string | ExecOptions>;
   catchErrors?: boolean;
   pauseMs?: number;
@@ -688,13 +686,13 @@ interface RunnerEvent {
   throwUndefinedAfterCommands?: boolean;
 }
 
-const runner = workflow({
-  id: "runner",
-  secrets: ["RUNNER_SECRET"],
+const commands = workflow({
+  id: "commands",
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
 }).run(async (run, event) => {
   const { catchErrors, commands, pauseMs, throwAfterCommands, throwUndefinedAfterCommands } =
-    event as unknown as RunnerEvent;
+    event as unknown as CommandEvent;
   runtimeLifecycleEvents.push("handler:start");
   for (const [index, command] of commands.entries()) {
     try {
@@ -723,14 +721,14 @@ const runner = workflow({
   runtimeLifecycleEvents.push("handler:success");
 });
 
-export class RunnerWorkflow extends toEntrypoint(runner) {}
+export class CommandWorkflow extends toEntrypoint(commands) {}
 
 const secretSnapshot = workflow({
   id: "secret-snapshot",
-  secrets: ["RUNNER_SECRET"],
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
 }).run(async (run) => {
-  await run.do("resolved-secret", () => run.secrets.RUNNER_SECRET);
+  await run.do("resolved-secret", () => run.secrets.SANDBOX_SECRET);
   await run.sleep("rotate-secret", 100);
   await run.exec("snapshot-output", "snapshot-output");
 });

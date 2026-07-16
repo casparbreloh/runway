@@ -15,7 +15,7 @@ import { deploy } from "../src/deploy.ts";
 import { createGitHubProvider } from "../src/github.ts";
 import { githubRepositoryRemote, resolveRepositorySource } from "../src/repository-source.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
-import { GITHUB_COORDINATOR_CLASS, SANDBOX_CLASS } from "../src/runner-config.ts";
+import { GITHUB_COORDINATOR_CLASS, SANDBOX_CLASS } from "../src/sandbox-config.ts";
 import {
   COMPATIBILITY_DATE,
   GITHUB_APP_ID_BINDING,
@@ -177,7 +177,7 @@ const hex = (bytes) => [...new Uint8Array(bytes)]
   .map((byte) => byte.toString(16).padStart(2, "0"))
   .join("");
 
-const runnerId = async (runId) => {
+const sandboxId = async (runId) => {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(runId));
   return \`runway-\${hex(digest).slice(0, 32)}\`;
 };
@@ -192,7 +192,7 @@ export default {
     if (!body || typeof body.runId !== "string") {
       return new Response("invalid run id", { status: 400 });
     }
-    const id = env.RUNWAY_SANDBOX.idFromName(await runnerId(body.runId));
+    const id = env.RUNWAY_SANDBOX.idFromName(await sandboxId(body.runId));
     const sandbox = env.RUNWAY_SANDBOX.get(id);
     if (body.action === "placement") {
       return Response.json({ placement: await sandbox.getContainerPlacementId() });

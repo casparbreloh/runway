@@ -4,13 +4,12 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
 import type { RunOperations } from "./run.ts";
-import type { HostCapability } from "./runner.ts";
-import type { RunLifecycleState } from "./runner.ts";
+import type { RunLifecycleState, RuntimeBinding } from "./runtime-binding.ts";
 import { Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
 import type { SourceIdentity } from "./source.ts";
 import type { WorkflowDefinition } from "./types.ts";
-import { HOST_CAPABILITY_BINDING } from "./worker-contract.ts";
+import { RUNTIME_BINDING } from "./worker-contract.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
 const GITHUB_START_STEP = "runway:github-in-progress";
@@ -23,7 +22,7 @@ interface WorkflowBinding {
 
 type DynamicWorkerEnv = Record<string, unknown> & {
   WORKFLOWS?: WorkflowBinding;
-  [HOST_CAPABILITY_BINDING]?: HostCapability;
+  [RUNTIME_BINDING]?: RuntimeBinding;
 };
 
 interface RunRuntime {
@@ -33,13 +32,14 @@ interface RunRuntime {
 
 const makeRunRuntime = (
   step: WorkflowStep,
-  host: HostCapability,
+  binding: RuntimeBinding,
   runId: string,
   secrets: Readonly<Record<string, string>>,
   identity: SourceIdentity,
 ): RunRuntime => {
   const exactSource = source(identity, {
-    prepare: async (requested) => await host.prepareSource({ runId, source: requested, secrets }),
+    prepare: async (requested) =>
+      await binding.prepareSource({ runId, source: requested, secrets }),
   });
   const sandbox = new Sandbox({
     runId,
@@ -47,14 +47,14 @@ const makeRunRuntime = (
     source: exactSource,
     placement: {
       exec: async ({ step: durableStep, source: prepared, command, secrets: _secrets, ...rest }) =>
-        await host.exec({
+        await binding.execute({
           ...rest,
           step: durableStep,
           source: prepared,
           options: command,
           secrets,
         }),
-      destroy: async () => await host.destroy(runId, secrets),
+      destroy: async () => await binding.destroy(runId, secrets),
     },
   });
   return {
@@ -89,8 +89,8 @@ export const toEntrypoint = (
 ): typeof WorkflowEntrypoint<unknown, unknown> =>
   class extends WorkflowEntrypoint<unknown, unknown> {
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
-      const host = (this.env as DynamicWorkerEnv)[HOST_CAPABILITY_BINDING];
-      if (!host) throw new Error(`missing host capability: ${HOST_CAPABILITY_BINDING}`);
+      const binding = (this.env as DynamicWorkerEnv)[RUNTIME_BINDING];
+      if (!binding) throw new Error(`missing runtime binding: ${RUNTIME_BINDING}`);
       const reportLifecycle = async (state: RunLifecycleState): Promise<boolean> =>
         (await step.do(
           state === "in_progress"
@@ -98,21 +98,27 @@ export const toEntrypoint = (
             : state === "success"
               ? GITHUB_SUCCESS_STEP
               : GITHUB_FAILURE_STEP,
-          async () => (await host.reportRunLifecycle(event.instanceId, state)) as never,
+          async () => (await binding.reportRunLifecycle(event.instanceId, state)) as never,
         )) as boolean;
       if (!(await reportLifecycle("in_progress"))) return undefined;
       let secrets: Readonly<Record<string, string>>;
       try {
         const snapshot = await step.do(
           SECRET_SNAPSHOT_STEP,
-          async () => (await host.captureSecrets(event.instanceId)) as never,
+          async () => (await binding.captureSecrets(event.instanceId)) as never,
         );
-        secrets = secretsOf(def.secrets, await host.restoreSecrets(event.instanceId, snapshot));
+        secrets = secretsOf(def.secrets, await binding.restoreSecrets(event.instanceId, snapshot));
       } catch (error) {
         await reportLifecycle("failure");
         throw error;
       }
-      const runtime = makeRunRuntime(step, host, event.instanceId, secrets, await host.source());
+      const runtime = makeRunRuntime(
+        step,
+        binding,
+        event.instanceId,
+        secrets,
+        await binding.source(),
+      );
       let result: unknown;
       let failed = false;
       let failure: unknown;
@@ -152,11 +158,11 @@ export const createWorkflowWorker = (
     const dynamicEnv = env as DynamicWorkerEnv;
     const workflow = dynamicEnv.WORKFLOWS;
     if (!workflow) return new Response("no binding: WORKFLOWS", { status: 500 });
-    const host = dynamicEnv[HOST_CAPABILITY_BINDING];
-    if (!host) {
-      return new Response(`missing host capability: ${HOST_CAPABILITY_BINDING}`, { status: 500 });
+    const binding = dynamicEnv[RUNTIME_BINDING];
+    if (!binding) {
+      return new Response(`missing runtime binding: ${RUNTIME_BINDING}`, { status: 500 });
     }
-    const secrets = secretsOf(def.secrets, await host.secrets());
+    const secrets = secretsOf(def.secrets, await binding.secrets());
     const router = createRouter([{ id: def.id, trigger: def.trigger }], {
       async start(_entry, event) {
         const instance = await workflow.create({ params: event });

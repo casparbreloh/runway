@@ -38,6 +38,7 @@ export interface Placement {
 
 export class Sandbox {
   #cleaned = false;
+  #preparation: Promise<SourceResult> | undefined;
   #started = false;
   readonly #placement: Placement;
   readonly #runId: string;
@@ -56,12 +57,22 @@ export class Sandbox {
     this.#placement = options.placement;
   }
 
+  #prepare(): Promise<SourceResult> {
+    if (this.#preparation) return this.#preparation;
+    const preparation = this.#source.prepare();
+    this.#preparation = preparation;
+    void preparation.catch(() => {
+      if (this.#preparation === preparation) this.#preparation = undefined;
+    });
+    return preparation;
+  }
+
   async exec(step: DurableStep, command: string | ExecOptions): Promise<ExecResult> {
     const options = normalize(command);
     this.#started = true;
     const result = await step.run(
       async (identity) => {
-        const prepared = await this.#source.prepare();
+        const prepared = await this.#prepare();
         return await this.#placement.exec({
           runId: this.#runId,
           step: { id: step.id, ...identity },

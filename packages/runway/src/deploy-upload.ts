@@ -5,10 +5,10 @@ import type { RunwayMigration } from "./deploy-container.ts";
 import {
   GITHUB_COORDINATOR_BINDING,
   GITHUB_COORDINATOR_CLASS,
-  RUNNER_CONTAINER,
+  SANDBOX_CONTAINER,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
-} from "./runner-config.ts";
+} from "./sandbox-config.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   COMPATIBILITY_DATE,
@@ -87,7 +87,7 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
         text,
       })),
     ],
-    containers: [RUNNER_CONTAINER],
+    containers: [SANDBOX_CONTAINER],
     ...(opts.migration ? { migrations: opts.migration } : {}),
   }) as ScriptMetadata;
 

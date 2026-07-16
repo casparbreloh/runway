@@ -136,7 +136,7 @@ const hex = (bytes) => [...new Uint8Array(bytes)]
   .map((byte) => byte.toString(16).padStart(2, "0"))
   .join("");
 
-const runnerId = async (runId) => {
+const sandboxId = async (runId) => {
   const bytes = new TextEncoder().encode(runId);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return \`runway-\${hex(digest).slice(0, 32)}\`;
@@ -152,7 +152,7 @@ export default {
     if (!body || typeof body.runId !== "string") {
       return new Response("invalid run id", { status: 400 });
     }
-    const id = env.RUNWAY_SANDBOX.idFromName(await runnerId(body.runId));
+    const id = env.RUNWAY_SANDBOX.idFromName(await sandboxId(body.runId));
     await env.RUNWAY_SANDBOX.get(id).destroy();
     return Response.json({ destroyed: true });
   },
@@ -501,7 +501,7 @@ const run = async (): Promise<void> => {
       runId,
       commit: cold.head,
       cold: {
-        workflowToRunnerMs: cold.metrics.prepareStartedAtMs - coldReport.coldStartedAtMs,
+        workflowToSandboxMs: cold.metrics.prepareStartedAtMs - coldReport.coldStartedAtMs,
         sandboxReadyMs: cold.metrics.sandboxReadyAtMs - cold.metrics.prepareStartedAtMs,
         checkoutProcessStartMs: cold.metrics.startedAtMs - cold.metrics.sandboxReadyAtMs,
         checkoutMs: cold.metrics.checkoutMs,
@@ -510,7 +510,7 @@ const run = async (): Promise<void> => {
         commandReadyMs: cold.observedAtMs - cold.metrics.prepareStartedAtMs,
       },
       recovery: {
-        workflowToRunnerMs:
+        workflowToSandboxMs:
           recovered.metrics.prepareStartedAtMs - recoveryReport.recoveryStartedAtMs,
         sandboxReadyMs: recovered.metrics.sandboxReadyAtMs - recovered.metrics.prepareStartedAtMs,
         checkoutProcessStartMs: recovered.metrics.startedAtMs - recovered.metrics.sandboxReadyAtMs,
