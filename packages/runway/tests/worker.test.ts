@@ -1140,6 +1140,28 @@ test("a generated host reports only its no-cache deployment identity", async () 
   expect(await response.json()).toEqual({ deploymentId: env.ACTIVE_DEPLOYMENT_ID });
 });
 
+test("a generated host serves only content-addressed workflow caches", async () => {
+  const digest = "c".repeat(64);
+  const body = "cached toolchain";
+  await env.RUNWAY_ARTIFACTS.put(`caches/${digest}.tar.gz`, body);
+
+  const response = await env.GENERATED_HOST.fetch(
+    `https://runway.test/.runway/cache/${digest}.tar.gz`,
+  );
+  expect(response.status).toBe(200);
+  expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(body);
+  expect(response.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  expect(response.headers.get("content-type")).toBe("application/gzip");
+  expect(response.headers.get("etag")).toMatch(/^"[0-9a-f]+"$/);
+
+  await expect(
+    env.GENERATED_HOST.fetch(`https://runway.test/.runway/cache/${"d".repeat(64)}.tar.gz`),
+  ).resolves.toMatchObject({ status: 404 });
+  await expect(
+    env.GENERATED_HOST.fetch("https://runway.test/.runway/cache/../artifacts/secret.json"),
+  ).resolves.toMatchObject({ status: 404 });
+});
+
 test("a generated host executes its active immutable artifact", async () => {
   await putActiveArtifact();
   const body = JSON.stringify({ action: "create" });

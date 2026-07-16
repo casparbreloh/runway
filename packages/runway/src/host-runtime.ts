@@ -44,6 +44,10 @@ import type { WorkflowArtifact } from "./workflow-artifact.ts";
 
 export { RunwayGitHubCoordinator } from "./github-coordinator.ts";
 
+const CACHE_PATH = /^\/\.runway\/cache\/([0-9a-f]{64})\.tar\.gz$/;
+
+const workflowCacheKey = (digest: string): string => `caches/${digest}.tar.gz`;
+
 interface LoaderStub {
   getEntrypoint(name?: string): { fetch(req: Request): Promise<Response>; run?: unknown };
 }
@@ -405,13 +409,26 @@ const dynamicFetch = async (
 
 export const createHost = (config: HostConfig) => ({
   async fetch(req: Request, env: HostEnv, ctx: LoaderContext): Promise<Response> {
-    if (req.method === "GET" && new URL(req.url).pathname === "/.runway/version") {
+    const url = new URL(req.url);
+    const cache = req.method === "GET" ? CACHE_PATH.exec(url.pathname) : null;
+    if (cache) {
+      const object = await env[ARTIFACT_BUCKET_BINDING].get(workflowCacheKey(cache[1]!));
+      if (!object) return new Response("not found", { status: 404 });
+      return new Response(object.body, {
+        headers: {
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Content-Type": "application/gzip",
+          ETag: object.httpEtag,
+        },
+      });
+    }
+    if (req.method === "GET" && url.pathname === "/.runway/version") {
       return Response.json(
         { deploymentId: config.deploymentId },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
-    const pathname = new URL(req.url).pathname;
+    const pathname = url.pathname;
     if (pathname === "/.runway/github" && req.method === "POST") {
       if (!config.github) return new Response("not found", { status: 404 });
       const secret = env.RUNWAY_GITHUB_WEBHOOK_SECRET;
