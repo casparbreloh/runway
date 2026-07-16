@@ -11,7 +11,10 @@ export default workflow({
       ],
     }),
 }).handler(async (ctx) => {
-  await ctx.step.exec("setup-node", "npm install --global n && n 26.5.0");
+  await ctx.step.exec(
+    "setup-node",
+    "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libatomic1 && npm install --global n && n 26.5.0",
+  );
   await ctx.step.exec("setup-pnpm", "npm install --global pnpm@11.5.0");
   await ctx.step.exec("toolchain", "node --version && npm --version && pnpm --version");
   await ctx.step.exec(
