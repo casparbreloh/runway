@@ -20,6 +20,7 @@ import {
 import {
   parseGitHubRunSource,
   repositorySourceForRun,
+  sourceIdentity,
   type GitHubRunSource,
   type RepositorySource,
 } from "./repository-source.ts";
@@ -28,6 +29,7 @@ import { createRunnerAdapter } from "./runner-adapter.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
 import type { HostCapability, RunLifecycleState } from "./runner.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
+import type { SourceIdentity, SourceResult } from "./source.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -271,6 +273,29 @@ export class RunwayRunnerBinding
 
   async restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>> {
     return await this.#snapshots().restore(runId, snapshot);
+  }
+
+  async source(): Promise<SourceIdentity> {
+    return sourceIdentity(this.ctx.props.repository);
+  }
+
+  async prepareSource(request: {
+    readonly runId: string;
+    readonly source: SourceIdentity;
+    readonly secrets: Readonly<Record<string, string>>;
+  }): Promise<SourceResult> {
+    const expected = sourceIdentity(this.ctx.props.repository);
+    if (
+      request.source.repositoryId !== expected.repositoryId ||
+      request.source.remote !== expected.remote ||
+      request.source.revision !== expected.revision
+    ) {
+      throw new Error("source preparation does not match the bound repository");
+    }
+    return await this.#adapter().prepare({
+      runId: request.runId,
+      secrets: this.#snapshotValues(request.secrets),
+    });
   }
 
   async exec(

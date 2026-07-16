@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import type { SourceIdentity } from "./source.ts";
 import type { GitHubRepository } from "./types.ts";
 
 interface PublicRepositoryAuthentication {
@@ -153,6 +154,18 @@ export const parseRepositorySource = (value: unknown): RepositorySource => {
     };
   }
   throw new Error("invalid repository source");
+};
+
+export const sourceIdentity = (repository: RepositorySource): SourceIdentity => {
+  const parsed = parseRepositorySource(repository);
+  return {
+    repositoryId:
+      parsed.authentication.type === "github"
+        ? `github:${parsed.authentication.repository.id}`
+        : `remote:${parsed.remote}`,
+    remote: parsed.remote,
+    revision: parsed.commit,
+  };
 };
 
 export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {

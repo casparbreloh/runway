@@ -3,6 +3,7 @@ export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
 import { createDynamicWorkflow } from "../src/host-runtime.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
+import type { SourceIdentity, SourceResult } from "../src/source.ts";
 
 interface RepositoryProbeProps {
   readonly repository: RepositorySource;
@@ -24,6 +25,23 @@ export class RunwayRunnerBinding extends WorkerEntrypoint<Cloudflare.Env, Reposi
 
   async restoreSecrets(): Promise<Readonly<Record<string, string>>> {
     return this.#values();
+  }
+
+  async source(): Promise<SourceIdentity> {
+    const repository = this.ctx.props.repository;
+    return {
+      repositoryId:
+        repository.authentication.type === "github"
+          ? `github:${repository.authentication.repository.id}`
+          : `remote:${repository.remote}`,
+      remote: repository.remote,
+      revision: repository.commit,
+    };
+  }
+
+  async prepareSource(): Promise<SourceResult> {
+    const source = await this.source();
+    return { revision: source.revision, state: "prepared", bytes: 0 };
   }
 
   async exec(): Promise<never> {

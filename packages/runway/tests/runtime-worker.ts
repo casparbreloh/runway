@@ -5,6 +5,8 @@ import type { ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
 import { createRouter } from "../src/router.ts";
+import type { SourceIdentity, SourceResult } from "../src/source.ts";
+import { repositoryFixture } from "./repository-fixture.ts";
 
 let githubEffectEvents: string[] = [];
 
@@ -329,6 +331,7 @@ interface RunnerRequest {
   step: { id: string; count: number; attempt: number };
   options: NormalizedExecOptions;
   secrets: ReadonlyArray<string>;
+  source: SourceResult;
 }
 
 const runnerState = {
@@ -344,6 +347,7 @@ const runnerState = {
 let runtimeLifecycleEvents: string[] = [];
 const activeExecutions = new Map<string, () => void>();
 const runnerWorkspaces = new Map<string, string>();
+let sourcePreparations: unknown[] = [];
 const secretSnapshots = new Map<string, Readonly<Record<string, string>>>();
 let destroyAttempts = 0;
 let failNextDestroy = false;
@@ -354,6 +358,27 @@ let failNextSecretRestore = false;
 let failNextSecretValidation = false;
 
 export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
+  source(): SourceIdentity {
+    return {
+      repositoryId: `remote:${repositoryFixture.remote}`,
+      remote: repositoryFixture.remote,
+      revision: repositoryFixture.commit,
+    };
+  }
+
+  prepareSource(request: {
+    runId: string;
+    source: SourceIdentity;
+    secrets: Readonly<Record<string, string>>;
+  }): SourceResult {
+    sourcePreparations.push(structuredClone(request));
+    const expected = this.source();
+    if (JSON.stringify(request.source) !== JSON.stringify(expected)) {
+      throw new Error("unexpected source");
+    }
+    return { revision: expected.revision, state: "prepared", bytes: 0 };
+  }
+
   async exec(request: RunnerRequest): Promise<ExecResult> {
     const { runId, step, options, secrets } = request;
     runnerState.executions.push({ runId, step, options, secrets });
@@ -430,9 +455,14 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     runnerState.kills = [];
     activeExecutions.clear();
     runnerWorkspaces.clear();
+    sourcePreparations = [];
     destroyAttempts = 0;
     failNextDestroy = false;
     runtimeLifecycleEvents = [];
+  }
+
+  sourceState(): unknown[] {
+    return sourcePreparations;
   }
 
   failDestroyOnce(): void {
@@ -477,6 +507,18 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     const secrets = secretSnapshots.get(`${runId}:${snapshot}`);
     if (!secrets) throw new Error("invalid secret snapshot");
     return secrets;
+  }
+
+  async source(): Promise<SourceIdentity> {
+    return await this.env.RUNWAY_TEST_RUNNER.source();
+  }
+
+  async prepareSource(request: {
+    runId: string;
+    source: SourceIdentity;
+    secrets: Readonly<Record<string, string>>;
+  }): Promise<SourceResult> {
+    return await this.env.RUNWAY_TEST_RUNNER.prepareSource(request);
   }
 
   async exec(

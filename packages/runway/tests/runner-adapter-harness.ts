@@ -101,6 +101,13 @@ class TestSandbox {
 
   async readFile(path: string): Promise<{ success: boolean; content: string }> {
     const content = this.files.get(path);
+    if (
+      content === undefined &&
+      path === "/tmp/runway-repository-metrics" &&
+      this.files.has(repositoryMarker)
+    ) {
+      return { success: true, content: JSON.stringify({ packBytes: 0 }) };
+    }
     return content === undefined ? { success: false, content: "" } : { success: true, content };
   }
 
@@ -137,6 +144,14 @@ const requestOf = (
   secrets: options.secrets ?? [],
 });
 
+const execute = async (
+  adapter: ReturnType<typeof createRunnerAdapter>,
+  request: ReturnType<typeof requestOf>,
+) => {
+  const prepared = await adapter.prepare({ runId: request.runId, secrets: request.secrets });
+  return await adapter.exec({ ...request, source: prepared });
+};
+
 const adapterOf = (
   sandbox: TestSandbox,
   log: (chunk: string) => void = () => {},
@@ -154,6 +169,29 @@ const adapterOf = (
 };
 
 export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
+  async sourceBytes(): Promise<unknown> {
+    const sandbox = new TestSandbox({
+      startProcess: async (command, options, current) => {
+        current.files.set(repositoryMarker, JSON.stringify(repository));
+        current.files.set(repositoryHead, repository.commit);
+        current.files.set("/tmp/runway-repository-metrics", JSON.stringify({ packBytes: 456 }));
+        return {
+          id: options.processId,
+          command,
+          status: "completed",
+          startTime: new Date(),
+          exitCode: 0,
+        };
+      },
+      streamProcessLogs: async () => processStream([{ type: "exit", exitCode: 0 }]),
+    });
+    return await createRunnerAdapter({
+      sandbox: async () => sandbox,
+      repository,
+      log: () => {},
+    }).prepare({ runId: "run-source-bytes", secrets: [] });
+  }
+
   async authenticatedRepositoryReconnect(): Promise<unknown> {
     const token = "github-token-original-process";
     const logs: string[] = [];
@@ -199,8 +237,9 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       log: ({ chunk }) => logs.push(chunk),
     });
 
-    await adapter.exec(requestOf("first", { runId: "run-private-reconnect" })).catch(() => {});
-    const result = await adapter.exec(
+    await execute(adapter, requestOf("first", { runId: "run-private-reconnect" })).catch(() => {});
+    const result = await execute(
+      adapter,
       requestOf("second", { runId: "run-private-reconnect", attempt: 2 }),
     );
     return {
@@ -286,8 +325,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     });
 
     await Promise.all([
-      adapter.exec(requestOf("first", { runId: "run-private-concurrent", stepId: "first" })),
-      adapter.exec(requestOf("second", { runId: "run-private-concurrent", stepId: "second" })),
+      execute(adapter, requestOf("first", { runId: "run-private-concurrent", stepId: "first" })),
+      execute(adapter, requestOf("second", { runId: "run-private-concurrent", stepId: "second" })),
     ]);
     return {
       tokenMints,
@@ -319,6 +358,7 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
               commit: authenticatedRepositoryFixture.commit,
               generation: checkoutRuns,
               authenticationTokenMinted: options.env.RUNWAY_AUTHENTICATION_TOKEN_MINTED === "true",
+              packBytes: 123,
             }),
           );
           current.files.set("/tmp/runway-checkout-generation", String(checkoutRuns));
@@ -366,10 +406,10 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       log: ({ chunk }) => logs.push(chunk),
     });
 
-    await adapter.exec(requestOf("first", { runId: "run-private", stepId: "first" }));
-    await adapter.exec(requestOf("second", { runId: "run-private", stepId: "second" }));
+    await execute(adapter, requestOf("first", { runId: "run-private", stepId: "first" }));
+    await execute(adapter, requestOf("second", { runId: "run-private", stepId: "second" }));
     sandbox.replace();
-    await adapter.exec(requestOf("third", { runId: "run-private", stepId: "third" }));
+    await execute(adapter, requestOf("third", { runId: "run-private", stepId: "third" }));
 
     const serializedBoundary = JSON.stringify({
       commands: sandbox.commands,
@@ -419,12 +459,15 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       getProcess: async () => null,
     });
     try {
-      await createRunnerAdapter({
-        sandbox: async () => sandbox,
-        repository: authenticatedRepositoryFixture,
-        installationToken: async () => token,
-        log: () => {},
-      }).exec(requestOf("private", { runId: "run-private-failure" }));
+      await execute(
+        createRunnerAdapter({
+          sandbox: async () => sandbox,
+          repository: authenticatedRepositoryFixture,
+          installationToken: async () => token,
+          log: () => {},
+        }),
+        requestOf("private", { runId: "run-private-failure" }),
+      );
       return null;
     } catch (error) {
       return {
@@ -481,8 +524,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     const adapter = adapterOf(sandbox, () => {}, false);
 
     await Promise.all([
-      adapter.exec(requestOf("first", { runId: "run-concurrent", stepId: "first" })),
-      adapter.exec(requestOf("second", { runId: "run-concurrent", stepId: "second" })),
+      execute(adapter, requestOf("first", { runId: "run-concurrent", stepId: "first" })),
+      execute(adapter, requestOf("second", { runId: "run-concurrent", stepId: "second" })),
     ]);
 
     return { checkoutRuns, commandRuns };
@@ -517,10 +560,10 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     });
     const adapter = adapterOf(sandbox, () => {}, false);
 
-    await adapter.exec(requestOf("first", { runId: "run-repository", stepId: "first" }));
-    await adapter.exec(requestOf("second", { runId: "run-repository", stepId: "second" }));
+    await execute(adapter, requestOf("first", { runId: "run-repository", stepId: "first" }));
+    await execute(adapter, requestOf("second", { runId: "run-repository", stepId: "second" }));
     sandbox.replace();
-    await adapter.exec(requestOf("third", { runId: "run-repository", stepId: "third" }));
+    await execute(adapter, requestOf("third", { runId: "run-repository", stepId: "third" }));
 
     return {
       checkoutRuns,
@@ -552,8 +595,11 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       },
     });
     const adapter = adapterOf(sandbox);
-    await adapter.exec(requestOf("pnpm test", { runId: "run-retry" })).catch(() => undefined);
-    const result = await adapter.exec(requestOf("pnpm test", { runId: "run-retry", attempt: 2 }));
+    await execute(adapter, requestOf("pnpm test", { runId: "run-retry" })).catch(() => undefined);
+    const result = await execute(
+      adapter,
+      requestOf("pnpm test", { runId: "run-retry", attempt: 2 }),
+    );
     return { result, starts: sandbox.starts, streams: sandbox.streams };
   }
 
@@ -581,7 +627,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
         });
       },
     });
-    const result = await adapterOf(sandbox, (chunk) => logs.push(chunk)).exec(
+    const result = await execute(
+      adapterOf(sandbox, (chunk) => logs.push(chunk)),
       requestOf("large", { runId: "run-stream", stepId: "large-output", secrets: [secret] }),
     );
     const allLogs = logs.join("");
@@ -612,14 +659,17 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
       sandbox.files.set(repositoryMarker, JSON.stringify(repository));
       sandbox.files.set(repositoryHead, repository.commit);
       try {
-        await createRunnerAdapter({
-          sandbox: async () => {
-            if (stage === "sandbox") throw new Error(`sandbox exposed ${secret}`);
-            return sandbox;
-          },
-          repository,
-          log: () => {},
-        }).exec(requestOf(`echo ${secret}`, { runId: "run-error", secrets: [secret] }));
+        await execute(
+          createRunnerAdapter({
+            sandbox: async () => {
+              if (stage === "sandbox") throw new Error(`sandbox exposed ${secret}`);
+              return sandbox;
+            },
+            repository,
+            log: () => {},
+          }),
+          requestOf(`echo ${secret}`, { runId: "run-error", secrets: [secret] }),
+        );
       } catch (error) {
         errors.push(
           error instanceof Error
@@ -651,7 +701,8 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
           : processStream([{ type: "exit", data: "", exitCode: 0 }]),
     });
     try {
-      await adapterOf(sandbox).exec(
+      await execute(
+        adapterOf(sandbox),
         requestOf("sleep forever", { runId: "run-timeout", stepId: "timeout", timeoutMs: 5 }),
       );
       return null;
@@ -685,13 +736,14 @@ export class RunnerAdapterHarness extends WorkerEntrypoint<Cloudflare.Env> {
     });
     sandbox.files.set(repositoryMarker, JSON.stringify(repository));
     sandbox.files.set(repositoryHead, repository.commit);
-    const result = await createRunnerAdapter({
-      sandbox: async () => sandbox,
-      repository,
-      log: () => {},
-      status: async () => ({ status: "terminated" }),
-      waitUntil: (promise) => (watcher = promise),
-    }).exec(
+    const result = await execute(
+      createRunnerAdapter({
+        sandbox: async () => sandbox,
+        repository,
+        log: () => {},
+        status: async () => ({ status: "terminated" }),
+        waitUntil: (promise) => (watcher = promise),
+      }),
       requestOf("block", {
         runId: "run-terminated",
         stepId: "block",

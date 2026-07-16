@@ -4,6 +4,7 @@ import type { GitHubRepositoryAuthentication, RepositorySource } from "./reposit
 import type { ExecResult } from "./run.ts";
 import type { RunnerBridge } from "./runner.ts";
 import { redactError, StreamingRedactor } from "./secret-redaction.ts";
+import type { SourceResult } from "./source.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
@@ -15,7 +16,7 @@ const REPOSITORY_ASKPASS = "/tmp/runway-git-askpass";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-type RunnerRequest = Parameters<RunnerBridge["exec"]>[0];
+type RunnerRequest = Omit<Parameters<RunnerBridge["exec"]>[0], "source">;
 interface SandboxProcess {
   readonly id: string;
   readonly command: string;
@@ -289,21 +290,41 @@ const checkoutGeneration = async (sandbox: RunnerSandbox): Promise<number> => {
   return Number(stored.content);
 };
 
+const checkoutBytes = async (sandbox: RunnerSandbox): Promise<number> => {
+  const stored = await sandbox.readFile(REPOSITORY_METRICS);
+  if (!stored.success) throw new Error("repository checkout metrics are invalid");
+  let metrics: unknown;
+  try {
+    metrics = JSON.parse(stored.content);
+  } catch {
+    throw new Error("repository checkout metrics are invalid");
+  }
+  const bytes =
+    metrics && typeof metrics === "object" && !Array.isArray(metrics)
+      ? (metrics as Record<string, unknown>).packBytes
+      : undefined;
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new Error("repository checkout metrics are invalid");
+  }
+  return bytes;
+};
+
 const prepareRepository = async (
   sandbox: RunnerSandbox,
   request: RunnerRequest,
   repository: RepositorySource,
   installationToken: RunnerAdapterOptions["installationToken"],
   log: RunnerAdapterOptions["log"],
-): Promise<void> => {
+): Promise<SourceResult> => {
   const prepareStartedAtMs = Date.now();
   const marker = await sandbox.exists(REPOSITORY_MARKER);
   const sandboxReadyAtMs = Date.now();
   if (marker.exists) {
     const stored = await sandbox.readFile(REPOSITORY_MARKER);
     const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
-    if (stored.success && stored.content === repositoryMarker(repository) && checkout.exists)
-      return;
+    if (stored.success && stored.content === repositoryMarker(repository) && checkout.exists) {
+      return { revision: repository.commit, state: "reused", bytes: 0 };
+    }
   }
   const checkoutRequest: RunnerRequest = {
     ...request,
@@ -380,6 +401,14 @@ const prepareRepository = async (
       await sandbox.destroy();
       throw new Error("repository checkout did not prepare the expected source");
     }
+    let bytes: number;
+    try {
+      bytes = await checkoutBytes(sandbox);
+    } catch (error) {
+      await sandbox.destroy();
+      throw error;
+    }
+    return { revision: repository.commit, state: "prepared", bytes };
   } catch (error) {
     if (recoveredAuthenticatedCheckout) throw new Error("repository checkout recovery failed");
     throw redactError(error, redactedCheckoutRequest.secrets);
@@ -388,8 +417,28 @@ const prepareRepository = async (
   }
 };
 
-export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge => ({
-  async exec(request) {
+export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge => {
+  const prepare = async (request: Parameters<RunnerBridge["prepare"]>[0]) => {
+    try {
+      const runnerId = await hashId("runway", [request.runId]);
+      const sandbox = await options.sandbox(runnerId);
+      return await prepareRepository(
+        sandbox,
+        {
+          runId: request.runId,
+          step: { id: "runway:checkout", count: 1, attempt: 1 },
+          options: { command: "true", cwd: "/", env: { CI: "true" }, timeoutMs: 1 },
+          secrets: request.secrets,
+        },
+        options.repository,
+        options.installationToken,
+        options.log,
+      );
+    } catch (error) {
+      throw redactError(error, request.secrets);
+    }
+  };
+  const exec = async (request: Parameters<RunnerBridge["exec"]>[0]): Promise<ExecResult> => {
     let completed = false;
     let finish = (): void => {};
     const untilCompleted = new Promise<void>((resolve) => (finish = resolve));
@@ -398,13 +447,9 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
       const processId = await hashId("step", [request.runId, request.step.id, request.step.count]);
       const command = managedCommand(request.options.command);
       const sandbox = await options.sandbox(runnerId);
-      await prepareRepository(
-        sandbox,
-        request,
-        options.repository,
-        options.installationToken,
-        options.log,
-      );
+      if (request.source.revision !== options.repository.commit) {
+        throw new Error("command source does not match the exact repository revision");
+      }
       let process = await sandbox.getProcess(processId);
       if (!process) {
         try {
@@ -459,8 +504,8 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
       completed = true;
       finish();
     }
-  },
-  async destroy(runId, secrets) {
+  };
+  const destroy = async (runId: string, secrets: ReadonlyArray<string>): Promise<void> => {
     try {
       const sandbox = await options.sandbox(await hashId("runway", [runId]));
       try {
@@ -471,5 +516,10 @@ export const createRunnerAdapter = (options: RunnerAdapterOptions): RunnerBridge
     } catch (error) {
       throw redactError(error, secrets);
     }
-  },
-});
+  };
+  return {
+    prepare,
+    exec,
+    destroy,
+  };
+};

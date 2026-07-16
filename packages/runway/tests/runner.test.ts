@@ -82,6 +82,28 @@ test("exec supports shorthand, options, defaults, and declared-secret redaction 
   }
 });
 
+test("the Workflow host prepares only its exact credential-free source capability", async () => {
+  const introspector = await introspectWorkflow(env.RUNNER);
+  try {
+    await env.RUNNER.create({ params: { commands: ["git rev-parse HEAD"] } });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+
+    using sourceStateResult = disposable(testRunner.sourceState());
+    const requests = (await sourceStateResult) as Array<Record<string, unknown>>;
+    expect(requests).toHaveLength(1);
+    expect(Object.keys(requests[0]!).sort()).toEqual(["runId", "secrets", "source"]);
+    expect(requests[0]!.source).toEqual({
+      repositoryId: `remote:${repositoryFixture.remote}`,
+      remote: repositoryFixture.remote,
+      revision: repositoryFixture.commit,
+    });
+    expect(JSON.stringify(requests)).not.toMatch(/credential|token|password|authorization/i);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
 test("a retried command reconnects to its deterministic process without starting a duplicate", async () => {
   using result = disposable(adapterHarness.retry());
   await expect(result).resolves.toEqual({
@@ -100,6 +122,15 @@ test("repository commands prepare once and reconstruct after Sandbox replacement
     authenticationTokenMintEvidence: ["false", "false"],
     commitsSeen: [repositoryFixture.commit, repositoryFixture.commit, repositoryFixture.commit],
     repositoryFiles: ["/workspace/.git/HEAD"],
+  });
+});
+
+test("source preparation reports validated transferred pack bytes", async () => {
+  using result = disposable(adapterHarness.sourceBytes());
+  await expect(result).resolves.toEqual({
+    revision: repositoryFixture.commit,
+    state: "prepared",
+    bytes: 456,
   });
 });
 

@@ -4,9 +4,11 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
 import type { RunOperations } from "./run.ts";
-import { ManagedRunner } from "./runner.ts";
 import type { HostCapability } from "./runner.ts";
 import type { RunLifecycleState } from "./runner.ts";
+import { Sandbox } from "./sandbox.ts";
+import { source } from "./source.ts";
+import type { SourceIdentity } from "./source.ts";
 import type { WorkflowDefinition } from "./types.ts";
 import { HOST_CAPABILITY_BINDING } from "./worker-contract.ts";
 
@@ -34,21 +36,51 @@ const makeRunRuntime = (
   host: HostCapability,
   runId: string,
   secrets: Readonly<Record<string, string>>,
+  identity: SourceIdentity,
 ): RunRuntime => {
-  const runner = new ManagedRunner(host, runId, secrets);
+  const exactSource = source(identity, {
+    prepare: async (requested) => await host.prepareSource({ runId, source: requested, secrets }),
+  });
+  const sandbox = new Sandbox({
+    runId,
+    secrets,
+    source: exactSource,
+    placement: {
+      exec: async ({ step: durableStep, source: prepared, command, secrets: _secrets, ...rest }) =>
+        await host.exec({
+          ...rest,
+          step: durableStep,
+          source: prepared,
+          options: command,
+          secrets,
+        }),
+      destroy: async () => await host.destroy(runId, secrets),
+    },
+  });
   return {
     operations: {
       do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
         step.do(id, fn as () => Promise<never>) as Promise<T>,
       exec: (id, command) =>
-        runner.exec(id, command, (callback) =>
-          step.do(id, async (ctx) => await callback(ctx), {
-            rollback: () => runner.cleanup(),
-          }),
+        sandbox.exec(
+          {
+            id,
+            run: async (work, rollback) =>
+              await step.do(
+                id,
+                async (ctx) =>
+                  await work({
+                    count: ctx.step.count,
+                    attempt: ctx.attempt,
+                  }),
+                { rollback },
+              ),
+          },
+          command,
         ),
       sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
     },
-    cleanup: () => runner.cleanup(),
+    cleanup: () => sandbox.cleanup(),
   };
 };
 
@@ -80,7 +112,7 @@ export const toEntrypoint = (
         await reportLifecycle("failure");
         throw error;
       }
-      const runtime = makeRunRuntime(step, host, event.instanceId, secrets);
+      const runtime = makeRunRuntime(step, host, event.instanceId, secrets, await host.source());
       let result: unknown;
       let failed = false;
       let failure: unknown;

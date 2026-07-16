@@ -7,6 +7,7 @@ export default defineConfig({
       "tests/cli.test.ts",
       "tests/deploy.test.ts",
       "tests/github.test.ts",
+      "tests/sandbox.test.ts",
       "tests/workflow.test.ts",
     ],
     testTimeout: 20_000,
