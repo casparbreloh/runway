@@ -13,7 +13,7 @@ export default workflow({
 }).handler(async (ctx) => {
   await ctx.step.exec(
     "setup-node",
-    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends libatomic1 && npm install --global n && n 26.5.0",
+    "curl -fsSL https://security.ubuntu.com/ubuntu/pool/main/g/gcc-12/libatomic1_12.3.0-1ubuntu1~22.04.3_amd64.deb -o /tmp/libatomic1.deb && echo '56573c81b5dd84817882400cfea49fe671f5e6cfdd0f88b5d3a894c08b150462  /tmp/libatomic1.deb' | sha256sum --check --status && rm -rf /tmp/runway-libatomic && mkdir /tmp/runway-libatomic && dpkg-deb --extract /tmp/libatomic1.deb /tmp/runway-libatomic && cp -a /tmp/runway-libatomic/usr/lib/x86_64-linux-gnu/libatomic.so.1* /usr/local/lib/ && ldconfig && npm install --global n && n 26.5.0",
   );
   await ctx.step.exec("setup-pnpm", "npm install --global pnpm@11.5.0");
   await ctx.step.exec("toolchain", "node --version && npm --version && pnpm --version");
