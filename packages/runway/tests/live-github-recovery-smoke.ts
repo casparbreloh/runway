@@ -92,7 +92,7 @@ const smokeDefinition = workflow({
       secret: ctx.secrets.HOOK_SECRET,
       signatureHeader: SIGNATURE_HEADER,
     }),
-}).handler(async () => {});
+}).run(async () => {});
 
 const registry = (cwd: string): Registry => [
   {
@@ -139,36 +139,36 @@ export default workflow({
     secret: ctx.secrets.HOOK_SECRET,
     signatureHeader: ${JSON.stringify(SIGNATURE_HEADER)},
   }),
-}).handler(async (ctx, event) => {
-  const cold = observe((await ctx.step.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("cold-report", () => cold);
-  await ctx.step.do("force-destroy", async () => {
+}).run(async (run, event) => {
+  const cold = observe((await run.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
+  await run.do("cold-report", () => cold);
+  await run.do("force-destroy", async () => {
     const response = await fetch(event.destroyUrl, {
       method: "POST",
       headers: {
-        authorization: \`Bearer \${ctx.secrets.DRIVER_TOKEN}\`,
+        authorization: \`Bearer \${run.secrets.DRIVER_TOKEN}\`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ runId: ctx.runId }),
+      body: JSON.stringify({ runId: run.runId }),
     });
     if (!response.ok) throw new Error(\`destroy driver returned \${response.status}\`);
     return await response.json();
   });
-  const recovered = observe((await ctx.step.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reused = observe((await ctx.step.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  const replacementPlacement = await ctx.step.do("replacement-placement", async () => {
+  const recovered = observe((await run.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
+  const reused = observe((await run.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
+  const replacementPlacement = await run.do("replacement-placement", async () => {
     const response = await fetch(event.destroyUrl, {
       method: "POST",
       headers: {
-        authorization: \`Bearer \${ctx.secrets.DRIVER_TOKEN}\`,
+        authorization: \`Bearer \${run.secrets.DRIVER_TOKEN}\`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ runId: ctx.runId, action: "placement" }),
+      body: JSON.stringify({ runId: run.runId, action: "placement" }),
     });
     if (!response.ok) throw new Error(\`placement driver returned \${response.status}\`);
     return await response.json();
   });
-  await ctx.step.do("recovery-report", () => ({ recovered, reused, replacementPlacement }));
+  await run.do("recovery-report", () => ({ recovered, reused, replacementPlacement }));
 });
 `;
 

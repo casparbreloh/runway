@@ -29,12 +29,12 @@ const registry: Registry = [
           secret: tctx.secrets.LINEAR_WEBHOOK_SECRET,
           signatureHeader: "linear-signature",
         }),
-    }).handler(async () => {}),
+    }).run(async () => {}),
   },
   {
     path: ".runway/workflows/daily.ts",
     exportName: "daily",
-    def: workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(async () => {}),
+    def: workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).run(async () => {}),
   },
 ];
 
@@ -45,12 +45,12 @@ const githubRegistry: Registry = [
     def: workflow({
       id: "check",
       trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
-    }).handler(async () => {}),
+    }).run(async () => {}),
   },
 ];
 
 const moduleOf = (name: string, def: WorkflowDefinition): string =>
-  `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
+  `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, run: undefined })}, run: async () => {} };\n`;
 
 const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
   const cwd = await mkdtemp(
@@ -439,7 +439,7 @@ test("deploy rejects authored secrets that collide with reserved GitHub bindings
         id: "collision",
         secrets: ["RUNWAY_GITHUB_APP_ID"],
         trigger: () => cron("0 9 * * *"),
-      }).handler(async () => {}),
+      }).run(async () => {}),
     },
   ];
   try {
@@ -818,8 +818,8 @@ test("deploy keeps artifact versions stable until workflow code changes", async 
     await writeFile(
       path.join(project.cwd, hello.path),
       moduleOf(hello.exportName, hello.def).replace(
-        "handler: async () => {}",
-        'handler: async () => { return "changed"; }',
+        "run: async () => {}",
+        'run: async () => { return "changed"; }',
       ),
     );
     await deployReady(changed, {

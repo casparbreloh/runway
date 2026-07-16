@@ -51,7 +51,7 @@ export const ${id.replaceAll("-", "_")} = workflow({
   id: ${JSON.stringify(id)},
   secrets: ${JSON.stringify(secrets)},
   trigger: () => cron("* * * * *"),
-}).handler(async () => {});
+}).run(async () => {});
 `;
 
 const defaultWorkflow = (
@@ -63,7 +63,7 @@ export default workflow({
   id: ${JSON.stringify(id)},
   secrets: ${JSON.stringify(secrets)},
   trigger: () => cron("* * * * *"),
-}).handler(async () => {});
+}).run(async () => {});
 `;
 
 test("deploy reports missing required env vars before upload", async () => {
@@ -100,7 +100,7 @@ test("deploy discovers a GitHub-triggered workflow", async () => {
 export default workflow({
   id: "check",
   trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
-}).handler(async () => {});
+}).run(async () => {});
 `,
   });
 

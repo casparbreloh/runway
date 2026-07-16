@@ -52,7 +52,7 @@ const smokeDefinition = workflow({
       secret: ctx.secrets.HOOK_SECRET,
       signatureHeader: "x-smoke-signature",
     }),
-}).handler(async () => {});
+}).run(async () => {});
 
 const registry = (cwd: string): Registry => [
   {
@@ -85,19 +85,19 @@ export default workflow({
     secret: ctx.secrets.HOOK_SECRET,
     signatureHeader: "x-smoke-signature",
   }),
-}).handler(async (ctx, event) => {
-  await ctx.step.do("version-before", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)}, scriptName: ${JSON.stringify(scriptName)} }));
-  if (event.sleepMs > 0) await ctx.step.sleep("hold-v1", event.sleepMs);
-  await ctx.step.do("version-after", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)} }));
-  const actualSecretHash = await hash(ctx.secrets.SMOKE_SECRET);
-  await ctx.step.do("secret-state", () => ({
+}).run(async (run, event) => {
+  await run.do("version-before", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)}, scriptName: ${JSON.stringify(scriptName)} }));
+  if (event.sleepMs > 0) await run.sleep("hold-v1", event.sleepMs);
+  await run.do("version-after", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)} }));
+  const actualSecretHash = await hash(run.secrets.SMOKE_SECRET);
+  await run.do("secret-state", () => ({
     matchesExpected: actualSecretHash === event.expectedSecretHash,
     matchesRejected: actualSecretHash === event.rejectedSecretHash,
   }));
   if (event.printSecret) {
-    await ctx.step.exec("secret-output", {
+    await run.exec("secret-output", {
       command: ${JSON.stringify(`printf '%s\\n' "$RUNWAY_SMOKE_SECRET"`)},
-      env: { RUNWAY_SMOKE_SECRET: ctx.secrets.SMOKE_SECRET },
+      env: { RUNWAY_SMOKE_SECRET: run.secrets.SMOKE_SECRET },
     });
   }
 });

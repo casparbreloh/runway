@@ -2,12 +2,12 @@
 
 TypeScript-first general workflow infrastructure for custom triggers, scheduled work, webhooks, and
 repository automation on Cloudflare. Author workflows with
-`workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })` and export them from
+`workflow({ id, secrets?, trigger }).run(async (run, event) => { ... })` and export them from
 `.runway/workflows/**/*.ts`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox stays internally behind the
 runner. Runway will transport caches for tools such as Turborepo and Nx rather than build its
-own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents are deferred.
+own dependency graph. A future `run.ai()` may use Cloudflare AI Gateway. Agents are deferred.
 
 ## Layout
 
@@ -16,7 +16,7 @@ own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents
   - `src/secrets.ts` — secret references.
   - `src/workflow.ts` — `workflow()`.
   - `src/trigger.ts` — webhook and cron triggers.
-  - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
+  - `src/run.ts` — public `Run`, command contracts, and durable operation wiring.
   - `src/runner.ts` — internal managed command runner.
   - `src/runtime.ts` — workflow artifact runtime adapter.
   - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runner capability.
@@ -49,21 +49,21 @@ export default workflow({
         { type: "pull_request", actions: ["opened", "reopened", "synchronize"] },
       ],
     }),
-}).handler(async (ctx) => {
-  await ctx.step.exec("install", "pnpm install --frozen-lockfile");
-  await ctx.step.exec("typecheck", "pnpm typecheck");
+}).run(async (run) => {
+  await run.exec("install", "pnpm install --frozen-lockfile");
+  await run.exec("typecheck", "pnpm typecheck");
 });
 ```
 
 - Trigger is required and lives in the `workflow()` object.
-- Handler receives `(ctx, event)`. There is no `ctx.params`.
-- `ctx` is `{ runId, secrets, env, step: { do, exec, sleep } }`.
-- Wrap HTTP and API calls in named `step.do()` calls.
-- Use `step.exec(id, command)` for managed shell commands; options can set `cwd`, `env`, and
+- The callback receives `(run, event)`.
+- `run` is `{ runId, secrets, do, exec, sleep }`.
+- Wrap HTTP and API calls in named `run.do()` calls.
+- Use `run.exec(id, command)` for managed shell commands; options can set `cwd`, `env`, and
   `timeoutMs`.
-- Step return values must be JSON-serializable and step bodies idempotent.
+- Durable operation return values must be JSON-serializable and operation bodies idempotent.
 - Every sleep has a caller-provided stable id.
-- Caller-provided step ids must not begin with the reserved `runway:` prefix.
+- Caller-provided operation ids are 1–128 UTF-8 bytes and must not begin with `runway:`.
 
 ## Triggers And Secrets
 
@@ -74,16 +74,15 @@ export default workflow({
 - `github({ checkName, events })` types normalized push and pull-request events and keeps App
   signatures, installation IDs, credentials, and Checks internal.
 - Declare every workflow secret, including webhook signing secrets.
-- Trigger secrets are branded name references; handler secrets are runtime strings.
+- Trigger secrets are branded name references; run secrets are runtime strings.
 - Deploy fails before upload when a declared secret is missing from env and the repo Worker.
 - GitHub App bindings are `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and
   `RUNWAY_GITHUB_WEBHOOK_SECRET`; they are internal and must not appear in workflow secrets.
 
 ## Runtime And Deployment
 
-- Runway maps `ctx.step.do(id, fn)` to Cloudflare `step.do(id, fn)` and
-  `ctx.step.exec(id, command)` to a durable, run-scoped managed command step, and
-  `ctx.step.sleep(id, ms)` to `step.sleep(id, ms)`.
+- Runway maps `run.do(id, fn)` to Cloudflare `step.do(id, fn)`, `run.exec(id, command)` to a durable,
+  run-scoped managed command step, and `run.sleep(id, ms)` to `step.sleep(id, ms)`.
 - Command steps use deterministic process identities. Workflow retries reconnect to an existing
   running or completed process while the same Sandbox survives instead of starting it again.
 - Output is streamed incrementally and only redacted 64 KiB stdout/stderr tails are returned.

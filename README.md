@@ -1,13 +1,13 @@
 # Runway
 
 Runway is a TypeScript-first, general workflow framework on Cloudflare. Author workflows with
-`workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })`, export them from
+`workflow({ id, secrets?, trigger }).run(async (run, event) => { ... })`, export them from
 `.runway/workflows/**/*.ts`, and deploy them with `runway deploy`.
 
 Repository execution and managed CI/CD are the first major use case. Runway executes commands in a
 managed, run-scoped workspace and will transport caches for tools such as Turborepo and Nx rather
 than build its own dependency graph. Cloudflare Sandbox remains an internal runner implementation
-detail; agents are deferred. A future `step.ai()` may use Cloudflare AI Gateway.
+detail; agents are deferred. A future `run.ai()` may use Cloudflare AI Gateway.
 
 For product direction and non-goals, see [`.docs/VISION.md`](.docs/VISION.md).
 
@@ -20,37 +20,34 @@ import { cron, workflow } from "runway";
 export default workflow({
   id: "hello",
   trigger: () => cron("0 9 * * *"),
-}).handler(async (ctx, event) => {
-  const greeting = await ctx.step.do("greet", () => "hello");
-  await ctx.step.exec("runtime", "node --version");
-  await ctx.step.sleep("wait", 5000);
-  await ctx.step.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
+}).run(async (run, event) => {
+  const greeting = await run.do("greet", () => "hello");
+  await run.exec("runtime", "node --version");
+  await run.sleep("wait", 5000);
+  await run.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
 });
 ```
 
-Default exports, named exports, and barrel re-exports are supported. Handlers receive a typed
-trigger event and this context:
+Default exports, named exports, and barrel re-exports are supported. Run callbacks receive a typed
+trigger event and this interface:
 
 ```ts
-interface Ctx {
+interface Run {
   readonly runId: string;
   readonly secrets: Record<string, string>;
-  readonly env: unknown;
-  readonly step: {
-    do<T>(id: string, fn: (ctx: StepContext) => T | Promise<T>): Promise<T>;
-    exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
-    sleep(id: string, durationMs: number): Promise<void>;
-  };
+  do<T>(id: string, work: () => T | Promise<T>): Promise<T>;
+  exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
+  sleep(id: string, durationMs: number): Promise<void>;
 }
 ```
 
-Use `step.do()` for replayable work, `step.exec()` for managed commands, and `step.sleep()` for
-durable waits. Give every operation a stable, explicit id, keep step bodies idempotent, and return
+Use `run.do()` for replayable work, `run.exec()` for managed commands, and `run.sleep()` for
+durable waits. Give every operation a stable 1–128 byte id, keep operation bodies idempotent, and return
 JSON-serializable values.
 
 ```ts
-await ctx.step.exec("install", "pnpm install --frozen-lockfile");
-await ctx.step.exec("test", {
+await run.exec("install", "pnpm install --frozen-lockfile");
+await run.exec("test", {
   command: "pnpm test",
   cwd: "packages/app",
   env: { NODE_ENV: "test" },
@@ -115,7 +112,7 @@ outbox after the ingress response.
 ## Secrets
 
 Declare every workflow secret in `secrets`, including webhook signing secrets. In `trigger(ctx)`,
-`ctx.secrets.X` is a branded secret reference. In the handler it is the runtime string value.
+`ctx.secrets.X` is a branded secret reference. In the run callback it is the runtime string value.
 Deploy fails before upload when a declared secret is missing from both the environment and the repo
 Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal runner and GitHub
 bindings.
@@ -123,7 +120,7 @@ bindings.
 GitHub triggers use three internal App bindings rather than authored workflow secrets:
 `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and `RUNWAY_GITHUB_WEBHOOK_SECRET`. The private
 key may be GitHub's generated PKCS#1 PEM or a PKCS#8 PEM. These values are available to deployment
-and the managed runtime only; handlers and run-secret snapshots never receive them.
+and the managed runtime only; run callbacks and run-secret snapshots never receive them.
 
 ## Deploy Model
 

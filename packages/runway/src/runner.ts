@@ -1,6 +1,6 @@
 import { ExecError } from "./exec-error.ts";
+import type { ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
-import type { ExecOptions, ExecResult } from "./types.ts";
 
 const DEFAULT_EXEC_CWD = "/workspace";
 const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;

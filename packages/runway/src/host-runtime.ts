@@ -23,12 +23,12 @@ import {
   type GitHubRunSource,
   type RepositorySource,
 } from "./repository-source.ts";
+import type { ExecResult } from "./run.ts";
 import { createRunnerAdapter } from "./runner-adapter.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
 import type { HostCapability, RunLifecycleState } from "./runner.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
-import type { ExecResult } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   COMPATIBILITY_DATE,

@@ -1,6 +1,7 @@
+import type { Run } from "./run.ts";
 import { secretNameOf, secretRef } from "./secrets.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type { Ctx, Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger } from "./types.ts";
+import type { Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger } from "./types.ts";
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
@@ -30,7 +31,7 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
   secrets?: S;
   trigger: (ctx: TriggerContext<S[number]>) => Trigger<E>;
 }): {
-  handler(fn: (ctx: Ctx<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
+  run(fn: (run: Run<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
 } {
   validateWorkflowId(opts.id);
   validateSecrets(opts.secrets);
@@ -46,12 +47,12 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
     );
   }
   return {
-    handler: (fn) => ({
+    run: (fn) => ({
       __kind: "workflow",
       id: opts.id,
       trigger,
       secrets,
-      handler: fn as WorkflowDefinition["handler"],
+      run: fn as unknown as WorkflowDefinition["run"],
     }),
   };
 }

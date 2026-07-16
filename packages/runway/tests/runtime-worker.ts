@@ -586,26 +586,26 @@ export const issueCreated = workflow({
       issueGateEvaluations += 1;
       return event.action === "create";
     }),
-}).handler(async (ctx, event) => {
-  await ctx.step.do("run-loader-state", () => ++runLoaderExecutions);
-  await ctx.step.do("trigger-loader-state", () => issueGateEvaluations);
-  await ctx.step.do("record-issue", (step) => ({
-    stepId: step.id,
-    runId: ctx.runId,
-    apiKey: ctx.secrets.API_KEY,
-    envKeys: Object.keys(ctx.env as Record<string, unknown>).sort(),
+}).run(async (run, event) => {
+  await run.do("run-loader-state", () => ++runLoaderExecutions);
+  await run.do("trigger-loader-state", () => issueGateEvaluations);
+  await run.do("record-issue", () => ({
+    stepId: "record-issue",
+    runId: run.runId,
+    apiKey: run.secrets.API_KEY,
+    envKeys: [],
     event,
   }));
-  await ctx.step.sleep("settle", 1);
+  await run.sleep("settle", 1);
 });
 
 export const suspendedIssueCreated = workflow({
   id: "suspended-workflow",
   secrets: ["RUNNER_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx) => {
-  await ctx.step.do("artifact-version", () => "suspended");
-  await ctx.step.do("historical-secret", () => ctx.secrets.RUNNER_SECRET);
+}).run(async (run) => {
+  await run.do("artifact-version", () => "suspended");
+  await run.do("historical-secret", () => run.secrets.RUNNER_SECRET);
 });
 
 export class IssueCreatedWorkflow extends toEntrypoint(issueCreated) {}
@@ -621,18 +621,18 @@ const githubEvents = [
 export const githubCheck = workflow({
   id: "github-check",
   trigger: () => github({ checkName: "Check", events: githubEvents }),
-}).handler(async () => {});
+}).run(async () => {});
 
 export const githubTest = workflow({
   id: "github-test",
   trigger: () => github({ checkName: "Test", events: githubEvents }),
-}).handler(async () => {
+}).run(async () => {
   throw new Error("GitHub handler failure");
 });
 
-const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(
-  async (ctx, event) => {
-    await ctx.step.do("record-schedule", () => event);
+const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).run(
+  async (run, event) => {
+    await run.do("record-schedule", () => event);
   },
 );
 
@@ -650,16 +650,16 @@ const runner = workflow({
   id: "runner",
   secrets: ["RUNNER_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx, event) => {
+}).run(async (run, event) => {
   const { catchErrors, commands, pauseMs, throwAfterCommands, throwUndefinedAfterCommands } =
     event as unknown as RunnerEvent;
   runtimeLifecycleEvents.push("handler:start");
   for (const [index, command] of commands.entries()) {
     try {
-      using _result = (await ctx.step.exec(`command-${index}`, command)) as ExecResult & Disposable;
+      using _result = (await run.exec(`command-${index}`, command)) as ExecResult & Disposable;
     } catch (error) {
       if (!catchErrors) throw error;
-      await ctx.step.do("caught-error", () =>
+      await run.do("caught-error", () =>
         error instanceof ExecError && error.command.includes("leak")
           ? {
               name: error.name,
@@ -674,7 +674,7 @@ const runner = workflow({
             },
       );
     }
-    if (index === 0 && pauseMs !== undefined) await ctx.step.sleep("pause", pauseMs);
+    if (index === 0 && pauseMs !== undefined) await run.sleep("pause", pauseMs);
   }
   if (throwAfterCommands) throw new Error("handler failure");
   if (throwUndefinedAfterCommands) throw undefined;
@@ -687,10 +687,10 @@ const secretSnapshot = workflow({
   id: "secret-snapshot",
   secrets: ["RUNNER_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx) => {
-  await ctx.step.do("resolved-secret", () => ctx.secrets.RUNNER_SECRET);
-  await ctx.step.sleep("rotate-secret", 100);
-  await ctx.step.exec("snapshot-output", "snapshot-output");
+}).run(async (run) => {
+  await run.do("resolved-secret", () => run.secrets.RUNNER_SECRET);
+  await run.sleep("rotate-secret", 100);
+  await run.exec("snapshot-output", "snapshot-output");
 });
 
 export class SecretSnapshotWorkflow extends toEntrypoint(secretSnapshot) {}

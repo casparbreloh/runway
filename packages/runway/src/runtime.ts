@@ -1,12 +1,13 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-import { makeCtx, secretsOf } from "./ctx.ts";
 import { createRouter } from "./router.ts";
+import { makeRun, secretsOf } from "./run.ts";
+import type { RunOperations } from "./run.ts";
 import { ManagedRunner } from "./runner.ts";
 import type { HostCapability } from "./runner.ts";
 import type { RunLifecycleState } from "./runner.ts";
-import type { Primitives, WorkflowDefinition } from "./types.ts";
+import type { WorkflowDefinition } from "./types.ts";
 import { HOST_CAPABILITY_BINDING } from "./worker-contract.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
@@ -24,7 +25,7 @@ type DynamicWorkerEnv = Record<string, unknown> & {
 };
 
 interface RunRuntime {
-  readonly primitives: Primitives;
+  readonly operations: RunOperations;
   cleanup(): Promise<void>;
 }
 
@@ -36,18 +37,16 @@ const makeRunRuntime = (
 ): RunRuntime => {
   const runner = new ManagedRunner(host, runId, secrets);
   return {
-    primitives: {
-      step: {
-        do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-          step.do(id, fn as () => Promise<never>) as Promise<T>,
-        exec: (id, command) =>
-          runner.exec(id, command, (callback) =>
-            step.do(id, async (ctx) => await callback(ctx), {
-              rollback: () => runner.cleanup(),
-            }),
-          ),
-        sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
-      },
+    operations: {
+      do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+        step.do(id, fn as () => Promise<never>) as Promise<T>,
+      exec: (id, command) =>
+        runner.exec(id, command, (callback) =>
+          step.do(id, async (ctx) => await callback(ctx), {
+            rollback: () => runner.cleanup(),
+          }),
+        ),
+      sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
     },
     cleanup: () => runner.cleanup(),
   };
@@ -86,11 +85,10 @@ export const toEntrypoint = (
       let failed = false;
       let failure: unknown;
       try {
-        result = await def.handler(
-          makeCtx(runtime.primitives, {
+        result = await def.run(
+          makeRun(runtime.operations, {
             runId: event.instanceId,
             secrets,
-            env: {},
           }),
           event.payload,
         );

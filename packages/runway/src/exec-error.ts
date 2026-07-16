@@ -1,4 +1,4 @@
-import type { ExecResult } from "./types.ts";
+import type { ExecResult } from "./run.ts";
 
 export class ExecError extends Error {
   override readonly name = "ExecError";

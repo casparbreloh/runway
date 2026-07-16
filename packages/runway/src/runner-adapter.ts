@@ -1,9 +1,9 @@
 import { parseSSEStream } from "@cloudflare/sandbox";
 
 import type { GitHubRepositoryAuthentication, RepositorySource } from "./repository-source.ts";
+import type { ExecResult } from "./run.ts";
 import type { RunnerBridge } from "./runner.ts";
 import { redactError, StreamingRedactor } from "./secret-redaction.ts";
-import type { ExecResult } from "./types.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;

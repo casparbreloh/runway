@@ -25,7 +25,7 @@ const generatedHostRegistry: Registry = [
         secret: secretRef("HOOK_SECRET"),
         signatureHeader: "x-signature",
       }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
 ];
@@ -60,7 +60,7 @@ const githubRegistry: Registry = [
       id: "github-check",
       secrets: [],
       trigger: github({ checkName: "Check", events: githubEvents }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
   {
@@ -71,7 +71,7 @@ const githubRegistry: Registry = [
       id: "github-test",
       secrets: [],
       trigger: github({ checkName: "Test", events: githubEvents }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
 ];
@@ -87,7 +87,7 @@ const manyGithubRegistry: Registry = Array.from({ length: 40 }, (_, index) => ({
       checkName: `Batch ${index}`,
       events: [{ type: "push", branches: ["main"] }],
     }),
-    handler: async () => {},
+    run: async () => {},
   },
 }));
 

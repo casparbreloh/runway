@@ -64,7 +64,7 @@ const smokeDefinition = workflow({
       secret: ctx.secrets.HOOK_SECRET,
       signatureHeader: SIGNATURE_HEADER,
     }),
-}).handler(async () => {});
+}).run(async () => {});
 
 const registry = (cwd: string): Registry => [
   {
@@ -102,27 +102,27 @@ export default workflow({
     secret: ctx.secrets.HOOK_SECRET,
     signatureHeader: ${JSON.stringify(SIGNATURE_HEADER)},
   }),
-}).handler(async (ctx, event) => {
-  const coldStartedAtMs = await ctx.step.do("cold-started", () => Date.now());
-  const cold = observe((await ctx.step.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("cold-report", () => ({ coldStartedAtMs, cold }));
-  await ctx.step.do("force-destroy", async () => {
+}).run(async (run, event) => {
+  const coldStartedAtMs = await run.do("cold-started", () => Date.now());
+  const cold = observe((await run.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
+  await run.do("cold-report", () => ({ coldStartedAtMs, cold }));
+  await run.do("force-destroy", async () => {
     const response = await fetch(event.destroyUrl, {
       method: "POST",
       headers: {
-        authorization: \`Bearer \${ctx.secrets.DRIVER_TOKEN}\`,
+        authorization: \`Bearer \${run.secrets.DRIVER_TOKEN}\`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ runId: ctx.runId }),
+      body: JSON.stringify({ runId: run.runId }),
     });
     if (!response.ok) throw new Error(\`destroy driver returned \${response.status}\`);
     return await response.json();
   });
-  const recoveryStartedAtMs = await ctx.step.do("recovery-started", () => Date.now());
-  const recovered = observe((await ctx.step.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reusedStartedAtMs = await ctx.step.do("reused-started", () => Date.now());
-  const reused = observe((await ctx.step.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("recovery-report", () => ({
+  const recoveryStartedAtMs = await run.do("recovery-started", () => Date.now());
+  const recovered = observe((await run.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
+  const reusedStartedAtMs = await run.do("reused-started", () => Date.now());
+  const reused = observe((await run.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
+  await run.do("recovery-report", () => ({
     recoveryStartedAtMs,
     reusedStartedAtMs,
     recovered,

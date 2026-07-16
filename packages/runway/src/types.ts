@@ -1,37 +1,7 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 
+import type { Run } from "./run.ts";
 import type { SecretRef } from "./secrets.ts";
-
-export interface StepContext {
-  readonly id: string;
-}
-
-export interface ExecOptions {
-  readonly command: string;
-  readonly cwd?: string;
-  readonly env?: Readonly<Record<string, string>>;
-  readonly timeoutMs?: number;
-}
-
-export interface ExecResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly durationMs: number;
-}
-
-export interface Step {
-  do<T>(id: string, callback: (ctx: StepContext) => T | Promise<T>): Promise<T>;
-  exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
-  sleep(id: string, durationMs: number): Promise<void>;
-}
-
-export interface Ctx<S extends string = string, E = unknown> {
-  readonly runId: string;
-  readonly secrets: { readonly [K in S]: string };
-  readonly env: E;
-  readonly step: Step;
-}
 
 export type TriggerContext<S extends string> = {
   readonly secrets: { readonly [K in S]: SecretRef<K> };
@@ -146,15 +116,7 @@ export interface WorkflowDefinition {
   readonly id: string;
   readonly trigger: WorkflowTrigger;
   readonly secrets: ReadonlyArray<string>;
-  readonly handler: (ctx: Ctx, event: unknown) => void | Promise<void>;
-}
-
-export interface Primitives {
-  readonly step: {
-    do<T>(id: string, fn: () => Promise<T>): Promise<T>;
-    exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
-    sleep(id: string, durationMs: number): Promise<void>;
-  };
+  readonly run: (run: Run, event: unknown) => void | Promise<void>;
 }
 
 export interface RegisteredWorkflow {
