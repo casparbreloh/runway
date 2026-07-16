@@ -17,5 +17,5 @@ export default workflow({
   await ctx.step.exec("setup-pnpm", "pnpm --version");
   await ctx.step.exec("toolchain", "node --version && pnpm --version");
   await ctx.step.exec("install", installCiDependencies);
-  await ctx.step.exec("test", "pnpm test");
+  await ctx.step.exec("test", { command: "pnpm test", env: { VITEST_MAX_WORKERS: "1" } });
 });
