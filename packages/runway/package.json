@@ -13,6 +13,7 @@
     "@cloudflare/dynamic-workflows": "catalog:",
     "@cloudflare/sandbox": "catalog:",
     "@standard-schema/spec": "catalog:",
+    "aws4fetch": "catalog:",
     "citty": "catalog:",
     "cloudflare": "catalog:",
     "esbuild": "catalog:"

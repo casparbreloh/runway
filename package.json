@@ -9,7 +9,7 @@
     "fallow": "fallow --ci --no-cache",
     "lint": "oxlint",
     "test": "vitest run",
-    "test:live": "node packages/runway/tests/live-workflow-artifact-smoke.ts && node packages/runway/tests/live-repository-recovery-smoke.ts && node packages/runway/tests/live-github-recovery-smoke.ts",
+    "test:live": "node packages/runway/tests/live-cache-transfer-smoke.ts && node packages/runway/tests/live-workflow-artifact-smoke.ts && node packages/runway/tests/live-repository-recovery-smoke.ts && node packages/runway/tests/live-github-recovery-smoke.ts",
     "typecheck": "tsgo --build"
   },
   "dependencies": {
