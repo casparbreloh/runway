@@ -13,9 +13,9 @@ export default workflow({
       ],
     }),
 }).handler(async (ctx) => {
-  await ctx.step.exec("setup-node", setupCiToolchain);
+  await ctx.step.exec("setup-node", { command: setupCiToolchain, timeoutMs: 15 * 60_000 });
   await ctx.step.exec("setup-pnpm", "pnpm --version");
-  await ctx.step.exec("toolchain", "node --version && npm --version && pnpm --version");
+  await ctx.step.exec("toolchain", "node --version && pnpm --version");
   await ctx.step.exec("install", installCiDependencies);
   await ctx.step.exec("test", "pnpm test");
 });
