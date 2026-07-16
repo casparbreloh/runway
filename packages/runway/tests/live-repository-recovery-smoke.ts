@@ -15,6 +15,7 @@ import { deploy } from "../src/deploy.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
+import { fetchWorkersDev, nonGitHubDeployEnv } from "./live-smoke-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 const WORKFLOW_ID = "repository-recovery-smoke";
@@ -284,14 +285,14 @@ const relatedWorkflows = async (
 const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
   const body = JSON.stringify(event);
   const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
-  const response = await fetch(url, {
+  const response = await fetchWorkersDev(url, {
     method: "POST",
     headers: { "content-type": "application/json", [SIGNATURE_HEADER]: signature },
     body,
   });
-  const text = await response.text();
-  if (response.status !== 202) throw new Error(`Webhook returned ${response.status}: ${text}`);
-  const result = JSON.parse(text) as { runs?: ReadonlyArray<{ id?: unknown }> };
+  if (response.status !== 202)
+    throw new Error(`Webhook returned ${response.status}: ${response.text.slice(0, 1024)}`);
+  const result = JSON.parse(response.text) as { runs?: ReadonlyArray<{ id?: unknown }> };
   const id = result.runs?.[0]?.id;
   if (typeof id !== "string") throw new Error("Webhook response omitted run id");
   return id;
@@ -432,12 +433,11 @@ const run = async (): Promise<void> => {
     }
     const deployment = await deploy(registry(project), {
       cwd: project,
-      env: {
-        ...process.env,
+      env: nonGitHubDeployEnv(process.env, {
         RUNWAY_SCRIPT_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         DRIVER_TOKEN: driverToken,
-      },
+      }),
     });
     if (
       JSON.stringify(deployment.artifactVersions) !==

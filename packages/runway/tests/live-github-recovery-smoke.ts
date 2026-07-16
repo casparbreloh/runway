@@ -22,6 +22,7 @@ import {
   GITHUB_PRIVATE_KEY_BINDING,
 } from "../src/worker-contract.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
+import { fetchWorkersDev } from "./live-smoke-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 const OPT_IN = "RUNWAY_LIVE_GITHUB_RECOVERY";
@@ -155,7 +156,19 @@ export default workflow({
   });
   const recovered = observe((await ctx.step.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
   const reused = observe((await ctx.step.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("recovery-report", () => ({ recovered, reused }));
+  const replacementPlacement = await ctx.step.do("replacement-placement", async () => {
+    const response = await fetch(event.destroyUrl, {
+      method: "POST",
+      headers: {
+        authorization: \`Bearer \${ctx.secrets.DRIVER_TOKEN}\`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ runId: ctx.runId, action: "placement" }),
+    });
+    if (!response.ok) throw new Error(\`placement driver returned \${response.status}\`);
+    return await response.json();
+  });
+  await ctx.step.do("recovery-report", () => ({ recovered, reused, replacementPlacement }));
 });
 `;
 
@@ -180,8 +193,13 @@ export default {
       return new Response("invalid run id", { status: 400 });
     }
     const id = env.RUNWAY_SANDBOX.idFromName(await runnerId(body.runId));
-    await env.RUNWAY_SANDBOX.get(id).destroy();
-    return Response.json({ destroyed: true });
+    const sandbox = env.RUNWAY_SANDBOX.get(id);
+    if (body.action === "placement") {
+      return Response.json({ placement: await sandbox.getContainerPlacementId() });
+    }
+    const placement = await sandbox.getContainerPlacementId();
+    await sandbox.destroy();
+    return Response.json({ destroyed: true, placement });
   },
 };
 `;
@@ -426,14 +444,14 @@ const waitForNamespaceAbsence = async (
 const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
   const body = JSON.stringify(event);
   const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
-  const response = await fetch(url, {
+  const response = await fetchWorkersDev(url, {
     method: "POST",
     headers: { "content-type": "application/json", [SIGNATURE_HEADER]: signature },
     body,
   });
-  const text = await response.text();
-  if (response.status !== 202) throw new Error(`Webhook returned ${response.status}: ${text}`);
-  const result = JSON.parse(text) as { runs?: ReadonlyArray<{ id?: unknown }> };
+  if (response.status !== 202)
+    throw new Error(`Webhook returned ${response.status}: ${response.text.slice(0, 1024)}`);
+  const result = JSON.parse(response.text) as { runs?: ReadonlyArray<{ id?: unknown }> };
   const id = result.runs?.[0]?.id;
   if (typeof id !== "string") throw new Error("Webhook response omitted run id");
   return id;
@@ -673,12 +691,26 @@ const run = async (config: LiveConfig): Promise<void> => {
     const runId = await trigger(webhookUrl, { destroyUrl });
     const completed = await waitForCompletion(cf, accountId, scriptName, runId);
     const cold = observationOf(JSON.parse(stepOutput(completed, "cold-report")));
+    const destroyed = JSON.parse(stepOutput(completed, "force-destroy")) as {
+      placement?: unknown;
+    };
     const recovery = JSON.parse(stepOutput(completed, "recovery-report")) as {
       recovered?: unknown;
       reused?: unknown;
+      replacementPlacement?: { placement?: unknown };
     };
     const recovered = observationOf(recovery.recovered);
     const reused = observationOf(recovery.reused);
+    const initialPlacement = destroyed.placement;
+    const replacementPlacement = recovery.replacementPlacement?.placement;
+    if (
+      typeof initialPlacement !== "string" ||
+      initialPlacement.length === 0 ||
+      typeof replacementPlacement !== "string" ||
+      replacementPlacement.length === 0
+    ) {
+      throw new Error("Sandbox placement observations were missing");
+    }
     for (const observation of [cold, recovered, reused]) {
       if (observation.head !== config.sha || observation.metrics.commit !== config.sha) {
         throw new Error("A command observed a checkout other than the opted-in exact SHA");
@@ -692,11 +724,11 @@ const run = async (config: LiveConfig): Promise<void> => {
       }
       if (observation.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
     }
-    if (cold.placement === recovered.placement) {
-      throw new Error("Sandbox.destroy() did not produce a changed placement hostname");
+    if (initialPlacement === replacementPlacement) {
+      throw new Error("Sandbox.destroy() did not produce a changed placement ID");
     }
     if (recovered.placement !== reused.placement) {
-      throw new Error("The post-recovery command unexpectedly changed Sandbox placement");
+      throw new Error("The post-recovery command unexpectedly changed Sandbox hostname");
     }
     if (cold.metrics.generation !== 1 || recovered.metrics.generation !== 1) {
       throw new Error("Replacement did not reconstruct a fresh authenticated checkout");
@@ -730,9 +762,11 @@ const run = async (config: LiveConfig): Promise<void> => {
       repositoryId: identity.repositoryId,
       installationId: identity.installationId,
       sha: config.sha,
-      initialPlacement: cold.placement,
-      replacementPlacement: recovered.placement,
-      placementChanged: cold.placement !== recovered.placement,
+      initialPlacement,
+      replacementPlacement,
+      placementChanged: initialPlacement !== replacementPlacement,
+      initialHostname: cold.placement,
+      replacementHostname: recovered.placement,
       tokenReminted: authenticationTokenMintEvidence.every(Boolean),
       authenticationTokenMintEvidence,
       credentialDiagnosticsClean: true,
