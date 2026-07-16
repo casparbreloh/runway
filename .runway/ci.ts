@@ -1,4 +1,4 @@
-const cacheUrl = "https://runway-monorepo.caspar-breloh-7f9.workers.dev/.runway/cache";
+const cacheUrl = "https://pub-13f36f9056c9471c9141c9b25d2c6069.r2.dev/caches";
 const cacheParts = [
   "444aa69bb14ffb6659fdceed3d343cd7521ffafec067248286539d03bec2a08d",
   "6144ee12406861fb15c2b253ad9ad6d6eca41e53252cf60c87b93ccf1f8794cf",
