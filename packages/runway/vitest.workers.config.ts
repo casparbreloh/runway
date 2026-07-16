@@ -1,12 +1,13 @@
 import path from "node:path";
 
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { build as esbuild } from "esbuild";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
 import { buildDeployment } from "./src/deploy-build.ts";
 import { secretRef } from "./src/secrets.ts";
-import { cron, webhook } from "./src/trigger.ts";
+import { cron, github, webhook } from "./src/trigger.ts";
 import type { Registry } from "./src/types.ts";
 import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
 import { repositoryFixture } from "./tests/repository-fixture.ts";
@@ -42,6 +43,54 @@ const suspendedRunRegistry: Registry = [
   },
 ];
 
+const githubEvents = [
+  {
+    type: "push" as const,
+    branches: ["main", "develop", "release-a", "release-b", "prune-trigger"],
+  },
+  { type: "pull_request" as const, actions: ["opened", "reopened", "synchronize"] as const },
+] as const;
+
+const githubRegistry: Registry = [
+  {
+    path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+    exportName: "githubCheck",
+    def: {
+      __kind: "workflow",
+      id: "github-check",
+      secrets: [],
+      trigger: github({ checkName: "Check", events: githubEvents }),
+      handler: async () => {},
+    },
+  },
+  {
+    path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+    exportName: "githubTest",
+    def: {
+      __kind: "workflow",
+      id: "github-test",
+      secrets: [],
+      trigger: github({ checkName: "Test", events: githubEvents }),
+      handler: async () => {},
+    },
+  },
+];
+
+const manyGithubRegistry: Registry = Array.from({ length: 40 }, (_, index) => ({
+  path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+  exportName: "githubCheck",
+  def: {
+    __kind: "workflow" as const,
+    id: `batch-${String(index).padStart(2, "0")}`,
+    secrets: [],
+    trigger: github({
+      checkName: `Batch ${index}`,
+      events: [{ type: "push", branches: ["main"] }],
+    }),
+    handler: async () => {},
+  },
+}));
+
 export default defineConfig({
   plugins: [
     cloudflareTest(async () => {
@@ -57,12 +106,70 @@ export default defineConfig({
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
+      const githubHost = await buildDeployment(githubRegistry, {
+        cwd: import.meta.dirname,
+        scriptName: "generated-github-host",
+        repository: repositoryFixture,
+        snapshotKeyAvailable: true,
+        github: {
+          repository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
+          installationId: 42,
+        },
+      });
+      const githubCheckArtifact = githubHost.artifacts.find(
+        ({ workflowId }) => workflowId === "github-check",
+      )!;
+      const githubTestArtifact = githubHost.artifacts.find(
+        ({ workflowId }) => workflowId === "github-test",
+      )!;
+      const manyGithubHost = await buildDeployment(manyGithubRegistry, {
+        cwd: import.meta.dirname,
+        scriptName: "generated-many-github-host",
+        repository: repositoryFixture,
+        snapshotKeyAvailable: true,
+        github: {
+          repository: { id: 102, name: "runway-many", fullName: "casparbreloh/runway-many" },
+          installationId: 43,
+        },
+      });
+      const probe = await esbuild({
+        bundle: true,
+        entryPoints: [path.resolve(import.meta.dirname, "tests/repository-probe-worker.ts")],
+        external: ["cloudflare:*", "node:*"],
+        format: "esm",
+        platform: "browser",
+        write: false,
+      });
+      const probeWorker = probe.outputFiles?.[0];
+      if (!probeWorker) throw new Error("esbuild returned no repository probe worker");
+      const effects = await esbuild({
+        bundle: true,
+        entryPoints: [path.resolve(import.meta.dirname, "tests/runtime-worker.ts")],
+        external: ["cloudflare:*", "node:*"],
+        format: "esm",
+        platform: "browser",
+        write: false,
+      });
+      const effectsWorker = effects.outputFiles?.[0];
+      if (!effectsWorker) throw new Error("esbuild returned no GitHub effects probe worker");
       const activeArtifact = generated.artifacts[0]!;
       const suspendedArtifact = suspended.artifacts[0]!;
       return {
         main: "./tests/runtime-worker.ts",
         miniflare: {
           workers: [
+            {
+              name: "github-effects-probe",
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags: ["nodejs_compat"],
+              modules: [
+                {
+                  type: "ESModule",
+                  path: "index.js",
+                  contents: effectsWorker.text,
+                },
+              ],
+            },
             {
               name: "generated-runway-host",
               compatibilityDate: COMPATIBILITY_DATE,
@@ -139,8 +246,111 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
                 },
               ],
             },
+            {
+              name: "generated-github-host",
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags: ["nodejs_compat"],
+              modules: [
+                {
+                  type: "ESModule",
+                  path: "index.js",
+                  contents: new TextDecoder().decode(githubHost.host),
+                },
+              ],
+              bindings: {
+                RUNWAY_GITHUB_APP_ID: "test-app",
+                RUNWAY_GITHUB_PRIVATE_KEY: "test-private-key",
+                RUNWAY_GITHUB_WEBHOOK_SECRET: "github-webhook-secret",
+                RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
+                RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
+                  '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
+              },
+              workerLoaders: { LOADER: {} },
+              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              durableObjects: {
+                RUNWAY_GITHUB_COORDINATOR: "RunwayGitHubCoordinator",
+              },
+              workflows: {
+                WORKFLOWS: {
+                  name: "generated-github-workflow-test",
+                  className: "DynamicWorkflow",
+                },
+              },
+              serviceBindings: {
+                RUNWAY_GITHUB_PROVIDER: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubProviderProbe",
+                },
+                RUNWAY_GITHUB_WORKFLOW: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubWorkflowProbe",
+                },
+                RUNWAY_GITHUB_CLOCK: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubClockProbe",
+                },
+              },
+            },
+            {
+              name: "generated-many-github-host",
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags: ["nodejs_compat"],
+              modules: [
+                {
+                  type: "ESModule",
+                  path: "index.js",
+                  contents: new TextDecoder().decode(manyGithubHost.host),
+                },
+              ],
+              bindings: {
+                RUNWAY_GITHUB_WEBHOOK_SECRET: "github-webhook-secret",
+                RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
+              },
+              workerLoaders: { LOADER: {} },
+              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              durableObjects: {
+                RUNWAY_GITHUB_COORDINATOR: "RunwayGitHubCoordinator",
+              },
+              serviceBindings: {
+                RUNWAY_GITHUB_PROVIDER: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubProviderProbe",
+                },
+                RUNWAY_GITHUB_WORKFLOW: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubWorkflowProbe",
+                },
+                RUNWAY_GITHUB_CLOCK: {
+                  name: "github-effects-probe",
+                  entrypoint: "GitHubClockProbe",
+                },
+              },
+            },
+            {
+              name: "repository-probe-worker",
+              compatibilityDate: COMPATIBILITY_DATE,
+              compatibilityFlags: ["nodejs_compat"],
+              modules: [
+                {
+                  type: "ESModule",
+                  path: "index.js",
+                  contents: probeWorker.text,
+                },
+              ],
+              workerLoaders: { LOADER: {} },
+              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              bindings: {
+                RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
+              },
+            },
           ],
           compatibilityDate: COMPATIBILITY_DATE,
+          durableObjects: {
+            GITHUB_COORDINATOR_TEST: {
+              className: "RunwayGitHubCoordinator",
+              scriptName: "generated-github-host",
+            },
+          },
           bindings: {
             API_KEY: "raw-api-key",
             HOOK_SECRET: "test-secret",
@@ -153,9 +363,19 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
             ACTIVE_DEPLOYMENT_ID: generated.deploymentId,
             SUSPENDED_ARTIFACT: new TextDecoder().decode(suspendedArtifact.contents),
             SUSPENDED_ARTIFACT_VERSION: suspendedArtifact.artifactVersion,
+            GITHUB_CHECK_ARTIFACT: new TextDecoder().decode(githubCheckArtifact.contents),
+            GITHUB_CHECK_ARTIFACT_VERSION: githubCheckArtifact.artifactVersion,
+            GITHUB_TEST_ARTIFACT: new TextDecoder().decode(githubTestArtifact.contents),
+            GITHUB_TEST_ARTIFACT_VERSION: githubTestArtifact.artifactVersion,
           },
           r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
           serviceBindings: {
+            GITHUB_HOST: {
+              name: "generated-github-host",
+            },
+            GITHUB_MANY_HOST: {
+              name: "generated-many-github-host",
+            },
             GENERATED_CAPTURE_HOST: {
               name: "generated-runway-capture-host",
             },
@@ -186,6 +406,18 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: kCurrentWorker,
               entrypoint: "TestRunner",
             },
+            RUNWAY_GITHUB_PROVIDER: {
+              name: "github-effects-probe",
+              entrypoint: "GitHubProviderProbe",
+            },
+            RUNWAY_GITHUB_WORKFLOW: {
+              name: "github-effects-probe",
+              entrypoint: "GitHubWorkflowProbe",
+            },
+            RUNWAY_GITHUB_CLOCK: {
+              name: "github-effects-probe",
+              entrypoint: "GitHubClockProbe",
+            },
             GENERATED_WORKFLOW_CAPTURE: {
               name: "generated-workflow-capture",
               entrypoint: "TestWorkflowCapture",
@@ -212,6 +444,16 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: "generated-workflow-test",
               className: "DynamicWorkflow",
               scriptName: "generated-runway-host",
+            },
+            REPOSITORY_PROBE_DYNAMIC: {
+              name: "repository-probe-workflow-test",
+              className: "RepositoryProbeDynamic",
+              scriptName: "repository-probe-worker",
+            },
+            GITHUB_DYNAMIC: {
+              name: "generated-github-workflow-test",
+              className: "DynamicWorkflow",
+              scriptName: "generated-github-host",
             },
           },
         },

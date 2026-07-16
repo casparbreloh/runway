@@ -5,10 +5,14 @@ import { makeCtx, secretsOf } from "./ctx.ts";
 import { createRouter } from "./router.ts";
 import { ManagedRunner } from "./runner.ts";
 import type { HostCapability } from "./runner.ts";
+import type { RunLifecycleState } from "./runner.ts";
 import type { Primitives, WorkflowDefinition } from "./types.ts";
 import { HOST_CAPABILITY_BINDING } from "./worker-contract.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
+const GITHUB_START_STEP = "runway:github-in-progress";
+const GITHUB_SUCCESS_STEP = "runway:github-success";
+const GITHUB_FAILURE_STEP = "runway:github-failure";
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string | Promise<string> }>;
@@ -56,15 +60,33 @@ export const toEntrypoint = (
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       const host = (this.env as DynamicWorkerEnv)[HOST_CAPABILITY_BINDING];
       if (!host) throw new Error(`missing host capability: ${HOST_CAPABILITY_BINDING}`);
-      const snapshot = await step.do(
-        SECRET_SNAPSHOT_STEP,
-        async () => (await host.captureSecrets(event.instanceId)) as never,
-      );
-      const secrets = secretsOf(def.secrets, await host.restoreSecrets(event.instanceId, snapshot));
-      const runtime = makeRunRuntime(step, host, event.instanceId, secrets);
-      let completed = false;
+      const reportLifecycle = async (state: RunLifecycleState): Promise<boolean> =>
+        (await step.do(
+          state === "in_progress"
+            ? GITHUB_START_STEP
+            : state === "success"
+              ? GITHUB_SUCCESS_STEP
+              : GITHUB_FAILURE_STEP,
+          async () => (await host.reportRunLifecycle(event.instanceId, state)) as never,
+        )) as boolean;
+      if (!(await reportLifecycle("in_progress"))) return undefined;
+      let secrets: Readonly<Record<string, string>>;
       try {
-        const result = await def.handler(
+        const snapshot = await step.do(
+          SECRET_SNAPSHOT_STEP,
+          async () => (await host.captureSecrets(event.instanceId)) as never,
+        );
+        secrets = secretsOf(def.secrets, await host.restoreSecrets(event.instanceId, snapshot));
+      } catch (error) {
+        await reportLifecycle("failure");
+        throw error;
+      }
+      const runtime = makeRunRuntime(step, host, event.instanceId, secrets);
+      let result: unknown;
+      let failed = false;
+      let failure: unknown;
+      try {
+        result = await def.handler(
           makeCtx(runtime.primitives, {
             runId: event.instanceId,
             secrets,
@@ -72,11 +94,22 @@ export const toEntrypoint = (
           }),
           event.payload,
         );
-        completed = true;
-        return result;
-      } finally {
-        if (completed) await runtime.cleanup();
+      } catch (error) {
+        failed = true;
+        failure = error;
       }
+      try {
+        await runtime.cleanup();
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+      if (failed) {
+        await reportLifecycle("failure");
+        throw failure;
+      }
+      await reportLifecycle("success");
+      return result;
     }
   };
 

@@ -52,6 +52,17 @@ export type CloudflareApi = {
         params: { account_id: string; body: unknown },
       ): Promise<unknown>;
     };
+    rollouts: {
+      create(
+        applicationId: string,
+        params: { account_id: string; body: unknown },
+      ): Promise<unknown>;
+      get(
+        applicationId: string,
+        rolloutId: string,
+        params: { account_id: string },
+      ): Promise<unknown>;
+    };
   };
   r2: {
     buckets: {
@@ -105,6 +116,18 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
             method: "PATCH",
             body,
           }),
+      },
+      rollouts: {
+        create: async (applicationId, { account_id, body }) =>
+          await containerRequest(account_id, `/applications/${applicationId}/rollouts`, {
+            method: "POST",
+            body,
+          }),
+        get: async (applicationId, rolloutId, { account_id }) =>
+          await containerRequest(
+            account_id,
+            `/applications/${applicationId}/rollouts/${rolloutId}`,
+          ),
       },
     },
     r2: cf.r2,

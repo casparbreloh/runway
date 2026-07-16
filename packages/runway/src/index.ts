@@ -2,7 +2,7 @@ export { makeCtx, secretsOf } from "./ctx.ts";
 export { ExecError } from "./exec-error.ts";
 
 export { secretNameOf } from "./secrets.ts";
-export { cron, webhook } from "./trigger.ts";
+export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
 
 export type { SecretRef } from "./secrets.ts";
@@ -12,6 +12,16 @@ export type {
   Ctx,
   ExecOptions,
   ExecResult,
+  GitHubEventFilter,
+  GitHubEventOf,
+  GitHubOptions,
+  GitHubPullRequestAction,
+  GitHubPullRequestEvent,
+  GitHubPullRequestFilter,
+  GitHubPushEvent,
+  GitHubPushFilter,
+  GitHubRepository,
+  GitHubTrigger,
   Primitives,
   ProgressEvent,
   RegisteredWorkflow,

@@ -15,7 +15,12 @@ declare namespace Cloudflare {
     };
     GENERATED_HOST: Fetcher;
     GENERATED_CAPTURE_HOST: Fetcher;
+    GITHUB_HOST: Fetcher;
+    GITHUB_MANY_HOST: Fetcher;
+    GITHUB_COORDINATOR_TEST: DurableObjectNamespace;
     GENERATED_DYNAMIC: Workflow;
+    GITHUB_DYNAMIC: Workflow;
+    REPOSITORY_PROBE_DYNAMIC: Workflow;
     GENERATED_WORKFLOW_CAPTURE: {
       captured(): Promise<unknown>;
       reset(): Promise<void>;
@@ -26,7 +31,14 @@ declare namespace Cloudflare {
     ACTIVE_DEPLOYMENT_ID: string;
     SUSPENDED_ARTIFACT: string;
     SUSPENDED_ARTIFACT_VERSION: string;
+    GITHUB_CHECK_ARTIFACT: string;
+    GITHUB_CHECK_ARTIFACT_VERSION: string;
+    GITHUB_TEST_ARTIFACT: string;
+    GITHUB_TEST_ARTIFACT_VERSION: string;
     RUNWAY_SECRET_SNAPSHOT_KEY: string;
     RUNWAY_TEST_RUNNER: Service<import("./runtime-worker.ts").TestRunner>;
+    RUNWAY_GITHUB_PROVIDER: Service<import("./runtime-worker.ts").GitHubProviderProbe>;
+    RUNWAY_GITHUB_WORKFLOW: Service<import("./runtime-worker.ts").GitHubWorkflowProbe>;
+    RUNWAY_GITHUB_CLOCK: Service<import("./runtime-worker.ts").GitHubClockProbe>;
   }
 }

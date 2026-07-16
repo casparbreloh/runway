@@ -6,8 +6,8 @@ import { resolveAuth } from "./deploy-auth.ts";
 import { buildDeployment } from "./deploy-build.ts";
 import {
   currentSandboxMigrationTag,
-  needsSandboxMigration,
   reconcileSandboxContainer,
+  runwayMigration,
 } from "./deploy-container.ts";
 import {
   assertDynamicWorkflowOwnership,
@@ -19,6 +19,7 @@ import {
 } from "./deploy-finalize.ts";
 import { uploadWorkflowArtifacts } from "./deploy-storage.ts";
 import { uploadWorker, validateBindings } from "./deploy-upload.ts";
+import { createGitHubProvider, type GitHubProvider } from "./github.ts";
 import { resolveScriptName } from "./naming.ts";
 import { secretNamesOf } from "./registry.ts";
 import {
@@ -28,7 +29,12 @@ import {
 } from "./repository-source.ts";
 import { listScriptSecrets } from "./secret-store.ts";
 import type { ProgressEvent, Registry } from "./types.ts";
-import { SECRET_SNAPSHOT_KEY_BINDING } from "./worker-contract.ts";
+import {
+  GITHUB_APP_ID_BINDING,
+  GITHUB_PRIVATE_KEY_BINDING,
+  GITHUB_WEBHOOK_SECRET_BINDING,
+  SECRET_SNAPSHOT_KEY_BINDING,
+} from "./worker-contract.ts";
 
 export type { CloudflareApi } from "./cloudflare-api.ts";
 export { resolveAuth } from "./deploy-auth.ts";
@@ -55,7 +61,32 @@ interface DeployAdapters {
     readonly scriptName: string;
     readonly deploymentId: string;
   }) => Promise<void>;
+  readonly github?: Pick<GitHubProvider, "resolveRepository" | "createInstallationToken">;
 }
+
+const githubRepositoryNameOf = (repository: RepositorySource): string | undefined => {
+  let remote: URL;
+  try {
+    remote = new URL(repository.remote);
+  } catch {
+    return undefined;
+  }
+  if (
+    remote.protocol !== "https:" ||
+    remote.hostname.toLowerCase() !== "github.com" ||
+    remote.username ||
+    remote.password ||
+    remote.search ||
+    remote.hash
+  ) {
+    return undefined;
+  }
+  const fullName = remote.pathname.replace(/^\//, "").replace(/\.git$/, "");
+  if (fullName.split("/").length !== 2) {
+    return undefined;
+  }
+  return fullName;
+};
 
 const waitUntilReady = async (opts: {
   readonly host: string;
@@ -84,6 +115,7 @@ export const deployWithAdapters = async (
   await assertDynamicWorkflowOwnership(cf, accountId, workflowName, scriptName);
   const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
   const migrationTag = await currentSandboxMigrationTag(cf, accountId, scriptName);
+  const migration = runwayMigration(migrationTag);
   const missingSecrets = registry.flatMap((w) =>
     w.def.secrets
       .filter((name) => !env[name] && !remoteSecrets.has(name))
@@ -94,12 +126,83 @@ export const deployWithAdapters = async (
   }
 
   validateBindings(secrets);
-  const repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
-  await (adapters.reachable ?? assertRepositorySourceReachable)(repository);
+  let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
+  const hasGitHubTrigger = registry.some(({ def }) => def.trigger.type === "github");
+  const appId = env[GITHUB_APP_ID_BINDING];
+  const privateKey = env[GITHUB_PRIVATE_KEY_BINDING];
+  const githubRepositoryName = githubRepositoryNameOf(repository);
+  const appConfigRequested = appId !== undefined || privateKey !== undefined;
+  const needsAppConfig =
+    hasGitHubTrigger ||
+    repository.authentication.type === "github" ||
+    (githubRepositoryName !== undefined && appConfigRequested);
+  if (needsAppConfig) {
+    const missing = [
+      ...(appId ? [] : [GITHUB_APP_ID_BINDING]),
+      ...(privateKey ? [] : [GITHUB_PRIVATE_KEY_BINDING]),
+    ];
+    if (missing.length > 0) {
+      throw new Error(`missing GitHub App deploy config: ${missing.join(", ")}`);
+    }
+    if (!/^[1-9][0-9]*$/.test(appId!) || privateKey!.trim().length === 0) {
+      throw new Error("invalid GitHub App deploy config");
+    }
+  }
+  if (
+    hasGitHubTrigger &&
+    !env[GITHUB_WEBHOOK_SECRET_BINDING] &&
+    !remoteSecrets.has(GITHUB_WEBHOOK_SECRET_BINDING)
+  ) {
+    throw new Error(`missing GitHub App secret: ${GITHUB_WEBHOOK_SECRET_BINDING}`);
+  }
+  const githubProvider = needsAppConfig
+    ? (adapters.github ?? createGitHubProvider({ appId: appId!, privateKey: privateKey! }))
+    : undefined;
+  if (githubProvider && repository.authentication.type === "public") {
+    if (!githubRepositoryName) {
+      throw new Error("GitHub workflows require a github.com repository remote");
+    }
+    const resolved = await githubProvider.resolveRepository(githubRepositoryName);
+    repository = {
+      remote: `https://github.com/${resolved.repository.fullName}`,
+      commit: repository.commit,
+      authentication: { type: "github", ...resolved },
+    };
+  }
+  if (hasGitHubTrigger && repository.authentication.type !== "github") {
+    throw new Error("GitHub workflows require an authenticated github.com repository");
+  }
+  if (adapters.reachable) {
+    await adapters.reachable(repository);
+  } else {
+    await assertRepositorySourceReachable(
+      repository,
+      githubProvider
+        ? {
+            installationToken: async ({ authentication, purpose }) =>
+              (
+                await githubProvider.createInstallationToken({
+                  installationId: authentication.installationId,
+                  repository: authentication.repository,
+                  purpose,
+                })
+              ).token,
+          }
+        : {},
+    );
+  }
   const secretBindings: Record<string, string> = {};
   for (const name of secrets) {
     const value = env[name];
     if (value) secretBindings[name] = value;
+  }
+  if (needsAppConfig) {
+    secretBindings[GITHUB_APP_ID_BINDING] = appId!;
+    secretBindings[GITHUB_PRIVATE_KEY_BINDING] = privateKey!;
+  }
+  const webhookSecret = env[GITHUB_WEBHOOK_SECRET_BINDING];
+  if (hasGitHubTrigger && webhookSecret) {
+    secretBindings[GITHUB_WEBHOOK_SECRET_BINDING] = webhookSecret;
   }
   const snapshotKeyAvailable = remoteSecrets.has(SECRET_SNAPSHOT_KEY_BINDING);
   const deployment = await buildDeployment(registry, {
@@ -107,6 +210,14 @@ export const deployWithAdapters = async (
     scriptName,
     repository,
     snapshotKeyAvailable,
+    ...(hasGitHubTrigger && repository.authentication.type === "github"
+      ? {
+          github: {
+            repository: repository.authentication.repository,
+            installationId: repository.authentication.installationId,
+          },
+        }
+      : {}),
   });
   if (!snapshotKeyAvailable) {
     const identity = deployment.secretSnapshotKey;
@@ -125,7 +236,7 @@ export const deployWithAdapters = async (
     artifactBucketName,
     contents: deployment.host,
     secretBindings,
-    needsSandboxMigration: needsSandboxMigration(migrationTag),
+    ...(migration ? { migration } : {}),
   });
   await reconcileSandboxContainer(cf, accountId, scriptName);
   await updateDynamicWorkflow(cf, accountId, workflowName, scriptName);

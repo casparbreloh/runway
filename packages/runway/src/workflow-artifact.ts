@@ -1,3 +1,4 @@
+import { parseRepositorySource } from "./repository-source.ts";
 import type { RepositorySource } from "./repository-source.ts";
 
 export interface WorkflowArtifact {
@@ -38,27 +39,15 @@ export const decodeWorkflowArtifact = (bytes: ArrayBuffer): WorkflowArtifact => 
     !Array.isArray(secrets) ||
     secrets.some((name) => typeof name !== "string") ||
     new Set(secrets).size !== secrets.length ||
-    !repository ||
-    typeof repository !== "object" ||
-    Array.isArray(repository) ||
-    Object.keys(repository).sort().join(",") !== "authentication,commit,remote" ||
     typeof source !== "string"
   ) {
     throw new Error("invalid workflow artifact");
   }
-  const { remote, commit, authentication } = repository as Record<string, unknown>;
-  if (
-    typeof remote !== "string" ||
-    remote.length === 0 ||
-    typeof commit !== "string" ||
-    !/^[0-9a-f]{40}$/.test(commit) ||
-    !authentication ||
-    typeof authentication !== "object" ||
-    Array.isArray(authentication) ||
-    Object.keys(authentication).join(",") !== "type" ||
-    (authentication as Record<string, unknown>).type !== "public"
-  ) {
+  let parsedRepository: RepositorySource;
+  try {
+    parsedRepository = parseRepositorySource(repository);
+  } catch {
     throw new Error("invalid workflow artifact");
   }
-  return { scriptName, workflowId, secrets, repository, source } as WorkflowArtifact;
+  return { scriptName, workflowId, secrets, repository: parsedRepository, source };
 };

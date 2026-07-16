@@ -101,11 +101,16 @@ export const enableWorkersDev = async (
   const host = `${scriptName}.${account.subdomain}.workers.dev`;
   return {
     host,
-    urls: registry.flatMap((w) =>
-      w.def.trigger.type === "webhook"
-        ? [{ id: w.def.id, url: `https://${host}${w.def.trigger.path}` }]
-        : [],
-    ),
+    urls: [
+      ...registry.flatMap((w) =>
+        w.def.trigger.type === "webhook"
+          ? [{ id: w.def.id, url: `https://${host}${w.def.trigger.path}` }]
+          : [],
+      ),
+      ...(registry.some(({ def }) => def.trigger.type === "github")
+        ? [{ id: "github", url: `https://${host}/.runway/github` }]
+        : []),
+    ],
   };
 };
 

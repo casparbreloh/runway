@@ -15,6 +15,7 @@ import { deploy } from "../src/deploy.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
+import { fetchWorkersDev, nonGitHubDeployEnv } from "./live-smoke-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -202,14 +203,14 @@ const deploymentIdAt = async (host: string): Promise<string> => {
 const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
   const body = JSON.stringify(event);
   const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
-  const response = await fetch(url, {
+  const response = await fetchWorkersDev(url, {
     method: "POST",
     headers: { "content-type": "application/json", "x-smoke-signature": signature },
     body,
   });
-  const text = await response.text();
-  if (response.status !== 202) throw new Error(`Webhook returned ${response.status}: ${text}`);
-  const result = JSON.parse(text) as { runs?: ReadonlyArray<{ id?: unknown }> };
+  if (response.status !== 202)
+    throw new Error(`Webhook returned ${response.status}: ${response.text.slice(0, 1024)}`);
+  const result = JSON.parse(response.text) as { runs?: ReadonlyArray<{ id?: unknown }> };
   const id = result.runs?.[0]?.id;
   if (typeof id !== "string") throw new Error("Webhook response omitted run id");
   return id;
@@ -372,7 +373,7 @@ const run = async (): Promise<void> => {
     throw new Error(`Refusing to overwrite pre-existing smoke resources: ${collisions.join(", ")}`);
   }
   const project = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-immutable-smoke-"),
+    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-immutable-smoke-"),
   );
   const workflowPath = path.join(project, ".runway/workflows/smoke.ts");
   const createdObjectKeys = new Set<string>();
@@ -423,12 +424,11 @@ const run = async (): Promise<void> => {
     const v1Started = Date.now();
     const v1 = await deploy(registry(project), {
       cwd: project,
-      env: {
-        ...process.env,
+      env: nonGitHubDeployEnv(process.env, {
         RUNWAY_SCRIPT_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         SMOKE_SECRET: oldSecret,
-      },
+      }),
     });
     timings.v1DeployMs = Date.now() - v1Started;
     const webhookUrl = v1.urls[0]?.url;
@@ -491,12 +491,11 @@ const run = async (): Promise<void> => {
     const v2Started = Date.now();
     const v2 = await deploy(registry(project), {
       cwd: project,
-      env: {
-        ...process.env,
+      env: nonGitHubDeployEnv(process.env, {
         RUNWAY_SCRIPT_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         SMOKE_SECRET: oldSecret,
-      },
+      }),
     });
     timings.v2DeployMs = Date.now() - v2Started;
     const v2WebhookUrl = v2.urls[0]?.url;

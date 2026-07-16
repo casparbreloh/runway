@@ -23,6 +23,7 @@ export interface RunnerBridge {
 }
 
 export interface HostCapability {
+  reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean>;
   secrets(): Promise<Readonly<Record<string, string>>>;
   captureSecrets(runId: string): Promise<string>;
   restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;
@@ -33,6 +34,8 @@ export interface HostCapability {
   ): Promise<ExecResult>;
   destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
 }
+
+export type RunLifecycleState = "in_progress" | "success" | "failure";
 
 type DurableExec = (
   callback: (step: {

@@ -1,16 +1,18 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { cron, webhook, workflow } from "runway";
+import { cron, github, webhook, workflow } from "runway";
 import type { ProgressEvent, Registry, WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
 
 import { deploy, deployWithAdapters } from "../src/deploy.ts";
 import type { CloudflareApi } from "../src/deploy.ts";
-import { repositoryFixture } from "./repository-fixture.ts";
+import { assertRepositorySourceReachable } from "../src/repository-source.ts";
+import type { RepositorySource } from "../src/repository-source.ts";
+import { authenticatedRepositoryFixture, repositoryFixture } from "./repository-fixture.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,16 +38,27 @@ const registry: Registry = [
   },
 ];
 
+const githubRegistry: Registry = [
+  {
+    path: ".runway/workflows/check.ts",
+    exportName: "default",
+    def: workflow({
+      id: "check",
+      trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
+    }).handler(async () => {}),
+  },
+];
+
 const moduleOf = (name: string, def: WorkflowDefinition): string =>
   `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...def, handler: undefined })}, handler: async () => {} };\n`;
 
 const writeProject = async (): Promise<{ cwd: string; cleanup(): Promise<void> }> => {
   const cwd = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, "../../../example"), ".tmp-deploy-test-"),
+    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-deploy-test-"),
   );
   await mkdir(path.join(cwd, ".runway", "workflows"), { recursive: true });
   await writeFile(path.join(cwd, "package.json"), JSON.stringify({ name: "ship-it" }));
-  for (const w of registry) {
+  for (const w of [...registry, ...githubRegistry]) {
     await writeFile(path.join(cwd, w.path), moduleOf(w.exportName, w.def));
   }
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
@@ -69,6 +82,8 @@ interface ApiCalls {
   artifactUploads: Array<{ bucket: string; key: string; contents: Uint8Array }>;
   containerCreates: unknown[];
   containerModifies: unknown[];
+  containerRolloutCreates: unknown[];
+  containerRolloutGets: unknown[];
   metadata?: unknown;
   schedules?: unknown;
   scriptUpdates: string[];
@@ -89,6 +104,8 @@ const fakeApi = (
     secrets?: ReadonlyArray<{ name: string }>;
     bucketExists?: boolean;
     bucketError?: unknown;
+    rolloutCreateError?: unknown;
+    rolloutStatus?: string;
   } = {},
 ): CloudflareApi => ({
   accounts: {
@@ -157,6 +174,17 @@ const fakeApi = (
         calls.containerModifies.push(args);
       },
     },
+    rollouts: {
+      create: async (...args) => {
+        calls.containerRolloutCreates.push(args);
+        if (opts.rolloutCreateError) throw opts.rolloutCreateError;
+        return { id: "rollout" };
+      },
+      get: async (...args) => {
+        calls.containerRolloutGets.push(args);
+        return { status: opts.rolloutStatus ?? "completed" };
+      },
+    },
   },
   r2: {
     buckets: {
@@ -187,6 +215,8 @@ const emptyCalls = (): ApiCalls => ({
   artifactUploads: [],
   containerCreates: [],
   containerModifies: [],
+  containerRolloutCreates: [],
+  containerRolloutGets: [],
   scriptUpdates: [],
   workflowUpdates: [],
   workflowDeletes: [],
@@ -199,6 +229,21 @@ const deployEnv = {
   CLOUDFLARE_ACCOUNT_ID: "account",
   LINEAR_WEBHOOK_SECRET: "secret-value",
   LINEAR_API_KEY: "key-value",
+};
+
+const githubDeployEnv = {
+  ...deployEnv,
+  RUNWAY_GITHUB_APP_ID: "12345",
+  RUNWAY_GITHUB_PRIVATE_KEY: "private-key",
+  RUNWAY_GITHUB_WEBHOOK_SECRET: "webhook-secret",
+};
+
+const githubProvider = {
+  resolveRepository: async () => ({
+    installationId: 42,
+    repository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
+  }),
+  createInstallationToken: async () => ({ token: "ephemeral", expiresAt: "2026-07-16T12:30:00Z" }),
 };
 
 const deployReady = async (
@@ -220,6 +265,294 @@ const deployReady = async (
     },
   });
 };
+
+test("deploy resolves and uploads one repo-scoped GitHub capability with one ingress URL", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  let reachableRepository: RepositorySource | undefined;
+
+  try {
+    const result = await deployWithAdapters(
+      githubRegistry,
+      { cwd: project.cwd, env: githubDeployEnv },
+      {
+        client: () => fakeApi(calls),
+        repository: repositoryFixture,
+        github: githubProvider,
+        reachable: async (repository) => {
+          reachableRepository = repository;
+        },
+        ready: async () => {},
+      },
+    );
+
+    const resolvedRepository: RepositorySource = {
+      remote: "https://github.com/casparbreloh/runway",
+      commit: repositoryFixture.commit,
+      authentication: authenticatedRepositoryFixture.authentication,
+    };
+    expect(reachableRepository).toEqual(resolvedRepository);
+    expect(result.urls).toEqual([
+      { id: "github", url: "https://runway-ship-it.tester.workers.dev/.runway/github" },
+    ]);
+    const metadata = calls.metadata as {
+      bindings: ReadonlyArray<unknown>;
+      migrations?: unknown;
+    };
+    expect(metadata.bindings).toContainEqual({
+      type: "durable_object_namespace",
+      name: "RUNWAY_GITHUB_COORDINATOR",
+      class_name: "RunwayGitHubCoordinator",
+    });
+    expect(metadata.bindings).toEqual(
+      expect.arrayContaining([
+        { type: "secret_text", name: "RUNWAY_GITHUB_APP_ID", text: "12345" },
+        { type: "secret_text", name: "RUNWAY_GITHUB_PRIVATE_KEY", text: "private-key" },
+        {
+          type: "secret_text",
+          name: "RUNWAY_GITHUB_WEBHOOK_SECRET",
+          text: "webhook-secret",
+        },
+      ]),
+    );
+    expect(metadata.migrations).toEqual({
+      new_tag: "runway-github-coordinator-v2",
+      new_sqlite_classes: ["Sandbox", "RunwayGitHubCoordinator"],
+    });
+    const artifact = JSON.parse(
+      new TextDecoder().decode(calls.artifactUploads[0]!.contents),
+    ) as Record<string, unknown>;
+    expect(artifact.repository).toEqual(resolvedRepository);
+    expect(JSON.stringify(artifact)).not.toMatch(/private-key|webhook-secret|ephemeral/);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("GitHub deploy fails before upload when its local App config is incomplete", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+
+  try {
+    await expect(
+      deployWithAdapters(
+        githubRegistry,
+        {
+          cwd: project.cwd,
+          env: { ...deployEnv, RUNWAY_GITHUB_WEBHOOK_SECRET: "webhook-secret" },
+        },
+        {
+          client: () => fakeApi(calls),
+          repository: repositoryFixture,
+          github: githubProvider,
+          reachable: async () => {},
+          ready: async () => {},
+        },
+      ),
+    ).rejects.toThrow(
+      "missing GitHub App deploy config: RUNWAY_GITHUB_APP_ID, RUNWAY_GITHUB_PRIVATE_KEY",
+    );
+    expect(calls.artifactUploads).toEqual([]);
+    expect(calls.scriptUpdates).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("GitHub deploy requires a local or preserved webhook secret before upload", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  try {
+    await expect(
+      deployWithAdapters(
+        githubRegistry,
+        {
+          cwd: project.cwd,
+          env: {
+            ...deployEnv,
+            RUNWAY_GITHUB_APP_ID: "12345",
+            RUNWAY_GITHUB_PRIVATE_KEY: "private-key",
+          },
+        },
+        {
+          client: () => fakeApi(calls),
+          repository: repositoryFixture,
+          github: githubProvider,
+          reachable: async () => {},
+          ready: async () => {},
+        },
+      ),
+    ).rejects.toThrow("missing GitHub App secret: RUNWAY_GITHUB_WEBHOOK_SECRET");
+    expect(calls.artifactUploads).toEqual([]);
+    expect(calls.scriptUpdates).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("GitHub deploy preserves an existing remote webhook secret without replacing it", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  try {
+    await deployWithAdapters(
+      githubRegistry,
+      {
+        cwd: project.cwd,
+        env: {
+          ...deployEnv,
+          RUNWAY_GITHUB_APP_ID: "12345",
+          RUNWAY_GITHUB_PRIVATE_KEY: "private-key",
+        },
+      },
+      {
+        client: () =>
+          fakeApi(calls, {
+            secrets: [{ name: "RUNWAY_GITHUB_WEBHOOK_SECRET" }],
+          }),
+        repository: repositoryFixture,
+        github: githubProvider,
+        reachable: async () => {},
+        ready: async () => {},
+      },
+    );
+
+    const metadata = calls.metadata as {
+      keep_bindings?: ReadonlyArray<string>;
+      bindings: ReadonlyArray<unknown>;
+    };
+    expect(metadata.keep_bindings).toEqual(["secret_text"]);
+    expect(metadata.bindings).not.toContainEqual(
+      expect.objectContaining({ name: "RUNWAY_GITHUB_WEBHOOK_SECRET" }),
+    );
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects authored secrets that collide with reserved GitHub bindings", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const collidingRegistry: Registry = [
+    {
+      ...registry[1]!,
+      def: workflow({
+        id: "collision",
+        secrets: ["RUNWAY_GITHUB_APP_ID"],
+        trigger: () => cron("0 9 * * *"),
+      }).handler(async () => {}),
+    },
+  ];
+  try {
+    await expect(
+      deployWithAdapters(
+        collidingRegistry,
+        { cwd: project.cwd, env: githubDeployEnv },
+        {
+          client: () => fakeApi(calls),
+          repository: repositoryFixture,
+          github: githubProvider,
+          reachable: async () => {},
+          ready: async () => {},
+        },
+      ),
+    ).rejects.toThrow(
+      'binding "RUNWAY_GITHUB_APP_ID" is used by Runway GitHub App binding and a secret',
+    );
+    expect(calls.artifactUploads).toEqual([]);
+    expect(calls.scriptUpdates).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("GitHub credentials do not force a non-GitHub public repository into App auth", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const repository: RepositorySource = {
+    remote: "https://gitlab.example/acme/runway.git",
+    commit: repositoryFixture.commit,
+    authentication: { type: "public" },
+  };
+  let resolutions = 0;
+  try {
+    await deployWithAdapters(
+      registry,
+      { cwd: project.cwd, env: githubDeployEnv },
+      {
+        client: () => fakeApi(calls),
+        repository,
+        github: {
+          ...githubProvider,
+          resolveRepository: async () => {
+            resolutions += 1;
+            return await githubProvider.resolveRepository();
+          },
+        },
+        reachable: async (source) => expect(source).toEqual(repository),
+        ready: async () => {},
+      },
+    );
+    expect(resolutions).toBe(0);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test.each([
+  [
+    undefined,
+    {
+      new_tag: "runway-github-coordinator-v2",
+      new_sqlite_classes: ["Sandbox", "RunwayGitHubCoordinator"],
+    },
+  ],
+  [
+    "runway-sandbox-v1",
+    {
+      old_tag: "runway-sandbox-v1",
+      new_tag: "runway-github-coordinator-v2",
+      new_sqlite_classes: ["RunwayGitHubCoordinator"],
+    },
+  ],
+  ["runway-github-coordinator-v2", undefined],
+] as const)("deploy emits the exact %s migration state", async (migrationTag, expected) => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  try {
+    await deployReady(calls, {
+      cwd: project.cwd,
+      env: deployEnv,
+      client: () =>
+        fakeApi(calls, {
+          scripts: migrationTag ? [{ id: "runway-ship-it", migration_tag: migrationTag }] : [],
+        }),
+    });
+    expect((calls.metadata as { migrations?: unknown }).migrations).toEqual(expected);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects an unknown existing migration tag before upload", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  try {
+    await expect(
+      deployReady(calls, {
+        cwd: project.cwd,
+        env: deployEnv,
+        client: () =>
+          fakeApi(calls, {
+            scripts: [{ id: "runway-ship-it", migration_tag: "unexpected-tag" }],
+          }),
+      }),
+    ).rejects.toThrow("unsupported Runway Worker migration tag: unexpected-tag");
+    expect(calls.artifactUploads).toEqual([]);
+    expect(calls.scriptUpdates).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
 
 test("deploy stores immutable workflow artifacts before uploading the host Worker", async () => {
   const project = await writeProject();
@@ -302,6 +635,125 @@ test("deploy pins the current public GitHub repository commit", async () => {
       commit: stdout.trim(),
       authentication: { type: "public" },
     });
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("private repository reachability uses one ephemeral token through exact-prompt askpass", async () => {
+  const token = "private-deploy-installation-token";
+  let tokenMints = 0;
+  let askpass: string | undefined;
+  let fetches = 0;
+
+  await assertRepositorySourceReachable(authenticatedRepositoryFixture, {
+    installationToken: async ({ authentication, purpose }) => {
+      expect(authentication).toEqual(authenticatedRepositoryFixture.authentication);
+      expect(purpose).toBe("checkout");
+      tokenMints += 1;
+      return token;
+    },
+    exec: async (file, args, options) => {
+      expect(file).toBe("git");
+      expect(args.join(" ")).not.toContain(token);
+      if (!args.includes("fetch")) return { stdout: "" };
+      fetches += 1;
+      expect(args).toContain("http.followRedirects=false");
+      expect(args).toContain("https://github.com/casparbreloh/runway");
+      expect(options.env?.GIT_TERMINAL_PROMPT).toBe("0");
+      expect(options.env?.RUNWAY_GITHUB_TOKEN).toBe(token);
+      askpass = options.env?.GIT_ASKPASS;
+      expect(askpass).toBeTruthy();
+      const helper = await readFile(askpass!, "utf8");
+      expect(helper).not.toContain(token);
+      await expect(
+        execFileAsync(askpass!, ["Username for 'https://github.com': "], {
+          encoding: "utf8",
+          env: options.env,
+        }),
+      ).resolves.toMatchObject({ stdout: "x-access-token\n" });
+      await expect(
+        execFileAsync(askpass!, ["Password for 'https://x-access-token@github.com': "], {
+          encoding: "utf8",
+          env: options.env,
+        }),
+      ).resolves.toMatchObject({ stdout: `${token}\n` });
+      await expect(
+        execFileAsync(askpass!, ["Password for 'https://example.com': "], {
+          encoding: "utf8",
+          env: options.env,
+        }),
+      ).rejects.toBeDefined();
+      return { stdout: "" };
+    },
+  });
+
+  expect(tokenMints).toBe(1);
+  expect(fetches).toBe(1);
+  await expect(access(askpass!)).rejects.toBeDefined();
+});
+
+test("public repository reachability never requests an installation token", async () => {
+  let calls = 0;
+  await assertRepositorySourceReachable(repositoryFixture, {
+    installationToken: async () => {
+      throw new Error("public source requested a token");
+    },
+    exec: async (_file, args, options) => {
+      calls += 1;
+      expect(args.join(" ")).not.toContain("token");
+      expect(options.env?.RUNWAY_GITHUB_TOKEN).toBeUndefined();
+      expect(options.env?.GIT_ASKPASS).toBeUndefined();
+      return { stdout: "" };
+    },
+  });
+  expect(calls).toBe(2);
+});
+
+test("authenticated repository identity cannot disagree with its derived remote", async () => {
+  let tokenMints = 0;
+  await expect(
+    assertRepositorySourceReachable(
+      { ...authenticatedRepositoryFixture, remote: "https://github.com/another/runway" },
+      {
+        installationToken: async () => {
+          tokenMints += 1;
+          return "unused";
+        },
+        exec: async () => ({ stdout: "" }),
+      },
+    ),
+  ).rejects.toThrow("invalid repository source");
+  expect(tokenMints).toBe(0);
+});
+
+test("deploy artifacts retain only stable GitHub installation repository identity", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+
+  try {
+    await deployWithAdapters(
+      registry,
+      { cwd: project.cwd, env: githubDeployEnv },
+      {
+        client: () => fakeApi(calls),
+        repository: authenticatedRepositoryFixture,
+        github: githubProvider,
+        reachable: async () => {},
+        ready: async () => {},
+      },
+    );
+    const artifact = JSON.parse(
+      new TextDecoder().decode(calls.artifactUploads[0]!.contents),
+    ) as Record<string, unknown>;
+    expect(artifact.repository).toEqual(authenticatedRepositoryFixture);
+    expect(JSON.stringify(artifact)).not.toContain("token");
+    expect((calls.metadata as { bindings: ReadonlyArray<unknown> }).bindings).toEqual(
+      expect.arrayContaining([
+        { type: "secret_text", name: "RUNWAY_GITHUB_APP_ID", text: "12345" },
+        { type: "secret_text", name: "RUNWAY_GITHUB_PRIVATE_KEY", text: "private-key" },
+      ]),
+    );
   } finally {
     await project.cleanup();
   }
@@ -543,6 +995,11 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
         class_name: "DynamicWorkflow",
       },
       { type: "durable_object_namespace", name: "RunwaySandbox", class_name: "Sandbox" },
+      {
+        type: "durable_object_namespace",
+        name: "RUNWAY_GITHUB_COORDINATOR",
+        class_name: "RunwayGitHubCoordinator",
+      },
       { type: "secret_text", name: "LINEAR_WEBHOOK_SECRET", text: "secret-value" },
       { type: "secret_text", name: "LINEAR_API_KEY", text: "key-value" },
       {
@@ -575,12 +1032,12 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
       {
         class_name: "Sandbox",
         image: "docker.io/cloudflare/sandbox:0.12.3",
-        instance_type: "lite",
+        instance_type: "standard-1",
       },
     ]);
     expect(metadata.migrations).toEqual({
-      new_tag: "runway-sandbox-v1",
-      new_sqlite_classes: ["Sandbox"],
+      new_tag: "runway-github-coordinator-v2",
+      new_sqlite_classes: ["Sandbox", "RunwayGitHubCoordinator"],
     });
     expect(calls.containerCreates).toEqual([
       [
@@ -591,7 +1048,7 @@ test("deploy bundles, uploads bindings, owns the script, and returns webhook url
             scheduling_policy: "default",
             configuration: {
               image: "docker.io/cloudflare/sandbox:0.12.3",
-              instance_type: "lite",
+              instance_type: "standard-1",
             },
             instances: 0,
             max_instances: 20,
@@ -655,11 +1112,11 @@ test("deploy accepts an explicit script name override", async () => {
   }
 });
 
-test("deploy reuses the matching container application and does not replay its migration", async () => {
+test("deploy reuses the matching container application and does not replay its v2 migration", async () => {
   const project = await writeProject();
   const calls = emptyCalls();
   const client = fakeApi(calls, {
-    scripts: [{ id: "runway-ship-it", migration_tag: "runway-sandbox-v1" }],
+    scripts: [{ id: "runway-ship-it", migration_tag: "runway-github-coordinator-v2" }],
     applications: [
       {
         id: "application",
@@ -667,9 +1124,11 @@ test("deploy reuses the matching container application and does not replay its m
         scheduling_policy: "default",
         configuration: {
           image: "docker.io/cloudflare/sandbox:0.12.3",
-          instance_type: "lite",
+          vcpu: 0.5,
+          memory_mib: 4_096,
+          disk: { size_mb: 8_000 },
         },
-        instances: 0,
+        instances: 7,
         max_instances: 20,
         constraints: { tiers: [1, 2] },
         durable_objects: { namespace_id: "sandbox-namespace" },
@@ -688,6 +1147,7 @@ test("deploy reuses the matching container application and does not replay its m
     expect((calls.metadata as { migrations?: unknown }).migrations).toBeUndefined();
     expect(calls.containerCreates).toEqual([]);
     expect(calls.containerModifies).toEqual([]);
+    expect(calls.containerRolloutCreates).toEqual([]);
   } finally {
     await project.cleanup();
   }
@@ -719,7 +1179,7 @@ test("deploy reconciles stale container application configuration", async () => 
             scheduling_policy: "default",
             configuration: {
               image: "docker.io/cloudflare/sandbox:0.12.3",
-              instance_type: "lite",
+              instance_type: "standard-1",
             },
             instances: 0,
             max_instances: 20,
@@ -729,6 +1189,75 @@ test("deploy reconciles stale container application configuration", async () => 
         },
       ],
     ]);
+    expect(calls.containerRolloutCreates).toEqual([
+      [
+        "application",
+        {
+          account_id: "account",
+          body: {
+            description: "Runway deployment",
+            strategy: "rolling",
+            target_configuration: {
+              image: "docker.io/cloudflare/sandbox:0.12.3",
+              instance_type: "standard-1",
+            },
+            step_percentage: 25,
+            kind: "full_auto",
+          },
+        },
+      ],
+    ]);
+    expect(calls.containerRolloutGets).toEqual([
+      ["application", "rollout", { account_id: "account" }],
+    ]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy surfaces container rollout creation failures", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        configuration: { image: "old-image", instance_type: "lite" },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+      },
+    ],
+    rolloutCreateError: new Error("rollout failed"),
+  });
+
+  try {
+    await expect(
+      deployReady(calls, { cwd: project.cwd, env: deployEnv, client: () => client }),
+    ).rejects.toThrow("rollout failed");
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects a reverted container rollout", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        configuration: { image: "old-image", instance_type: "lite" },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+      },
+    ],
+    rolloutStatus: "reverted",
+  });
+
+  try {
+    await expect(
+      deployReady(calls, { cwd: project.cwd, env: deployEnv, client: () => client }),
+    ).rejects.toThrow("container rollout reverted");
   } finally {
     await project.cleanup();
   }

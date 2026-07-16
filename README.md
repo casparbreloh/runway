@@ -88,13 +88,17 @@ runway deploy
 ```
 
 Deploy prints the repo script name and one URL per webhook trigger. Cron workflows do not print
-URLs; deploy updates the repo Worker's Cloudflare schedules.
+URLs; deploy updates the repo Worker's Cloudflare schedules. A deployment containing GitHub
+triggers prints one shared `github` URL ending in `/.runway/github`.
 
 ## Triggers
 
 Triggers are explicit. There is no default public start endpoint.
 
 - `cron("0 9 * * *")` gives `event: { cron, scheduledTime }`.
+- `github({ checkName, events })` selects pushes by branch and pull requests by action. Push events
+  provide the exact pushed SHA; pull-request events provide the exact head SHA. Runway verifies the
+  GitHub App delivery, starts the matching workflows, and owns their GitHub Check lifecycle.
 - `webhook({ path, secret, signatureHeader, schema? })` is POST-only and verifies raw-body
   HMAC-SHA256.
 - `webhook({ schema })` validates with Standard Schema and types `event` as the validation output.
@@ -103,34 +107,52 @@ Triggers are explicit. There is no default public start endpoint.
 - `.filter(typeGuard)` narrows and gates the event after schema validation.
 - Workflows may share a webhook path when their verification configuration is identical.
 
-Webhook responses are `202` when a run starts, `200 { skipped: true }` when none do, `401` for
+Webhook responses are `202` when work is admitted, `200 { skipped: true }` when none do, `401` for
 authentication or timestamp failure, `400` for signed malformed JSON, and `500` for throwing
-trigger evaluation.
+trigger evaluation. GitHub deliveries are deduplicated for seven days and dispatched from a durable
+outbox after the ingress response.
 
 ## Secrets
 
 Declare every workflow secret in `secrets`, including webhook signing secrets. In `trigger(ctx)`,
 `ctx.secrets.X` is a branded secret reference. In the handler it is the runtime string value.
 Deploy fails before upload when a declared secret is missing from both the environment and the repo
-Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal runner bindings.
+Worker. Secret names cannot collide with the `WORKFLOWS`, `LOADER`, or internal runner and GitHub
+bindings.
+
+GitHub triggers use three internal App bindings rather than authored workflow secrets:
+`RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and `RUNWAY_GITHUB_WEBHOOK_SECRET`. The private
+key may be GitHub's generated PKCS#1 PEM or a PKCS#8 PEM. These values are available to deployment
+and the managed runtime only; handlers and run-secret snapshots never receive them.
 
 ## Deploy Model
 
 Runway deploys one orchestration Worker per repository. That Worker owns webhook and cron routing,
-one Dynamic Workflows binding, one Worker Loader binding, and an internal command-runner binding.
-Per-workflow code is loaded through Worker Loader and Dynamic Workflows. The runner container starts
-lazily on the first `step.exec()` in a run and is destroyed after workflow completion or failure.
-Deploy captures the current public `origin` and exact `HEAD` commit inside each immutable workflow
-artifact. Before the first command, the runner reconstructs that commit in `/workspace`. Commands in
-one run reuse the checkout, including across `step.sleep()`. If a fresh Sandbox no longer contains
-the matching checkout marker, the runner reconstructs the same commit before the next command.
-Private repository authentication is not yet supported.
+one Dynamic Workflows binding, one Worker Loader binding, an internal command-runner binding, and a
+repo-scoped coordinator whose instances are used only for GitHub triggers. Per-workflow code is loaded through
+Worker Loader and Dynamic Workflows. The runner container starts lazily on the first `step.exec()` in
+a run and is destroyed after workflow completion or failure.
+
+Deploy captures `origin` and exact `HEAD` inside each immutable workflow artifact. Public remotes
+remain unauthenticated. For a GitHub remote with App credentials, deploy resolves and stores only
+its stable repository and installation identity. A verified GitHub delivery overrides the artifact
+source with its exact run repository and SHA. Before the first command, the runner reconstructs that
+commit in `/workspace`. Commands in one run reuse the checkout, including across `step.sleep()`. If
+a fresh Sandbox no longer contains the matching checkout marker, the runner reconstructs the same
+commit before the next command and mints a new repository-scoped installation token when needed.
+Tokens travel only through the checkout process environment and are redacted from managed output.
 
 Cloudflare Sandbox backup/restore is not enabled. It currently requires an R2 binding and production
 presigning credentials, expired backup objects require separate lifecycle cleanup, and restored
 mounts must themselves be restored again after a container restart. Repository source therefore
-uses deterministic reconstruction rather than filesystem persistence. Cache transport remains
-deferred until its own R2-backed protocol is implemented and measured.
+uses deterministic reconstruction rather than filesystem persistence.
+
+This repository bootstraps its Linux CI toolchain and lockfile-resolved dependencies from a
+reproducible, content-addressed archive in a dedicated public R2 cache bucket. Each archive chunk
+and the complete archive are SHA-256 verified before extraction. That bucket contains only the
+toolchain and dependency tree: workflow artifacts, repository source, run data, and credentials
+remain in private storage. This bootstrap is specific to Runway's own workflows; general cache
+transport through tools such as Turborepo and Nx remains a later milestone.
 
 Cloudflare Workflow rollback cleans up ordinary failed runs, but a live deployment smoke test
 returned `rollback: null` after terminating an active command. The internal runner adapter therefore
@@ -142,35 +164,70 @@ the package name, then the directory basename, normalized as a Cloudflare-compat
 name identifies the Worker script, Dynamic Workflow resource, and workers.dev host.
 
 `runway deploy` uses the Cloudflare SDK. It bundles in memory, uploads the Worker, reconciles the
-hidden Sandbox Durable Object and container application, updates its Dynamic Workflow, replaces
-cron schedules, enables workers.dev, and removes stale Workflow resources belonging to the same
-script.
+hidden Sandbox and GitHub coordinator Durable Objects and container application, updates its
+Dynamic Workflow, replaces cron schedules, enables workers.dev, and removes stale Workflow
+resources belonging to the same script. The managed runner uses Cloudflare's `standard-1`
+container tier. When deployment changes an existing container definition, Runway explicitly starts
+the required rollout and waits for it to complete; updating application metadata alone does not
+activate the new runner configuration.
+
+## GitHub App Setup
+
+Create a GitHub App named Runway for the repository integration. It needs Contents read, Pull
+requests read, and Checks write permissions, and subscriptions to Push and Pull request events.
+Install it only on the repository being deployed. Set its webhook secret to the same value as
+`RUNWAY_GITHUB_WEBHOOK_SECRET`; after the first deploy, set the App webhook URL to the printed
+`github` URL.
+
+Provide the App ID and private key locally for every deploy. Provide the webhook secret locally for
+the first deploy, or store it on the repo Worker for later preservation:
+
+```sh
+export RUNWAY_GITHUB_APP_ID=12345
+export RUNWAY_GITHUB_PRIVATE_KEY="$(cat /path/to/github-app.pem)"
+export RUNWAY_GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+runway deploy
+```
+
+The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows run for
+pushes to `main` and pull requests opened, reopened, or synchronized. This evidence-gated cutover
+makes Runway the repository's CI provider by deleting the duplicate GitHub Actions workflow.
+
+The cutover was gated by live evidence on 2026-07-16. The installed App, `Runway by casparbreloh`,
+accepted delivery `4ce375d0-812e-11f1-8d6c-4c67fc189943` for exact PR head
+`cc86fa5820f78d7dfce15cb2ffbc6507d03bccfb`. Generation 42 completed Check
+`87671213580` and Test `87671211046` successfully, with Runway external IDs ending in `-42`.
+Supersession cancelled generation 34 Check `87638027646` and Test `87638030943`, while unrelated
+Actions checks remained successful. An authenticated recovery run checked out exact SHA
+`8c63b9a00f7a15c8ed66eaad1dba33730609dfe4`, changed Sandbox placement after `Sandbox.destroy()`,
+reminted repository-scoped authentication, reused the recovered placement for the next command,
+kept credentials out of diagnostics, and left no owned smoke resources. The `main` branch was
+unprotected, so the cutover required no branch-rule migration.
 
 ## Scope
 
-The current foundation includes workflows, triggers, secrets, routing, discovery, validation,
-deployment, durable steps, durable sleep, immutable workflow artifacts, public repository checkout,
-and managed command execution. A live deployment smoke test covers workspace reuse across sleep,
-process-group timeout cleanup, and active-step termination. Forced replacement recovery currently
-has Workers-runtime seam coverage; its repeatable live smoke and measurements are still pending. It
-does not yet include private repository checkout, caching, GitHub integration, run artifacts,
-application deployment primitives, AI, agents, or public Sandbox access.
+The current implementation includes workflows, triggers, secrets, routing, discovery, validation,
+deployment, durable steps, durable sleep, immutable workflow artifacts, authenticated private GitHub
+checkout, GitHub delivery dispatch and Checks, scoped supersession, and managed command execution.
+Public and authenticated repository recovery and the complete GitHub self-hosting flow have
+repeatable live evidence. Runway does not yet include general-purpose cache transport, run
+artifacts, application deployment primitives, AI, agents, or public Sandbox access.
 
 Cloudflare is the only backend target. Current deployments require Workers, Workflows, Dynamic
 Workflows, Worker Loader, and schedules. Workflow resumes load their exact immutable workflow
 artifact and durable run-secret snapshot.
 
-## Example
+## This Repository's Workflows
 
-See [example/.runway/workflows/daily-summary.ts](example/.runway/workflows/daily-summary.ts) for a
-minimal scheduled workflow using `step.do()` and `step.exec()`.
+Runway dogfoods its authoring model through [`.runway/workflows/`](.runway/workflows). These files
+are part of the root TypeScript solution, so ordinary `pnpm typecheck` verifies them.
 
 ## Testing
 
 Worker and Workflow integration tests run locally inside `workerd` through Cloudflare's Vitest
 integration. The suite tests public SDK, Workers runtime, generated runner adapter, CLI, and
-Cloudflare API boundaries. Sandbox replacement and exact repository reconstruction are simulated at
-that seam; the forced-replacement path has not yet been proven by the repeatable live smoke.
+Cloudflare API boundaries. Repeatable live smokes also prove public and authenticated exact-SHA
+repository reconstruction after forced Sandbox replacement and audit their owned-resource cleanup.
 
 ```sh
 pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test

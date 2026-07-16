@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { RegisteredWorkflow, Registry } from "./types.ts";
+import type { GitHubRepository, RegisteredWorkflow, Registry } from "./types.ts";
 import { validateRegistry } from "./validate.ts";
 import { DYNAMIC_WORKFLOW_CLASS, RUNWAY_WORKFLOW_CLASS } from "./worker-contract.ts";
 
@@ -39,40 +39,53 @@ export const generateHost = (
     workflowArtifacts: Readonly<Record<string, string>>;
     deploymentId: string;
     secretSnapshotKey: string;
+    github?: { readonly repository: GitHubRepository; readonly installationId: number };
   },
 ): string => {
   validateRegistry(registry);
   const routes = registry.map((workflow) => {
     const artifactVersion = opts.workflowArtifacts[workflow.def.id]!;
-    return workflow.def.trigger.type === "webhook"
-      ? {
-          id: workflow.def.id,
-          artifactVersion,
-          type: "webhook",
-          path: workflow.def.trigger.path,
-        }
-      : {
-          id: workflow.def.id,
-          artifactVersion,
-          type: "cron",
-          expression: workflow.def.trigger.expression,
-        };
+    if (workflow.def.trigger.type === "webhook") {
+      return {
+        id: workflow.def.id,
+        artifactVersion,
+        type: "webhook",
+        path: workflow.def.trigger.path,
+      };
+    }
+    if (workflow.def.trigger.type === "github") {
+      return {
+        id: workflow.def.id,
+        artifactVersion,
+        type: "github",
+        checkName: workflow.def.trigger.checkName,
+        events: workflow.def.trigger.events,
+      };
+    }
+    return {
+      id: workflow.def.id,
+      artifactVersion,
+      type: "cron",
+      expression: workflow.def.trigger.expression,
+    };
   });
   const config = JSON.stringify({
     scriptName: opts.scriptName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,
+    github: opts.github,
     routes,
   });
   return `import { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { Sandbox } from "@cloudflare/sandbox";
 import {
+  RunwayGitHubCoordinator,
   RunwayRunnerBinding,
   createDynamicWorkflow,
   createHost,
 } from "runway:host-runtime";
 
-export { DynamicWorkflowBinding, RunwayRunnerBinding, Sandbox };
+export { DynamicWorkflowBinding, RunwayGitHubCoordinator, RunwayRunnerBinding, Sandbox };
 
 const config = ${config};
 

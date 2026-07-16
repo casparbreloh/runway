@@ -1,16 +1,19 @@
 import { toFile } from "cloudflare";
 
 import type { CloudflareApi } from "./cloudflare-api.ts";
+import type { RunwayMigration } from "./deploy-container.ts";
 import {
+  GITHUB_COORDINATOR_BINDING,
+  GITHUB_COORDINATOR_CLASS,
   RUNNER_CONTAINER,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
-  SANDBOX_MIGRATION_TAG,
 } from "./runner-config.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   COMPATIBILITY_DATE,
   DYNAMIC_WORKFLOW_CLASS,
+  GITHUB_SECRET_BINDINGS,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
   WORKFLOW_BINDING,
@@ -25,7 +28,7 @@ interface WorkerUploadOptions {
   readonly artifactBucketName: string;
   readonly contents: Uint8Array;
   readonly secretBindings: Readonly<Record<string, string>>;
-  readonly needsSandboxMigration: boolean;
+  readonly migration?: RunwayMigration;
 }
 
 export const validateBindings = (secrets: ReadonlyArray<string>): void => {
@@ -34,6 +37,10 @@ export const validateBindings = (secrets: ReadonlyArray<string>): void => {
   names.set(LOADER_BINDING, "Runway worker loader binding");
   names.set(ARTIFACT_BUCKET_BINDING, "Runway workflow artifact binding");
   names.set(SANDBOX_BINDING, "Runway sandbox binding");
+  names.set(GITHUB_COORDINATOR_BINDING, "Runway GitHub coordinator binding");
+  for (const binding of GITHUB_SECRET_BINDINGS) {
+    names.set(binding, "Runway GitHub App binding");
+  }
   for (const secret of secrets) {
     if (isSecretSnapshotKeyBinding(secret)) {
       throw new Error(`binding ${JSON.stringify(secret)} is used by Runway and a secret`);
@@ -69,6 +76,11 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
         name: SANDBOX_BINDING,
         class_name: SANDBOX_CLASS,
       },
+      {
+        type: "durable_object_namespace" as const,
+        name: GITHUB_COORDINATOR_BINDING,
+        class_name: GITHUB_COORDINATOR_CLASS,
+      },
       ...Object.entries(opts.secretBindings).map(([name, text]) => ({
         type: "secret_text" as const,
         name,
@@ -76,14 +88,7 @@ const metadataOf = (opts: WorkerUploadOptions): ScriptMetadata =>
       })),
     ],
     containers: [RUNNER_CONTAINER],
-    ...(opts.needsSandboxMigration
-      ? {
-          migrations: {
-            new_tag: SANDBOX_MIGRATION_TAG,
-            new_sqlite_classes: [SANDBOX_CLASS],
-          },
-        }
-      : {}),
+    ...(opts.migration ? { migrations: opts.migration } : {}),
   }) as ScriptMetadata;
 
 export const uploadWorker = async (cf: CloudflareApi, opts: WorkerUploadOptions): Promise<void> => {

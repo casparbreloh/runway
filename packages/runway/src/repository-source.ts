@@ -1,17 +1,104 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import type { GitHubRepository } from "./types.ts";
+
+interface PublicRepositoryAuthentication {
+  readonly type: "public";
+}
+
+export interface GitHubRepositoryAuthentication {
+  readonly type: "github";
+  readonly installationId: number;
+  readonly repository: GitHubRepository;
+}
+
 export interface RepositorySource {
   readonly remote: string;
   readonly commit: string;
-  readonly authentication: { readonly type: "public" };
+  readonly authentication: PublicRepositoryAuthentication | GitHubRepositoryAuthentication;
+}
+
+export interface GitHubRunSource {
+  readonly type: "github";
+  readonly installationId: number;
+  readonly repository: GitHubRepository;
+  readonly commit: string;
+  readonly deliveryId: string;
+  readonly runId: string;
+  readonly generation: number;
+  readonly check: {
+    readonly id: number;
+    readonly name: string;
+    readonly repository: GitHubRepository;
+  };
+}
+
+interface ReachabilityExecOptions {
+  readonly cwd?: string;
+  readonly encoding: "utf8";
+  readonly timeout?: number;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+export interface RepositoryReachabilityOptions {
+  readonly installationToken?: (request: {
+    readonly purpose: "checkout";
+    readonly authentication: GitHubRepositoryAuthentication;
+  }) => Promise<string>;
+  readonly exec?: (
+    file: string,
+    args: ReadonlyArray<string>,
+    options: ReachabilityExecOptions,
+  ) => Promise<{ readonly stdout: string }>;
 }
 
 const execFileAsync = promisify(execFile);
 const REPOSITORY_REACHABILITY_TIMEOUT_MS = 60_000;
+const SHA = /^[0-9a-f]{40}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const positiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
+const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean =>
+  Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+
+export const githubRepositoryRemote = (repository: GitHubRepository): string => {
+  const parts = repository.fullName.split("/");
+  if (
+    !positiveInteger(repository.id) ||
+    parts.length !== 2 ||
+    !parts[0] ||
+    !parts[1] ||
+    !REPOSITORY_PART.test(parts[0]) ||
+    !REPOSITORY_PART.test(parts[1]) ||
+    repository.name !== parts[1]
+  ) {
+    throw new Error("invalid GitHub repository identity");
+  }
+  return `https://github.com/${repository.fullName}`;
+};
+
+const parseGitHubRepository = (value: unknown): GitHubRepository => {
+  if (!isRecord(value) || !exactKeys(value, ["id", "name", "fullName"])) {
+    throw new Error("invalid GitHub repository identity");
+  }
+  const repository = value as unknown as GitHubRepository;
+  githubRepositoryRemote(repository);
+  return {
+    id: repository.id,
+    name: repository.name,
+    fullName: repository.fullName,
+  };
+};
 
 const publicRemote = (remote: string): string => {
   const scp = /^git@github\.com:([^/]+\/.+)$/.exec(remote);
@@ -30,6 +117,100 @@ const publicRemote = (remote: string): string => {
   return parsed.toString();
 };
 
+export const parseRepositorySource = (value: unknown): RepositorySource => {
+  if (!isRecord(value) || !exactKeys(value, ["remote", "commit", "authentication"])) {
+    throw new Error("invalid repository source");
+  }
+  const { remote, commit, authentication } = value;
+  if (
+    typeof remote !== "string" ||
+    typeof commit !== "string" ||
+    !SHA.test(commit) ||
+    !isRecord(authentication)
+  ) {
+    throw new Error("invalid repository source");
+  }
+  if (exactKeys(authentication, ["type"]) && authentication.type === "public") {
+    const normalizedRemote = publicRemote(remote);
+    if (normalizedRemote !== remote) throw new Error("invalid repository source");
+    return { remote, commit, authentication: { type: "public" } };
+  }
+  if (
+    exactKeys(authentication, ["type", "installationId", "repository"]) &&
+    authentication.type === "github" &&
+    positiveInteger(authentication.installationId)
+  ) {
+    const repository = parseGitHubRepository(authentication.repository);
+    if (remote !== githubRepositoryRemote(repository)) throw new Error("invalid repository source");
+    return {
+      remote,
+      commit,
+      authentication: {
+        type: "github",
+        installationId: authentication.installationId,
+        repository,
+      },
+    };
+  }
+  throw new Error("invalid repository source");
+};
+
+export const parseGitHubRunSource = (value: unknown): GitHubRunSource => {
+  if (
+    !isRecord(value) ||
+    !exactKeys(value, [
+      "type",
+      "installationId",
+      "repository",
+      "commit",
+      "deliveryId",
+      "runId",
+      "generation",
+      "check",
+    ]) ||
+    value.type !== "github" ||
+    !positiveInteger(value.installationId) ||
+    typeof value.commit !== "string" ||
+    !SHA.test(value.commit) ||
+    typeof value.deliveryId !== "string" ||
+    !UUID.test(value.deliveryId) ||
+    typeof value.runId !== "string" ||
+    value.runId.length === 0 ||
+    !positiveInteger(value.generation) ||
+    !isRecord(value.check) ||
+    !exactKeys(value.check, ["id", "name", "repository"]) ||
+    !positiveInteger(value.check.id) ||
+    typeof value.check.name !== "string" ||
+    value.check.name.length === 0
+  ) {
+    throw new Error("invalid GitHub run source");
+  }
+  return {
+    type: "github",
+    installationId: value.installationId,
+    repository: parseGitHubRepository(value.repository),
+    commit: value.commit,
+    deliveryId: value.deliveryId,
+    runId: value.runId,
+    generation: value.generation,
+    check: {
+      id: value.check.id,
+      name: value.check.name,
+      repository: parseGitHubRepository(value.check.repository),
+    },
+  };
+};
+
+export const repositorySourceForRun = (source: GitHubRunSource): RepositorySource => ({
+  remote: githubRepositoryRemote(source.repository),
+  commit: source.commit,
+  authentication: {
+    type: "github",
+    installationId: source.installationId,
+    repository: source.repository,
+  },
+});
+
 const git = async (cwd: string, args: ReadonlyArray<string>): Promise<string> => {
   try {
     const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -44,36 +225,63 @@ export const resolveRepositorySource = async (cwd: string): Promise<RepositorySo
     git(cwd, ["remote", "get-url", "origin"]),
     git(cwd, ["rev-parse", "HEAD"]),
   ]);
-  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`invalid repository commit: ${commit}`);
-  return {
+  if (!SHA.test(commit)) throw new Error(`invalid repository commit: ${commit}`);
+  return parseRepositorySource({
     remote: publicRemote(remote),
     commit,
     authentication: { type: "public" },
-  };
+  });
 };
+
+const askpassSource = `#!/bin/sh
+case "$1" in
+  "Username for 'https://github.com': ") printf '%s\\n' 'x-access-token' ;;
+  "Password for 'https://x-access-token@github.com': ") printf '%s\\n' "$RUNWAY_GITHUB_TOKEN" ;;
+  *) exit 1 ;;
+esac
+`;
 
 export const assertRepositorySourceReachable = async (
   repository: RepositorySource,
+  options: RepositoryReachabilityOptions = {},
 ): Promise<void> => {
+  const source = parseRepositorySource(repository);
   const cwd = await mkdtemp(path.join(tmpdir(), "runway-repository-"));
+  const askpass = path.join(cwd, "git-askpass");
+  let token: string | undefined;
+  const execute = options.exec ?? (execFileAsync as unknown as NonNullable<typeof options.exec>);
   try {
-    await execFileAsync("git", ["-C", cwd, "init", "--quiet"], { encoding: "utf8" });
-    await execFileAsync(
+    await execute("git", ["-C", cwd, "init", "--quiet"], { encoding: "utf8" });
+    const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    if (source.authentication.type === "github") {
+      if (!options.installationToken) throw new Error("missing GitHub repository authentication");
+      token = await options.installationToken({
+        purpose: "checkout",
+        authentication: source.authentication,
+      });
+      if (!token) throw new Error("missing GitHub repository authentication");
+      await writeFile(askpass, askpassSource, { mode: 0o700 });
+      env.GIT_ASKPASS = askpass;
+      env.RUNWAY_GITHUB_TOKEN = token;
+    }
+    await execute(
       "git",
       [
+        "-c",
+        "http.followRedirects=false",
         "-C",
         cwd,
         "fetch",
         "--quiet",
         "--depth=1",
         "--filter=blob:none",
-        repository.remote,
-        repository.commit,
+        source.remote,
+        source.commit,
       ],
-      { encoding: "utf8", timeout: REPOSITORY_REACHABILITY_TIMEOUT_MS },
+      { encoding: "utf8", timeout: REPOSITORY_REACHABILITY_TIMEOUT_MS, env },
     );
   } catch {
-    throw new Error(`repository remote does not contain commit ${repository.commit}`);
+    throw new Error(`repository remote does not contain commit ${source.commit}`);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
