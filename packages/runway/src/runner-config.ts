@@ -9,7 +9,7 @@ export const GITHUB_COORDINATOR_MIGRATION_TAG = "runway-github-coordinator-v2";
 export const RUNNER_CONTAINER = {
   class_name: SANDBOX_CLASS,
   image: SANDBOX_IMAGE,
-  instance_type: "basic",
+  instance_type: "standard-1",
 } as const;
 
 export const RUNNER_APPLICATION = {
