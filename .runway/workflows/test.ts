@@ -19,7 +19,7 @@ export default workflow({
   await ctx.step.exec("toolchain", "node --version && npm --version && pnpm --version");
   await ctx.step.exec(
     "install",
-    "pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=8",
+    "pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=64",
   );
   await ctx.step.exec("test", "pnpm test");
 });
