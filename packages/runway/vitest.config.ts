@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     name: "runway-node",
     include: [
+      "tests/cache.test.ts",
       "tests/cli.test.ts",
       "tests/cloudflare-cache.test.ts",
       "tests/cloudflare-sandbox.test.ts",
