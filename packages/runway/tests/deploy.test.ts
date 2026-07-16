@@ -82,6 +82,8 @@ interface ApiCalls {
   artifactUploads: Array<{ bucket: string; key: string; contents: Uint8Array }>;
   containerCreates: unknown[];
   containerModifies: unknown[];
+  containerRolloutCreates: unknown[];
+  containerRolloutGets: unknown[];
   metadata?: unknown;
   schedules?: unknown;
   scriptUpdates: string[];
@@ -102,6 +104,8 @@ const fakeApi = (
     secrets?: ReadonlyArray<{ name: string }>;
     bucketExists?: boolean;
     bucketError?: unknown;
+    rolloutCreateError?: unknown;
+    rolloutStatus?: string;
   } = {},
 ): CloudflareApi => ({
   accounts: {
@@ -170,6 +174,17 @@ const fakeApi = (
         calls.containerModifies.push(args);
       },
     },
+    rollouts: {
+      create: async (...args) => {
+        calls.containerRolloutCreates.push(args);
+        if (opts.rolloutCreateError) throw opts.rolloutCreateError;
+        return { id: "rollout" };
+      },
+      get: async (...args) => {
+        calls.containerRolloutGets.push(args);
+        return { status: opts.rolloutStatus ?? "completed" };
+      },
+    },
   },
   r2: {
     buckets: {
@@ -200,6 +215,8 @@ const emptyCalls = (): ApiCalls => ({
   artifactUploads: [],
   containerCreates: [],
   containerModifies: [],
+  containerRolloutCreates: [],
+  containerRolloutGets: [],
   scriptUpdates: [],
   workflowUpdates: [],
   workflowDeletes: [],
@@ -1107,9 +1124,11 @@ test("deploy reuses the matching container application and does not replay its v
         scheduling_policy: "default",
         configuration: {
           image: "docker.io/cloudflare/sandbox:0.12.3",
-          instance_type: "basic",
+          vcpu: 0.25,
+          memory_mib: 1_024,
+          disk: { size_mb: 4_000 },
         },
-        instances: 0,
+        instances: 7,
         max_instances: 20,
         constraints: { tiers: [1, 2] },
         durable_objects: { namespace_id: "sandbox-namespace" },
@@ -1128,6 +1147,7 @@ test("deploy reuses the matching container application and does not replay its v
     expect((calls.metadata as { migrations?: unknown }).migrations).toBeUndefined();
     expect(calls.containerCreates).toEqual([]);
     expect(calls.containerModifies).toEqual([]);
+    expect(calls.containerRolloutCreates).toEqual([]);
   } finally {
     await project.cleanup();
   }
@@ -1169,6 +1189,75 @@ test("deploy reconciles stale container application configuration", async () => 
         },
       ],
     ]);
+    expect(calls.containerRolloutCreates).toEqual([
+      [
+        "application",
+        {
+          account_id: "account",
+          body: {
+            description: "Runway deployment",
+            strategy: "rolling",
+            target_configuration: {
+              image: "docker.io/cloudflare/sandbox:0.12.3",
+              instance_type: "basic",
+            },
+            step_percentage: 25,
+            kind: "full_auto",
+          },
+        },
+      ],
+    ]);
+    expect(calls.containerRolloutGets).toEqual([
+      ["application", "rollout", { account_id: "account" }],
+    ]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy surfaces container rollout creation failures", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        configuration: { image: "old-image", instance_type: "lite" },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+      },
+    ],
+    rolloutCreateError: new Error("rollout failed"),
+  });
+
+  try {
+    await expect(
+      deployReady(calls, { cwd: project.cwd, env: deployEnv, client: () => client }),
+    ).rejects.toThrow("rollout failed");
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy rejects a reverted container rollout", async () => {
+  const project = await writeProject();
+  const calls = emptyCalls();
+  const client = fakeApi(calls, {
+    applications: [
+      {
+        id: "application",
+        name: "runway-ship-it-Sandbox",
+        configuration: { image: "old-image", instance_type: "lite" },
+        durable_objects: { namespace_id: "sandbox-namespace" },
+      },
+    ],
+    rolloutStatus: "reverted",
+  });
+
+  try {
+    await expect(
+      deployReady(calls, { cwd: project.cwd, env: deployEnv, client: () => client }),
+    ).rejects.toThrow("container rollout reverted");
   } finally {
     await project.cleanup();
   }

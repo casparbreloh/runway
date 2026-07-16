@@ -9,6 +9,56 @@ import {
   SANDBOX_MIGRATION_TAG,
 } from "./runner-config.ts";
 
+const INSTANCE_TYPES = {
+  lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },
+  basic: { vcpu: 0.25, memoryMib: 1_024, diskMb: 4_000 },
+  "standard-1": { vcpu: 0.5, memoryMib: 4_096, diskMb: 8_000 },
+  "standard-2": { vcpu: 1, memoryMib: 6_144, diskMb: 12_000 },
+  "standard-3": { vcpu: 2, memoryMib: 8_192, diskMb: 16_000 },
+  "standard-4": { vcpu: 4, memoryMib: 12_288, diskMb: 20_000 },
+} as const;
+
+const matchesInstanceType = (configuration: {
+  instance_type?: unknown;
+  vcpu?: unknown;
+  memory_mib?: unknown;
+  disk?: { size_mb?: unknown };
+}): boolean => {
+  const instanceType = RUNNER_APPLICATION.configuration.instance_type;
+  if (configuration.instance_type === instanceType) return true;
+  const expected = INSTANCE_TYPES[instanceType];
+  return (
+    configuration.vcpu === expected.vcpu &&
+    configuration.memory_mib === expected.memoryMib &&
+    configuration.disk?.size_mb === expected.diskMb
+  );
+};
+
+const waitForRollout = async (
+  cf: CloudflareApi,
+  accountId: string,
+  applicationId: string,
+  rolloutId: string,
+): Promise<void> => {
+  const deadline = Date.now() + 5 * 60_000;
+  while (Date.now() < deadline) {
+    const rollout = resultOf(
+      await cf.containers.rollouts.get(applicationId, rolloutId, { account_id: accountId }),
+    );
+    const status =
+      rollout && typeof rollout === "object" ? (rollout as { status?: unknown }).status : undefined;
+    if (status === "completed") return;
+    if (status === "reverted" || status === "replaced") {
+      throw new Error(`container rollout ${status}`);
+    }
+    if (status !== "pending" && status !== "progressing") {
+      throw new Error("invalid container rollout status");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("container rollout timed out");
+};
+
 export const currentSandboxMigrationTag = async (
   cf: CloudflareApi,
   accountId: string,
@@ -93,7 +143,13 @@ export const reconcileSandboxContainer = async (
       instances?: unknown;
       max_instances?: unknown;
       constraints?: { tiers?: unknown };
-      configuration?: { image?: unknown; instance_type?: unknown };
+      configuration?: {
+        image?: unknown;
+        instance_type?: unknown;
+        vcpu?: unknown;
+        memory_mib?: unknown;
+        disk?: { size_mb?: unknown };
+      };
       durable_objects?: { namespace_id?: unknown };
       rollout_active_grace_period?: unknown;
     };
@@ -103,10 +159,9 @@ export const reconcileSandboxContainer = async (
     }
     const matches =
       application.scheduling_policy === RUNNER_APPLICATION.scheduling_policy &&
-      application.instances === RUNNER_APPLICATION.instances &&
       application.max_instances === RUNNER_APPLICATION.max_instances &&
       application.configuration?.image === RUNNER_APPLICATION.configuration.image &&
-      application.configuration.instance_type === RUNNER_APPLICATION.configuration.instance_type &&
+      matchesInstanceType(application.configuration ?? {}) &&
       JSON.stringify(application.constraints?.tiers) ===
         JSON.stringify(RUNNER_APPLICATION.constraints.tiers) &&
       application.rollout_active_grace_period === RUNNER_APPLICATION.rollout_active_grace_period;
@@ -118,6 +173,22 @@ export const reconcileSandboxContainer = async (
       account_id: accountId,
       body: RUNNER_APPLICATION,
     });
+    const rollout = resultOf(
+      await cf.containers.rollouts.create(application.id, {
+        account_id: accountId,
+        body: {
+          description: "Runway deployment",
+          strategy: "rolling",
+          target_configuration: RUNNER_APPLICATION.configuration,
+          step_percentage: 25,
+          kind: "full_auto",
+        },
+      }),
+    );
+    const rolloutId =
+      rollout && typeof rollout === "object" ? (rollout as { id?: unknown }).id : undefined;
+    if (typeof rolloutId !== "string") throw new Error("invalid container rollout");
+    await waitForRollout(cf, accountId, application.id, rolloutId);
     return;
   }
 
