@@ -1022,41 +1022,6 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     await this.#scheduleNextAlarm(now);
   }
 
-  async seedForTest(entries: Record<string, unknown>): Promise<void> {
-    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
-    await this.ctx.storage.put(entries);
-  }
-
-  async admitResultForTest(
-    admission: GitHubCoordinatorAdmission,
-  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }> {
-    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
-    try {
-      await this.admit(admission);
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : "invalid GitHub coordinator state",
-      };
-    }
-  }
-
-  async alarmResultForTest(): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
-  > {
-    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
-    try {
-      await this.alarm();
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : "invalid GitHub coordinator state",
-      };
-    }
-  }
-
   async #now(): Promise<number> {
     const value = this.env.RUNWAY_GITHUB_CLOCK
       ? await this.env.RUNWAY_GITHUB_CLOCK.now()

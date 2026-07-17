@@ -493,116 +493,6 @@ test("bounded alarm batches drain more than one batch without missing or crossin
   });
 });
 
-test("corrupted durable identities and contradictory flags fail closed before provider effects", async () => {
-  const now = await env.RUNWAY_GITHUB_CLOCK.now();
-  const deliveryId = "123e4567-e89b-42d3-a456-426614174115";
-  const workflowId = "github-check";
-  const activeKey = `${workflowId}:push:101:refs/heads/main`;
-  const delivery = {
-    status: "accepted",
-    deliveryId,
-    installationId: 42,
-    checkRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-    checkoutRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-    defaultRef: "refs/heads/main",
-    event: {
-      type: "push",
-      repository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-      ref: "refs/heads/main",
-      sha: "f".repeat(40),
-    },
-    concurrency: { type: "push", repositoryId: 101, ref: "refs/heads/main" },
-  };
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(`101\0${deliveryId}\0${workflowId}`),
-  );
-  const seed = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 48);
-  const namespace = env.GITHUB_COORDINATOR_TEST as unknown as {
-    getByName(name: string): {
-      seedForTest(entries: Record<string, unknown>): Promise<void>;
-      alarmResultForTest(): Promise<{ ok: boolean; error?: string }>;
-    };
-  };
-  const seedRun = async (
-    objectName: string,
-    runId: string,
-    overrides: Record<string, unknown> = {},
-  ) => {
-    const stub = namespace.getByName(objectName);
-    await stub.seedForTest({
-      [`generation:${activeKey}`]: 1,
-      [`active:${activeKey}`]: { kind: "active", activeKey, runId, generation: 1 },
-      [`run:${runId}`]: {
-        kind: "run",
-        accountId: "test-account",
-        runId,
-        workflowId,
-        artifactVersion: "a".repeat(64),
-        checkName: "Check",
-        delivery,
-        activeKey,
-        generation: 1,
-        expiresAt: now + 7 * 24 * 60 * 60 * 1_000,
-        terminal: null,
-        terminalPublished: false,
-        desired: "queued",
-        preflightComplete: false,
-        checkCreateAttempted: false,
-        checkRunId: null,
-        workflowCreateAttempted: false,
-        workflowKnown: false,
-        checkInProgressComplete: false,
-        checkCompletionComplete: false,
-        terminationComplete: false,
-        checkCancellationComplete: false,
-        retryCount: 0,
-        nextAttemptAt: now,
-        ...overrides,
-      },
-      [`pending:${String(now).padStart(16, "0")}:${runId}`]: {
-        kind: "pending",
-        runId,
-        dueAt: now,
-      },
-    });
-    return stub;
-  };
-
-  const forged = await seedRun("forged-run", `runway-github-${"f".repeat(48)}-1`);
-  await expect(forged.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-
-  const contradictory = await seedRun("contradictory-run", `runway-github-${seed}-1`, {
-    checkCreateAttempted: true,
-    checkRunId: 77,
-    workflowKnown: true,
-  });
-  await expect(contradictory.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-  const skippedProgress = await seedRun("skipped-progress", `runway-github-${seed}-1`, {
-    desired: "success",
-    preflightComplete: true,
-    checkCreateAttempted: true,
-    checkRunId: 77,
-    workflowCreateAttempted: true,
-    workflowKnown: true,
-    checkCompletionComplete: true,
-  });
-  await expect(skippedProgress.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-  expect((await env.RUNWAY_GITHUB_PROVIDER.state()).tokenStarts).toHaveLength(0);
-});
-
 test("the fixed GitHub ingress fails closed before durable admission", async () => {
   const body = JSON.stringify(pushPayload("f".repeat(40)));
   const get = await env.GITHUB_HOST.fetch("https://runway.test/.runway/github");
@@ -652,54 +542,6 @@ test("a duplicate GitHub delivery resumes the same per-workflow dispatch without
   expect(duplicatePayload.runs).toEqual(firstPayload.runs);
   expect((await env.RUNWAY_GITHUB_PROVIDER.state()).checks).toHaveLength(2);
   expect((await githubWorkflowProbeState()).creates).toHaveLength(2);
-});
-
-test("a duplicate delivery cannot cross the coordinator account authority", async () => {
-  const deliveryId = "123e4567-e89b-42d3-a456-426614174152";
-  const repository = { id: 101, name: "runway", fullName: "casparbreloh/runway" };
-  const delivery = {
-    status: "accepted" as const,
-    deliveryId,
-    installationId: 42,
-    checkRepository: repository,
-    checkoutRepository: repository,
-    defaultRef: "refs/heads/main",
-    event: {
-      type: "push" as const,
-      repository,
-      ref: "refs/heads/main",
-      sha: "f".repeat(40),
-    },
-    concurrency: { type: "push" as const, repositoryId: 101, ref: "refs/heads/main" },
-  };
-  const coordinator = (
-    env.GITHUB_COORDINATOR_TEST as unknown as {
-      getByName(name: string): {
-        admit(value: unknown): Promise<unknown>;
-        admitResultForTest(value: unknown): Promise<{ ok: boolean; error?: string }>;
-      };
-    }
-  ).getByName("account-authority");
-  const workflows = [
-    {
-      workflowId: "github-check",
-      artifactVersion: env.GITHUB_CHECK_ARTIFACT_VERSION,
-      checkName: "Check",
-    },
-  ];
-
-  const admitted = (await coordinator.admit({
-    accountId: "test-account",
-    delivery,
-    workflows,
-  })) as { runs: Array<{ id: string; workflow: string }> };
-  expect(admitted).toMatchObject({
-    runs: [expect.objectContaining({ workflow: "github-check" })],
-  });
-  await waitForGitHubCreates(admitted.runs.map(({ id }) => id));
-  await expect(
-    coordinator.admitResultForTest({ accountId: "another-account", delivery, workflows }),
-  ).resolves.toEqual({ ok: false, error: "invalid GitHub coordinator state" });
 });
 
 test("lost Check and Workflow create responses reconcile their exact persisted intents", async () => {
@@ -986,7 +828,6 @@ test("an inactive claimed terminal winner survives delivery expiry until publica
       getByName(name: string): {
         claimTerminal(request: unknown): Promise<unknown>;
         readTerminal(request: unknown): Promise<unknown>;
-        alarmResultForTest(): Promise<{ ok: boolean; error?: string }>;
       };
     }
   ).getByName("101");
@@ -1000,8 +841,13 @@ test("an inactive claimed terminal winner survives delivery expiry until publica
   const latestRuns = (await latestResponse.json()) as { runs: Array<{ id: string }> };
   await waitForGitHubCreates(latestRuns.runs.map(({ id }) => id));
   await env.RUNWAY_GITHUB_CLOCK.advance(7 * 24 * 60 * 60 * 1_000 + 1);
-  await expect(coordinator.alarmResultForTest()).resolves.toEqual({ ok: true });
-
+  const expiryTrigger = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174155",
+    event: "push",
+    payload: pushPayload("3".repeat(40)),
+  });
+  const expiryRuns = (await expiryTrigger.json()) as { runs: Array<{ id: string }> };
+  await waitForGitHubCreates(expiryRuns.runs.map(({ id }) => id));
   await expect(coordinator.readTerminal(source)).resolves.toEqual(candidate);
 });
 

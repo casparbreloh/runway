@@ -9,7 +9,7 @@ const HELPER_CPU_SECONDS = 120;
 const HELPER_FILE_DESCRIPTORS = 64;
 const HELPER_TIMEOUT_SECONDS = CACHE_LIMITS.helperDurationMs / 1000;
 
-export const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/local/bin/node
+const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/local/bin/node
 const child = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
