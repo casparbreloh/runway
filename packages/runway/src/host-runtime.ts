@@ -45,6 +45,7 @@ import {
 } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
+import { parseFinalization, parseTerminalIdentity, parseTerminalRecord } from "./terminal.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
@@ -184,33 +185,37 @@ export class RunwaySandboxBinding
 
   async terminal(runId: string): Promise<TerminalIdentity> {
     this.#assertRun(runId);
-    return { ...this.ctx.props.terminal, runId };
+    return parseTerminalIdentity({ ...this.ctx.props.terminal, runId });
   }
 
   async claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
     this.#assertRun(runId);
     const identity = await this.terminal(runId);
+    let parsed: TerminalRecord;
+    try {
+      parsed = parseTerminalRecord(candidate);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
     if (
-      !candidate ||
-      typeof candidate !== "object" ||
-      Object.keys(candidate).sort().join(",") !==
-        "accountId,claimId,generation,outcome,repositoryId,runId,trustId,workflowId" ||
       Object.entries(identity).some(
-        ([field, value]) => candidate[field as keyof TerminalIdentity] !== value,
-      ) ||
-      typeof candidate.claimId !== "string" ||
-      candidate.claimId.length === 0 ||
-      !["success", "failure", "cancelled"].includes(candidate.outcome)
+        ([field, value]) => parsed[field as keyof TerminalIdentity] !== value,
+      )
     ) {
       throw new Error("invalid terminal claim");
     }
     const source = this.ctx.props.source;
-    if (!source) return candidate;
+    if (!source) return parsed;
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
     if (!namespace) throw new Error("GitHub coordinator is not configured");
-    return await namespace
+    const winner = await namespace
       .getByName(String(source.check.repository.id))
-      .claimTerminal({ source, candidate });
+      .claimTerminal({ source, candidate: parsed });
+    try {
+      return parseTerminalRecord(winner);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
   }
 
   async readTerminal(runId: string): Promise<TerminalRecord | undefined> {
@@ -219,7 +224,15 @@ export class RunwaySandboxBinding
     if (!source) return undefined;
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
     if (!namespace) throw new Error("GitHub coordinator is not configured");
-    return await namespace.getByName(String(source.check.repository.id)).readTerminal(source);
+    const record = await namespace
+      .getByName(String(source.check.repository.id))
+      .readTerminal(source);
+    if (record === undefined) return undefined;
+    try {
+      return parseTerminalRecord(record);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
   }
 
   async publishTerminal(
@@ -228,14 +241,10 @@ export class RunwaySandboxBinding
     diagnosticValue: FailureDiagnostic | null,
   ): Promise<void> {
     this.#assertRun(runId);
-    if (
-      !finalization ||
-      typeof finalization !== "object" ||
-      Object.keys(finalization).sort().join(",") !== "claimId,outcome" ||
-      typeof finalization.claimId !== "string" ||
-      finalization.claimId.length === 0 ||
-      !["success", "failure", "cancelled"].includes(finalization.outcome)
-    ) {
+    let parsed: Finalization;
+    try {
+      parsed = parseFinalization(finalization);
+    } catch {
       throw new Error("invalid terminal finalization");
     }
     let diagnostic: FailureDiagnostic | null;
@@ -244,7 +253,7 @@ export class RunwaySandboxBinding
     } catch {
       throw new Error("invalid terminal diagnostic");
     }
-    if (finalization.outcome !== "failure" && diagnostic !== null) {
+    if (parsed.outcome !== "failure" && diagnostic !== null) {
       throw new Error("invalid terminal diagnostic");
     }
     const source = this.ctx.props.source;
@@ -253,7 +262,7 @@ export class RunwaySandboxBinding
     if (!namespace) throw new Error("GitHub coordinator is not configured");
     await namespace.getByName(String(source.check.repository.id)).publishTerminal({
       source,
-      finalization,
+      finalization: parsed,
       diagnostic,
     });
   }

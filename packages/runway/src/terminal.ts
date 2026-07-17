@@ -42,8 +42,7 @@ export class Terminal {
     publish: (finalization: Finalization) => Promise<void>,
     options: { readonly meter?: Meter } = {},
   ) {
-    assertIdentity(identity);
-    this.#identity = identity;
+    this.#identity = parseTerminalIdentity(identity);
     this.#state = state;
     this.#publish = publish;
     this.#meter = options.meter;
@@ -52,21 +51,22 @@ export class Terminal {
 
   async claim(outcome: Outcome): Promise<Finalization> {
     if (!isOutcome(outcome)) throw new TerminalError("invalid terminal outcome");
-    const winner = await this.#state.claim({
-      ...this.#identity,
-      claimId: crypto.randomUUID(),
-      outcome,
-    });
-    this.#assertRecord(winner);
+    const winner = this.#record(
+      await this.#state.claim({
+        ...this.#identity,
+        claimId: crypto.randomUUID(),
+        outcome,
+      }),
+    );
     return { claimId: winner.claimId, outcome: winner.outcome };
   }
 
   async verify(finalization: Finalization): Promise<void> {
-    assertFinalization(finalization);
+    const parsed = parseFinalization(finalization);
     const winner = await this.#state.read();
     if (!winner) throw new TerminalError("unknown terminal claim");
-    this.#assertRecord(winner);
-    if (winner.claimId !== finalization.claimId || winner.outcome !== finalization.outcome) {
+    const record = this.#record(winner);
+    if (record.claimId !== parsed.claimId || record.outcome !== parsed.outcome) {
       throw new TerminalError("terminal finalization does not match the durable winner");
     }
   }
@@ -96,13 +96,14 @@ export class Terminal {
     }
   }
 
-  #assertRecord(record: TerminalRecord): void {
-    assertRecord(record);
+  #record(value: TerminalRecord): TerminalRecord {
+    const record = parseTerminalRecord(value);
     for (const field of identityFields) {
       if (record[field] !== this.#identity[field]) {
         throw new TerminalError("terminal claim belongs to a different authority");
       }
     }
+    return record;
   }
 }
 
@@ -118,39 +119,64 @@ const identityFields = [
 const isOutcome = (value: unknown): value is Outcome =>
   value === "success" || value === "failure" || value === "cancelled";
 
-const assertIdentity = (identity: TerminalIdentity): void => {
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
+  Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+
+export const parseTerminalIdentity = (value: unknown): TerminalIdentity => {
+  if (!isRecord(value) || !exactKeys(value, identityFields)) {
+    throw new TerminalError("invalid terminal identity");
+  }
   for (const field of identityFields.slice(0, -1)) {
-    if (typeof identity[field] !== "string" || identity[field].length === 0) {
+    if (typeof value[field] !== "string" || value[field].length === 0) {
       throw new TerminalError("invalid terminal identity");
     }
   }
-  if (!Number.isSafeInteger(identity.generation) || identity.generation < 0) {
+  if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) {
     throw new TerminalError("invalid terminal identity");
   }
+  return {
+    accountId: value.accountId as string,
+    repositoryId: value.repositoryId as string,
+    workflowId: value.workflowId as string,
+    runId: value.runId as string,
+    trustId: value.trustId as string,
+    generation: value.generation as number,
+  };
 };
 
-const assertFinalization = (value: Finalization): void => {
+export const parseFinalization = (value: unknown): Finalization => {
   if (
-    !value ||
-    typeof value !== "object" ||
-    Object.keys(value).sort().join(",") !== "claimId,outcome" ||
+    !isRecord(value) ||
+    !exactKeys(value, ["claimId", "outcome"]) ||
     typeof value.claimId !== "string" ||
     value.claimId.length === 0 ||
     !isOutcome(value.outcome)
   ) {
     throw new TerminalError("invalid terminal finalization");
   }
+  return { claimId: value.claimId, outcome: value.outcome };
 };
 
-const assertRecord = (value: TerminalRecord): void => {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Object.keys(value).sort().join(",") !==
-      "accountId,claimId,generation,outcome,repositoryId,runId,trustId,workflowId"
-  ) {
+export const parseTerminalRecord = (value: unknown): TerminalRecord => {
+  if (!isRecord(value) || !exactKeys(value, [...identityFields, "claimId", "outcome"])) {
     throw new TerminalError("invalid durable terminal record");
   }
-  assertIdentity(value);
-  assertFinalization({ claimId: value.claimId, outcome: value.outcome });
+  try {
+    return {
+      ...parseTerminalIdentity({
+        accountId: value.accountId,
+        repositoryId: value.repositoryId,
+        workflowId: value.workflowId,
+        runId: value.runId,
+        trustId: value.trustId,
+        generation: value.generation,
+      }),
+      ...parseFinalization({ claimId: value.claimId, outcome: value.outcome }),
+    };
+  } catch {
+    throw new TerminalError("invalid durable terminal record");
+  }
 };

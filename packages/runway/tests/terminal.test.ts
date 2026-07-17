@@ -26,6 +26,12 @@ const memory = (): TerminalState => {
   };
 };
 
+test("terminal identities require a positive generation", () => {
+  expect(() => new Terminal({ ...identity, generation: 0 }, memory(), async () => {})).toThrow(
+    "invalid terminal identity",
+  );
+});
+
 test("terminal publication emits one structured run report", async () => {
   const reports: unknown[] = [];
   let now = 10;

@@ -246,12 +246,22 @@ test("runtime publishes only bounded redacted ExecError tails", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     await env.COMMANDS.create({
-      params: { commands: ["echo https://command.example sandbox-secret"] },
+      params: { commands: ["diagnostic-stress https://command.example sandbox-secret"] },
     });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     const diagnostics = await testHost.diagnostics();
-    expect(diagnostics).toEqual([{ stdout: "stdout ***", stderr: "stderr ***" }]);
+    expect(diagnostics).toHaveLength(1);
+    expect(new TextEncoder().encode(diagnostics[0]!.stdout).byteLength).toBeLessThanOrEqual(
+      4 * 1024,
+    );
+    expect(new TextEncoder().encode(diagnostics[0]!.stderr).byteLength).toBeLessThanOrEqual(
+      4 * 1024,
+    );
+    expect(diagnostics[0]).toMatchObject({
+      stdout: expect.stringContaining("stdout *** [redacted-url]"),
+      stderr: "stderr *** [redacted-url]",
+    });
     expect(JSON.stringify(diagnostics)).not.toContain("https://");
     expect(JSON.stringify(diagnostics)).not.toContain("sandbox-secret");
     expect(JSON.stringify(diagnostics)).not.toContain("echo ");
@@ -1482,6 +1492,21 @@ test("a generated runtime binding returns its constructor-bound terminal identit
 test("a generated runtime binding rejects invalid terminal control input", async () => {
   const probe = exports.CapabilityProbe({ props: {} });
   await expect(probe.invoke("startRun", [""])).resolves.toBe("invalid run lifecycle");
+  await expect(
+    probe.invoke("claimTerminal", [
+      "run-id",
+      {
+        accountId: "test-account",
+        repositoryId: `remote:${repositoryFixture.remote}`,
+        workflowId: "issue-created",
+        runId: "run-id",
+        trustId: `remote:${repositoryFixture.remote}`,
+        generation: 0,
+        claimId: "claim",
+        outcome: "success",
+      },
+    ]),
+  ).resolves.toBe("invalid terminal claim");
   await expect(
     probe.invoke("publishTerminal", ["run-id", { claimId: "", outcome: "success" }]),
   ).resolves.toBe("invalid terminal finalization");

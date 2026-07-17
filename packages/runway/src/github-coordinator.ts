@@ -13,6 +13,7 @@ import {
   type GitHubRepository,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
+import { parseFinalization, parseTerminalRecord } from "./terminal.ts";
 import type { Finalization, TerminalRecord } from "./terminal.ts";
 
 type GitHubLifecycleState = "in_progress";
@@ -182,34 +183,20 @@ const parseString = (value: unknown, pattern?: RegExp): string =>
 const parseBoolean = (value: unknown): boolean =>
   typeof value === "boolean" ? value : invariant();
 
-const parseTerminalRecord = (value: unknown): TerminalRecord => {
-  assertRecord(value);
-  const outcome = value.outcome;
-  if (
-    !exactKeys(value, [
-      "accountId",
-      "repositoryId",
-      "workflowId",
-      "runId",
-      "trustId",
-      "generation",
-      "claimId",
-      "outcome",
-    ]) ||
-    (outcome !== "success" && outcome !== "failure" && outcome !== "cancelled")
-  ) {
-    invariant();
+const terminalRecordOf = (value: unknown): TerminalRecord => {
+  try {
+    return parseTerminalRecord(value);
+  } catch {
+    return invariant();
   }
-  return {
-    accountId: parseString(value.accountId),
-    repositoryId: parseString(value.repositoryId),
-    workflowId: parseString(value.workflowId, WORKFLOW_ID),
-    runId: parseString(value.runId, RUN_ID),
-    trustId: parseString(value.trustId),
-    generation: parseGeneration(value.generation),
-    claimId: parseString(value.claimId),
-    outcome: outcome as TerminalRecord["outcome"],
-  };
+};
+
+const finalizationOf = (value: unknown): Finalization => {
+  try {
+    return parseFinalization(value);
+  } catch {
+    return invariant();
+  }
 };
 
 const WORKFLOW_STATUSES = [
@@ -444,7 +431,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   const activeKey = parseString(value.activeKey);
   const generation = parseGeneration(value.generation);
   const expiresAt = parseGeneration(value.expiresAt);
-  const terminal = value.terminal === null ? null : parseTerminalRecord(value.terminal);
+  const terminal = value.terminal === null ? null : terminalRecordOf(value.terminal);
   const terminalPublished = parseBoolean(value.terminalPublished);
   const diagnostic = diagnosticOf(value.diagnostic);
   const desired =
@@ -881,7 +868,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
   }): Promise<TerminalRecord> {
     if (!isRecord(request) || !exactKeys(request, ["source", "candidate"])) invariant();
     const source = parseGitHubRunSource(request.source);
-    const candidate = parseTerminalRecord(request.candidate);
+    const candidate = terminalRecordOf(request.candidate);
     const key = runKey(source.runId);
     const initial = parseRun(await this.ctx.storage.get(key), source.runId);
     await this.#validateDispatchIdentity(initial);
@@ -932,22 +919,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       invariant();
     }
     const source = parseGitHubRunSource(request.source);
-    if (
-      !isRecord(request.finalization) ||
-      !exactKeys(request.finalization, ["claimId", "outcome"])
-    ) {
-      invariant();
-    }
-    const finalization = request.finalization;
-    if (
-      typeof finalization.claimId !== "string" ||
-      finalization.claimId.length === 0 ||
-      (finalization.outcome !== "success" &&
-        finalization.outcome !== "failure" &&
-        finalization.outcome !== "cancelled")
-    ) {
-      invariant();
-    }
+    const finalization = finalizationOf(request.finalization);
     const diagnostic = diagnosticOf(request.diagnostic);
     if (finalization.outcome !== "failure" && diagnostic !== null) invariant();
     const now = await this.#now();

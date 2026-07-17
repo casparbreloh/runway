@@ -464,6 +464,14 @@ export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
     if (options.command === "exit 7") {
       return { exitCode: 7, stdout: "tail", stderr: "failed", durationMs: 4 };
     }
+    if (options.command.startsWith("diagnostic-stress ")) {
+      return {
+        exitCode: 9,
+        stdout: `${"🙂".repeat(3_000)} stdout sandbox-secret https://stdout.example/path`,
+        stderr: "\u001b[31mstderr sandbox-secret\u001b[0m https://stderr.example/path",
+        durationMs: 4,
+      };
+    }
     if (options.command.includes("sandbox-secret")) {
       return {
         exitCode: 9,
