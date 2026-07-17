@@ -10,6 +10,8 @@ import { Cache } from "./cache.ts";
 import { CloudflareCacheSnapshot } from "./cloudflare/cache-snapshot.ts";
 import { CloudflareCacheTransfer } from "./cloudflare/cache.ts";
 import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
+import { parseFailureDiagnostic } from "./diagnostic.ts";
+import type { FailureDiagnostic } from "./diagnostic.ts";
 import type {
   GitHubCoordinatorAdmission,
   GitHubCoordinatorRun,
@@ -217,7 +219,11 @@ export class RunwaySandboxBinding
     return await namespace.getByName(String(source.check.repository.id)).readTerminal(source);
   }
 
-  async publishTerminal(runId: string, finalization: Finalization): Promise<void> {
+  async publishTerminal(
+    runId: string,
+    finalization: Finalization,
+    diagnosticValue: FailureDiagnostic | null,
+  ): Promise<void> {
     this.#assertRun(runId);
     if (
       !finalization ||
@@ -229,6 +235,15 @@ export class RunwaySandboxBinding
     ) {
       throw new Error("invalid terminal finalization");
     }
+    let diagnostic: FailureDiagnostic | null;
+    try {
+      diagnostic = parseFailureDiagnostic(diagnosticValue);
+    } catch {
+      throw new Error("invalid terminal diagnostic");
+    }
+    if (finalization.outcome !== "failure" && diagnostic !== null) {
+      throw new Error("invalid terminal diagnostic");
+    }
     const source = this.ctx.props.source;
     if (!source) return;
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
@@ -236,6 +251,7 @@ export class RunwaySandboxBinding
     await namespace.getByName(String(source.check.repository.id)).publishTerminal({
       source,
       finalization,
+      diagnostic,
     });
   }
 

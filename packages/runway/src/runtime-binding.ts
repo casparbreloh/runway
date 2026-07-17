@@ -1,4 +1,5 @@
 import type { PendingCache, PreparedCache } from "./cache.ts";
+import type { FailureDiagnostic } from "./diagnostic.ts";
 import type { CacheDeclaration, ExecResult } from "./run.ts";
 import type { CacheRecord, NormalizedExecOptions } from "./sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
@@ -9,7 +10,11 @@ export interface RuntimeBinding {
   terminal(runId: string): Promise<TerminalIdentity>;
   claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord>;
   readTerminal(runId: string): Promise<TerminalRecord | undefined>;
-  publishTerminal(runId: string, finalization: Finalization): Promise<void>;
+  publishTerminal(
+    runId: string,
+    finalization: Finalization,
+    diagnostic: FailureDiagnostic | null,
+  ): Promise<void>;
   secrets(): Promise<Readonly<Record<string, string>>>;
   captureSecrets(runId: string): Promise<string>;
   restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;

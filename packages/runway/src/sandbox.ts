@@ -1,6 +1,6 @@
 import { cacheDeclarationEvidence } from "./cache.ts";
 import type { PendingCache, PreparedCache } from "./cache.ts";
-import { ExecError } from "./exec-error.ts";
+import { trustedExecError } from "./exec-error.ts";
 import type { Meter } from "./meter.ts";
 import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
@@ -313,7 +313,7 @@ export class Sandbox {
       }),
     );
     if (result.exitCode !== 0) {
-      throw new ExecError(step.id, redactSecrets(options.command, this.#secrets), {
+      throw trustedExecError(step.id, redactSecrets(options.command, this.#secrets), {
         ...result,
         stdout: redactSecrets(result.stdout, this.#secrets),
         stderr: redactSecrets(result.stderr, this.#secrets),

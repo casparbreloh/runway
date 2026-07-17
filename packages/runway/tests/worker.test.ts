@@ -242,6 +242,41 @@ test.each([
   }
 });
 
+test("runtime publishes only bounded redacted ExecError tails", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    await env.COMMANDS.create({
+      params: { commands: ["echo https://command.example sandbox-secret"] },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
+    const diagnostics = await testHost.diagnostics();
+    expect(diagnostics).toEqual([{ stdout: "stdout ***", stderr: "stderr ***" }]);
+    expect(JSON.stringify(diagnostics)).not.toContain("https://");
+    expect(JSON.stringify(diagnostics)).not.toContain("sandbox-secret");
+    expect(JSON.stringify(diagnostics)).not.toContain("echo ");
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("runtime never transports arbitrary thrown failures as diagnostics", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    await env.COMMANDS.create({
+      params: {
+        commands: ["true"],
+        throwMessage: "arbitrary-secret https://arbitrary.example command",
+      },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
+    expect(await testHost.diagnostics()).toEqual([null]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
 test("the runtime durably records success after cleanup and before publication", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
@@ -751,6 +786,7 @@ test("workflow runtime owns in-progress and terminal Check transitions after cle
     const failureCheck = provider.checks.find(({ externalId }) => externalId === failureRef.id)!;
     expect(successCheck).toMatchObject({ status: "completed", conclusion: "success" });
     expect(failureCheck).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(failureCheck.output).toBeUndefined();
     expect(provider.updates.filter(({ checkRunId }) => checkRunId === successCheck.id)).toEqual([
       { checkRunId: successCheck.id, state: "in_progress" },
       { checkRunId: successCheck.id, state: "success" },
@@ -762,7 +798,7 @@ test("workflow runtime owns in-progress and terminal Check transitions after cle
   });
 });
 
-test("lost Check PATCH responses retry the persisted transition without re-running handlers", async () => {
+test("lost terminal and failed Check PATCH responses retry the exact persisted diagnostic", async () => {
   await putGitHubArtifacts();
   const response = await deliverGitHub({
     deliveryId: "123e4567-e89b-42d3-a456-426614174131",
@@ -773,11 +809,40 @@ test("lost Check PATCH responses retry the persisted transition without re-runni
     runs: Array<{ id: string; workflow: string }>;
   };
   await waitForGitHubCreates(runs.runs.map(({ id }) => id));
-  await env.RUNWAY_GITHUB_PROVIDER.configure({ losePatchResponse: true });
-  const ref = runs.runs.find(({ workflow }) => workflow === "github-check")!;
+  await env.RUNWAY_GITHUB_PROVIDER.configure({ loseCompletionResponse: true });
+  const ref = runs.runs.find(({ workflow }) => workflow === "github-test")!;
   const create = (await githubWorkflowProbeState()).creates.find(({ id }) => id === ref.id)!;
-  await using instance = await startGitHubWorkflow(create);
-  await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+  const source = (
+    create.params as {
+      __dispatcherMetadata: { source: Record<string, unknown> };
+    }
+  ).__dispatcherMetadata.source;
+  const coordinator = (
+    env.GITHUB_COORDINATOR_TEST as unknown as {
+      getByName(name: string): {
+        claimTerminal(request: { source: unknown; candidate: unknown }): Promise<unknown>;
+        publishTerminal(request: {
+          source: unknown;
+          finalization: unknown;
+          diagnostic: unknown;
+        }): Promise<void>;
+      };
+    }
+  ).getByName("101");
+  const finalization = { claimId: crypto.randomUUID(), outcome: "failure" as const };
+  const candidate = {
+    accountId: "test-account",
+    repositoryId: "github:101",
+    workflowId: ref.workflow,
+    runId: ref.id,
+    trustId: "github:101",
+    generation: source.generation,
+    ...finalization,
+  };
+  await coordinator.claimTerminal({ source, candidate });
+  const diagnostic = { stdout: "tail", stderr: "failed" };
+  await coordinator.publishTerminal({ source, finalization, diagnostic });
+  await coordinator.publishTerminal({ source, finalization, diagnostic });
   await env.RUNWAY_GITHUB_CLOCK.advance(1_000);
   await deliverGitHub({
     deliveryId: "123e4567-e89b-42d3-a456-426614174131",
@@ -788,13 +853,25 @@ test("lost Check PATCH responses retry the persisted transition without re-runni
   await eventually(async () => {
     const provider = await env.RUNWAY_GITHUB_PROVIDER.state();
     const check = provider.checks.find(({ externalId }) => externalId === ref.id)!;
-    expect(check).toMatchObject({ status: "completed", conclusion: "success" });
-    expect(
-      provider.updates.filter(
-        ({ checkRunId, state }) => checkRunId === check.id && state === "in_progress",
-      ),
-    ).toHaveLength(2);
+    expect(check).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+    });
+    expect(provider.completions.filter(({ checkRunId }) => checkRunId === check.id)).toEqual([
+      {
+        checkRunId: check.id,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+      },
+      {
+        checkRunId: check.id,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+      },
+    ]);
   });
+  expect((await testSandbox.state()).executions).toEqual([]);
 });
 
 test("supersession before runtime start fences the old handler and keeps cancelled final", async () => {
@@ -1571,6 +1648,23 @@ test("a generated runtime binding rejects invalid terminal control input", async
       { claimId: "claim", outcome: "success", extra: true },
     ]),
   ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "claim", outcome: "success" }]),
+  ).resolves.toBe("invalid terminal diagnostic");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "success" },
+      { stdout: "forged", stderr: "" },
+    ]),
+  ).resolves.toBe("invalid terminal diagnostic");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "failure" },
+      { stdout: "https://capability.example", stderr: "" },
+    ]),
+  ).resolves.toBe("invalid terminal diagnostic");
 });
 
 test("a generated host resolves the immutable snapshot key named by its root", async () => {

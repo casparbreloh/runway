@@ -881,6 +881,62 @@ describe("GitHub Checks", () => {
     },
   );
 
+  test("completes a failed Check with the exact bounded diagnostic output", async () => {
+    let capturedRequest: Request | undefined;
+    const output = { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" };
+    const provider = checkProviderWith(async (input, init) => {
+      capturedRequest = new Request(input, init);
+      return Response.json(
+        checkRunResponse({ status: "completed", conclusion: "failure", output }),
+      );
+    });
+
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "failure",
+        output,
+      }),
+    ).resolves.toMatchObject({ id: 991, status: "completed", conclusion: "failure" });
+    await expect(capturedRequest?.clone().json()).resolves.toEqual({
+      status: "completed",
+      conclusion: "failure",
+      output,
+    });
+  });
+
+  test("rejects invalid or mismatched Check diagnostic output", async () => {
+    const provider = checkProviderWith(async () =>
+      Response.json(
+        checkRunResponse({
+          status: "completed",
+          conclusion: "failure",
+          output: { title: "Command failed", summary: "different" },
+        }),
+      ),
+    );
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "expected" },
+      }),
+    ).rejects.toThrow("invalid GitHub Check response");
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "success",
+        output: { title: "Command failed", summary: "forged" },
+      }),
+    ).rejects.toThrow("invalid GitHub Check request");
+  });
+
   test.each([
     [async () => new Response(`denied ${checksToken}`, { status: 403 })],
     [async () => Response.json({ id: 991, token: checksToken })],

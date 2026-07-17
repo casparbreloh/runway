@@ -369,6 +369,11 @@ export interface GitHubCheckRun {
   readonly conclusion: GitHubCheckConclusion | null;
 }
 
+export interface GitHubCheckOutput {
+  readonly title: string;
+  readonly summary: string;
+}
+
 interface GitHubCheckIdentity {
   readonly token: string;
   readonly repository: GitHubRepository;
@@ -405,6 +410,7 @@ export interface GitHubProvider {
     options: GitHubCheckIdentity & {
       readonly checkRunId: number;
       readonly conclusion: "success" | "failure" | "cancelled";
+      readonly output?: GitHubCheckOutput;
     },
   ): Promise<GitHubCheckRun>;
 }
@@ -896,20 +902,42 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       return check;
     },
 
-    async completeCheck({ token, repository, checkRunId, conclusion }) {
+    async completeCheck({ token, repository, checkRunId, conclusion, output }) {
       const { path, headers } = checkArguments(token, repository);
       if (!positiveInteger(checkRunId)) throw new Error("invalid GitHub Check request");
-      const check = parseCheckRun(
-        await checkRequest(`https://api.github.com/repos/${path}/check-runs/${checkRunId}`, {
+      if (
+        (output !== undefined &&
+          (!isRecord(output) ||
+            conclusion !== "failure" ||
+            Object.keys(output).sort().join(",") !== "summary,title" ||
+            typeof output.title !== "string" ||
+            new TextEncoder().encode(output.title).byteLength < 1 ||
+            new TextEncoder().encode(output.title).byteLength > 255 ||
+            typeof output.summary !== "string" ||
+            new TextEncoder().encode(output.summary).byteLength < 1 ||
+            new TextEncoder().encode(output.summary).byteLength > 65_535)) ||
+        (conclusion !== "failure" && output !== undefined)
+      ) {
+        throw new Error("invalid GitHub Check request");
+      }
+      const response = await checkRequest(
+        `https://api.github.com/repos/${path}/check-runs/${checkRunId}`,
+        {
           method: "PATCH",
           headers,
-          body: JSON.stringify({ status: "completed", conclusion }),
-        }),
+          body: JSON.stringify({ status: "completed", conclusion, ...(output ? { output } : {}) }),
+        },
       );
+      const check = parseCheckRun(response);
+      const responseOutput = isRecord(response) ? response.output : undefined;
       if (
         check.id !== checkRunId ||
         check.status !== "completed" ||
-        check.conclusion !== conclusion
+        check.conclusion !== conclusion ||
+        (output !== undefined &&
+          (!isRecord(responseOutput) ||
+            responseOutput.title !== output.title ||
+            responseOutput.summary !== output.summary))
       ) {
         throw new Error("invalid GitHub Check response");
       }

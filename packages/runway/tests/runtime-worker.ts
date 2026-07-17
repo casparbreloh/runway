@@ -5,6 +5,7 @@ import type { CacheDeclaration, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
 import { Cache, normalizedCacheTarget } from "../src/cache.ts";
+import type { FailureDiagnostic } from "../src/diagnostic.ts";
 import { createRouter } from "../src/router.ts";
 import type { RuntimeBinding } from "../src/runtime-binding.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
@@ -23,13 +24,19 @@ const githubProviderState = {
     externalId: string;
     status: "queued" | "in_progress" | "completed";
     conclusion: string | null;
+    output?: { readonly title: string; readonly summary: string };
   }>,
-  completions: [] as Array<{ checkRunId: number; conclusion: string }>,
+  completions: [] as Array<{
+    checkRunId: number;
+    conclusion: string;
+    output?: { readonly title: string; readonly summary: string };
+  }>,
   reconciliations: [] as Array<{ name: string; headSha: string; runId: string }>,
   updates: [] as Array<{ checkRunId: number; state: string }>,
   unavailableRepositoryId: undefined as number | undefined,
   loseCheckCreateResponse: false,
   losePatchResponse: false,
+  loseCompletionResponse: false,
   failTokenAttempts: 0,
   failTokenRepositoryId: undefined as number | undefined,
   tokenDelayMs: 0,
@@ -110,18 +117,22 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
   async completeCheck(options: {
     checkRunId: number;
     conclusion: string;
+    output?: { readonly title: string; readonly summary: string };
   }): Promise<(typeof githubProviderState.checks)[number]> {
     const check = githubProviderState.checks.find(({ id }) => id === options.checkRunId);
     if (!check) throw new Error("missing Check");
     check.status = "completed";
     check.conclusion = options.conclusion;
+    if (options.output) check.output = options.output;
     githubProviderState.completions.push({
       checkRunId: options.checkRunId,
       conclusion: options.conclusion,
+      ...(options.output ? { output: options.output } : {}),
     });
     githubProviderState.updates.push({ checkRunId: options.checkRunId, state: options.conclusion });
     githubEffectEvents.push(`check:${options.checkRunId}:${options.conclusion}`);
-    if (githubProviderState.losePatchResponse) {
+    if (githubProviderState.loseCompletionResponse || githubProviderState.losePatchResponse) {
+      githubProviderState.loseCompletionResponse = false;
       githubProviderState.losePatchResponse = false;
       throw new Error("lost Check PATCH response");
     }
@@ -154,6 +165,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     githubProviderState.unavailableRepositoryId = undefined;
     githubProviderState.loseCheckCreateResponse = false;
     githubProviderState.losePatchResponse = false;
+    githubProviderState.loseCompletionResponse = false;
     githubProviderState.failTokenAttempts = 0;
     githubProviderState.failTokenRepositoryId = undefined;
     githubProviderState.tokenDelayMs = 0;
@@ -165,6 +177,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     unavailableRepositoryId?: number;
     loseCheckCreateResponse?: boolean;
     losePatchResponse?: boolean;
+    loseCompletionResponse?: boolean;
     failTokenAttempts?: number;
     failTokenRepositoryId?: number;
     tokenDelayMs?: number;
@@ -173,6 +186,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     githubProviderState.unavailableRepositoryId = options.unavailableRepositoryId;
     githubProviderState.loseCheckCreateResponse = options.loseCheckCreateResponse ?? false;
     githubProviderState.losePatchResponse = options.losePatchResponse ?? false;
+    githubProviderState.loseCompletionResponse = options.loseCompletionResponse ?? false;
     githubProviderState.failTokenAttempts = options.failTokenAttempts ?? 0;
     githubProviderState.failTokenRepositoryId = options.failTokenRepositoryId;
     githubProviderState.tokenDelayMs = options.tokenDelayMs ?? 0;
@@ -346,6 +360,7 @@ const sandboxState = {
   kills: [] as string[],
 };
 let runtimeLifecycleEvents: string[] = [];
+let runtimeDiagnostics: Array<FailureDiagnostic | null> = [];
 const activeExecutions = new Map<string, () => void>();
 const workspaces = new Map<string, string>();
 let sourcePreparations: unknown[] = [];
@@ -508,6 +523,7 @@ export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
     destroyAttempts = 0;
     failNextDestroy = false;
     runtimeLifecycleEvents = [];
+    runtimeDiagnostics = [];
   }
 
   sourceState(): unknown[] {
@@ -552,8 +568,13 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     return undefined;
   }
 
-  async publishTerminal(_runId: string, finalization: Finalization): Promise<void> {
+  async publishTerminal(
+    _runId: string,
+    finalization: Finalization,
+    diagnostic: FailureDiagnostic | null,
+  ): Promise<void> {
     runtimeLifecycleEvents.push(`lifecycle:${finalization.outcome}`);
+    runtimeDiagnostics.push(diagnostic);
   }
 
   async secrets(): Promise<Readonly<Record<string, string>>> {
@@ -786,6 +807,10 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     return runtimeLifecycleEvents;
   }
 
+  diagnostics(): ReadonlyArray<FailureDiagnostic | null> {
+    return runtimeDiagnostics;
+  }
+
   cacheState(): { readonly requests: unknown[]; readonly fileInspections: unknown[] } {
     return { requests: cacheRequests, fileInspections: cacheFileInspections };
   }
@@ -894,6 +919,7 @@ interface CommandEvent {
   catchErrors?: boolean;
   pauseMs?: number;
   throwAfterCommands?: boolean;
+  throwMessage?: string;
   throwUndefinedAfterCommands?: boolean;
 }
 
@@ -908,6 +934,7 @@ const commands = workflow({
     commands,
     pauseMs,
     throwAfterCommands,
+    throwMessage,
     throwUndefinedAfterCommands,
   } = event as unknown as CommandEvent;
   runtimeLifecycleEvents.push("handler:start");
@@ -935,6 +962,7 @@ const commands = workflow({
     if (index === 0 && pauseMs !== undefined) await run.sleep("pause", pauseMs);
   }
   if (throwAfterCommands) throw new Error("handler failure");
+  if (throwMessage) throw new Error(throwMessage);
   if (throwUndefinedAfterCommands) throw undefined;
   runtimeLifecycleEvents.push("handler:success");
 });

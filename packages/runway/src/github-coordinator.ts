@@ -1,8 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 
 import {
+  parseFailureDiagnostic,
+  sameFailureDiagnostic,
+  type FailureDiagnostic,
+} from "./diagnostic.ts";
+import {
   createGitHubProvider,
   type GitHubAcceptedDelivery,
+  type GitHubCheckOutput,
   type GitHubProvider,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
@@ -21,6 +27,23 @@ const SHA = /^[0-9a-f]{40}$/;
 const WORKFLOW_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const RUN_ID = /^runway-github-([0-9a-f]{48})-([1-9][0-9]*)$/;
 const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
+
+const checkOutput = (diagnostic: FailureDiagnostic | null): GitHubCheckOutput | undefined => {
+  if (!diagnostic) return undefined;
+  const sections = [
+    diagnostic.stdout ? `stdout\n${diagnostic.stdout}` : "",
+    diagnostic.stderr ? `stderr\n${diagnostic.stderr}` : "",
+  ].filter(Boolean);
+  return { title: "Command failed", summary: sections.join("\n\n") };
+};
+
+const diagnosticOf = (value: unknown): FailureDiagnostic | null => {
+  try {
+    return parseFailureDiagnostic(value);
+  } catch {
+    return invariant();
+  }
+};
 
 export interface GitHubWorkflowAdmission {
   readonly workflowId: string;
@@ -87,6 +110,7 @@ interface RunRecord {
   readonly expiresAt: number;
   terminal: TerminalRecord | null;
   terminalPublished: boolean;
+  diagnostic: FailureDiagnostic | null;
   desired: DesiredState;
   preflightComplete: boolean;
   checkCreateAttempted: boolean;
@@ -395,6 +419,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     "expiresAt",
     "terminal",
     "terminalPublished",
+    "diagnostic",
     "desired",
     "preflightComplete",
     "checkCreateAttempted",
@@ -421,6 +446,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   const expiresAt = parseGeneration(value.expiresAt);
   const terminal = value.terminal === null ? null : parseTerminalRecord(value.terminal);
   const terminalPublished = parseBoolean(value.terminalPublished);
+  const diagnostic = diagnosticOf(value.diagnostic);
   const desired =
     value.desired === "queued" ||
     value.desired === "in_progress" ||
@@ -464,6 +490,8 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
         terminal.trustId !== `github:${delivery.checkoutRepository.id}` ||
         terminal.generation !== generation)) ||
     (terminalPublished && terminal === null) ||
+    (diagnostic !== null &&
+      (!terminalPublished || terminal?.outcome !== "failure" || desired !== "failure")) ||
     ((desired === "success" || desired === "failure" || desired === "cancelled") &&
       (!terminalPublished || terminal?.outcome !== desired)) ||
     ((desired === "queued" || desired === "in_progress") && terminalPublished) ||
@@ -512,6 +540,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     expiresAt,
     terminal,
     terminalPublished,
+    diagnostic,
     desired,
     preflightComplete,
     checkCreateAttempted,
@@ -718,6 +747,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
               outcome: "cancelled",
             };
             priorRun.terminalPublished = true;
+            priorRun.diagnostic = null;
             priorRun.desired = "cancelled";
             priorRun.retryCount = 0;
             priorRun.nextAttemptAt = now;
@@ -744,6 +774,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           expiresAt: now + DELIVERY_RETENTION_MS,
           terminal: null,
           terminalPublished: false,
+          diagnostic: null,
           desired: "queued",
           preflightComplete: false,
           checkCreateAttempted: false,
@@ -895,8 +926,11 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
   async publishTerminal(request: {
     readonly source: GitHubRunSource;
     readonly finalization: Finalization;
+    readonly diagnostic: FailureDiagnostic | null;
   }): Promise<void> {
-    if (!isRecord(request) || !exactKeys(request, ["source", "finalization"])) invariant();
+    if (!isRecord(request) || !exactKeys(request, ["source", "finalization", "diagnostic"])) {
+      invariant();
+    }
     const source = parseGitHubRunSource(request.source);
     if (
       !isRecord(request.finalization) ||
@@ -914,6 +948,8 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     ) {
       invariant();
     }
+    const diagnostic = diagnosticOf(request.diagnostic);
+    if (finalization.outcome !== "failure" && diagnostic !== null) invariant();
     const now = await this.#now();
     const key = runKey(source.runId);
     const initial = parseRun(await this.ctx.storage.get(key), source.runId);
@@ -929,10 +965,14 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       ) {
         invariant();
       }
-      if (run.terminalPublished) return;
+      if (run.terminalPublished) {
+        if (!sameFailureDiagnostic(run.diagnostic, diagnostic)) invariant();
+        return;
+      }
       const oldPending = pendingKey(run.nextAttemptAt, run.runId);
       const wasPending = isPending(run);
       run.terminalPublished = true;
+      run.diagnostic = diagnostic;
       run.desired = finalization.outcome;
       run.retryCount = 0;
       run.nextAttemptAt = now;
@@ -1409,11 +1449,13 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       const token = (await this.#token(run, "checks")).token;
       run = await this.#getRun(key, run);
       if (run.desired !== desired || run.checkRunId === null) return;
+      const output = desired === "failure" ? checkOutput(run.diagnostic) : undefined;
       await this.#provider().completeCheck({
         token,
         repository: run.delivery.checkRepository,
         checkRunId: run.checkRunId,
         conclusion: desired,
+        ...(output ? { output } : {}),
       });
       run = await this.#getRun(key, run);
       if (run.desired !== desired) return;

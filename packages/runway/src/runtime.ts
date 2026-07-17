@@ -2,6 +2,8 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import type { PreparedCache } from "./cache.ts";
+import { failureDiagnosticOf } from "./diagnostic.ts";
+import type { FailureDiagnostic } from "./diagnostic.ts";
 import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
@@ -328,6 +330,7 @@ const makeTerminal = async (
   binding: RuntimeBinding,
   runId: string,
   meter: Meter,
+  diagnostic: { value: FailureDiagnostic | null },
 ): Promise<Terminal> => {
   let winner: TerminalRecord | undefined;
   const state: TerminalState = {
@@ -348,7 +351,11 @@ const makeTerminal = async (
     async (finalization) => {
       await measuredWorkflowStep(meter, async () =>
         step.do(TERMINAL_PUBLISH_STEP, async () => {
-          await binding.publishTerminal(runId, finalization);
+          await binding.publishTerminal(
+            runId,
+            finalization,
+            finalization.outcome === "failure" ? diagnostic.value : null,
+          );
         }),
       );
     },
@@ -368,7 +375,8 @@ export const toEntrypoint = (
         container: SANDBOX_CAPACITY,
         emit: (report) => console.log({ type: "runway-meter", report }),
       });
-      const terminal = await makeTerminal(step, binding, event.instanceId, meter);
+      const diagnostic: { value: FailureDiagnostic | null } = { value: null };
+      const terminal = await makeTerminal(step, binding, event.instanceId, meter, diagnostic);
       const started = (await measuredWorkflowStep(meter, async () =>
         step.do(
           TERMINAL_START_STEP,
@@ -415,6 +423,7 @@ export const toEntrypoint = (
       } catch (error) {
         failed = true;
         failure = error;
+        diagnostic.value = failureDiagnosticOf(error, secrets);
       }
       let cleanupFailed = false;
       if (!failed) {
