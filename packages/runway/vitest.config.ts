@@ -11,6 +11,7 @@ export default defineConfig({
       "tests/cloudflare-sandbox.test.ts",
       "tests/deploy.test.ts",
       "tests/github.test.ts",
+      "tests/meter.test.ts",
       "tests/sandbox.test.ts",
       "tests/terminal.test.ts",
       "tests/workflow.test.ts",

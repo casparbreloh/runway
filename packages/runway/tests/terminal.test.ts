@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 
+import { Meter } from "../src/meter.ts";
 import { Terminal } from "../src/terminal.ts";
 import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
 
@@ -24,6 +25,52 @@ const memory = (): TerminalState => {
     },
   };
 };
+
+test("terminal publication emits one structured run report", async () => {
+  const reports: unknown[] = [];
+  let now = 10;
+  const meter = new Meter({
+    priceTable: { id: "test", rates: [] },
+    now: () => now,
+    emit: (report) => {
+      reports.push(structuredClone(report));
+    },
+  });
+  const terminal = new Terminal(identity, memory(), async () => {}, { meter });
+  now = 42;
+
+  await terminal.publish(await terminal.claim("success"));
+
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toMatchObject({
+    schema: 1,
+    samples: [{ type: "run", outcome: "success", count: 1, durationMs: 32 }],
+  });
+});
+
+test("meter delivery is advisory and retries without duplicating the run sample", async () => {
+  const reports: unknown[] = [];
+  let attempts = 0;
+  const meter = new Meter({
+    priceTable: { id: "test", rates: [] },
+    emit: (report) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("observability unavailable");
+      reports.push(structuredClone(report));
+    },
+  });
+  const terminal = new Terminal(identity, memory(), async () => {}, { meter });
+  const winner = await terminal.claim("failure");
+
+  await expect(terminal.publish(winner)).resolves.toBeUndefined();
+  await expect(terminal.publish(winner)).resolves.toBeUndefined();
+
+  expect(attempts).toBe(2);
+  expect(reports).toHaveLength(1);
+  expect((reports[0] as { samples: unknown[] }).samples).toEqual([
+    expect.objectContaining({ type: "run", outcome: "failure", count: 1 }),
+  ]);
+});
 
 test("the first terminal outcome wins", async () => {
   for (const outcome of ["success", "failure", "cancelled"] as const) {

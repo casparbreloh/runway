@@ -1,5 +1,6 @@
 const encoder = new TextEncoder();
 
+import type { Meter } from "./meter.ts";
 import type { CacheDeclaration, CacheKey } from "./run.ts";
 
 interface CacheContext {
@@ -52,6 +53,7 @@ interface CacheOptions {
   readonly restore?: CacheRestore;
   readonly snapshots?: CacheSnapshots;
   readonly diagnose?: (diagnostic: CacheDiagnostic) => void;
+  readonly meter?: Meter;
 }
 
 interface CacheRestore {
@@ -110,7 +112,6 @@ interface SnapshotCapture {
   readonly maxDepth: number;
   readonly treeDigest: string;
   readonly durationMs: number;
-  readonly estimatedCostUsd: number;
 }
 
 interface CacheSnapshots {
@@ -475,8 +476,6 @@ const validateCapture = (capture: SnapshotCapture, budget: CacheDeclaration["bud
     !safeInteger(capture.maxDepth) ||
     !SHA256.test(capture.treeDigest) ||
     !safeInteger(capture.durationMs) ||
-    !Number.isFinite(capture.estimatedCostUsd) ||
-    capture.estimatedCostUsd < 0 ||
     capture.entryCount > 1_000_000 ||
     capture.uniqueInodes > capture.entryCount ||
     capture.fileCount > capture.entryCount ||
@@ -487,9 +486,7 @@ const validateCapture = (capture: SnapshotCapture, budget: CacheDeclaration["bud
   if (
     (budget?.maxBytes !== undefined &&
       Math.max(capture.archive.bytes, capture.byteCount, capture.diskBytes) > budget.maxBytes) ||
-    (budget?.maxDurationMs !== undefined && capture.durationMs > budget.maxDurationMs) ||
-    (budget?.maxEstimatedCostUsd !== undefined &&
-      capture.estimatedCostUsd > budget.maxEstimatedCostUsd)
+    (budget?.maxDurationMs !== undefined && capture.durationMs > budget.maxDurationMs)
   ) {
     throw new CacheError("cache snapshot exceeds budget");
   }
@@ -615,6 +612,7 @@ export class Cache {
   readonly #restore: CacheRestore | undefined;
   readonly #snapshots: CacheSnapshots | undefined;
   readonly #diagnose: (diagnostic: CacheDiagnostic) => void;
+  readonly #meter: Meter | undefined;
 
   constructor(options: CacheOptions) {
     this.#context = options.context;
@@ -624,6 +622,7 @@ export class Cache {
     this.#restore = options.restore;
     this.#snapshots = options.snapshots;
     this.#diagnose = options.diagnose ?? (() => {});
+    this.#meter = options.meter;
   }
 
   async record(id: string, declaration: CacheDeclaration) {
@@ -733,11 +732,15 @@ export class Cache {
     }
     const prepared: PreparedCache[] = [];
     for (const pending of pendingCaches) {
+      const started = this.#meter?.now();
+      let providerStarted: number | undefined;
       let path: string | undefined;
       try {
         await this.#validatePending(pending);
+        this.#admitCost(pending.declaration, "save");
         const slash = pending.target.lastIndexOf("/");
         path = `${pending.target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}.sqsh`;
+        providerStarted = this.#meter?.now();
         const capture = await snapshots.capture({
           target: pending.target,
           path,
@@ -746,6 +749,14 @@ export class Cache {
         if (capture.state === "skipped") {
           this.#diagnose({ id: pending.id, state: "skipped", reason: capture.reason });
           prepared.push({ state: "skipped", id: pending.id, reason: capture.reason });
+          this.#observe(() =>
+            this.#meter?.record({
+              type: "cache",
+              state: "skipped",
+              durationMs: this.#elapsed(started),
+              bytes: 0,
+            }),
+          );
           continue;
         }
         if (capture.archive.path !== path) throw new CacheError("corrupt cache snapshot");
@@ -759,7 +770,13 @@ export class Cache {
           String(capture.archive.bytes),
         ]);
         const key = `content/${objectDigest}.sqsh`;
-        const uploaded = await snapshots.upload({ key, path, expected: capture.archive });
+        let uploaded: Awaited<ReturnType<CacheSnapshots["upload"]>>;
+        try {
+          uploaded = await snapshots.upload({ key, path, expected: capture.archive });
+        } finally {
+          this.#observe(() => this.#meter?.usage("r2", "class-a", 1, "derived"));
+          this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
+        }
         if (
           !["stored", "present"].includes(uploaded.state) ||
           !sameArchive(uploaded, capture.archive)
@@ -777,6 +794,9 @@ export class Cache {
             manifest,
           },
         });
+        if (uploaded.state === "stored") {
+          this.#observe(() => this.#meter?.cacheStorage(capture.archive.bytes));
+        }
       } catch (error) {
         const reason =
           error instanceof CacheError && error.message.includes("unsafe")
@@ -788,8 +808,19 @@ export class Cache {
                 : "unavailable";
         this.#diagnose({ id: pending.id, state: "skipped", reason });
         prepared.push({ state: "skipped", id: pending.id, reason });
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "cache",
+            state: "skipped",
+            durationMs: this.#elapsed(started),
+            bytes: 0,
+          }),
+        );
       } finally {
         if (path) await snapshots.remove(path).catch(() => {});
+        if (providerStarted !== undefined) {
+          this.#observe(() => this.#meter?.allocation(this.#elapsed(providerStarted)));
+        }
       }
     }
     return prepared;
@@ -798,6 +829,7 @@ export class Cache {
   async commit(preparedCaches: readonly PreparedCache[]): Promise<void> {
     for (const prepared of preparedCaches) {
       if (prepared.state === "skipped") continue;
+      const started = this.#meter?.now();
       try {
         await this.#validatePending(prepared.pending);
         if (
@@ -821,8 +853,27 @@ export class Cache {
           manifest: prepared.object.manifest,
         });
         this.#diagnose({ id: prepared.pending.id, state: "saved" });
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "cache",
+            state: "saved",
+            durationMs: this.#elapsed(started),
+            bytes: Number(
+              (JSON.parse(prepared.object.manifest) as { readonly byteCount?: unknown })
+                .byteCount ?? 0,
+            ),
+          }),
+        );
       } catch {
         this.#diagnose({ id: prepared.pending.id, state: "skipped", reason: "conflict" });
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "cache",
+            state: "skipped",
+            durationMs: this.#elapsed(started),
+            bytes: 0,
+          }),
+        );
       }
     }
   }
@@ -883,19 +934,34 @@ export class Cache {
       return { state: "miss" as const, reason: lookup.reason ?? ("absent" as const) };
     }
     if (!restore) return { state: "miss" as const, reason: "unavailable" as const };
+    try {
+      this.#admitCost(declaration, "restore");
+    } catch (error) {
+      if (error instanceof CacheError && error.message.includes("budget")) {
+        return { state: "miss" as const, reason: "budget" as const };
+      }
+      throw error;
+    }
     const slash = target.lastIndexOf("/");
     const staging = `${target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}`;
+    const restoreStarted = this.#meter?.now();
     let staged: Awaited<ReturnType<CacheRestore["stage"]>>;
     try {
-      staged = await restore.stage({
-        object: lookup.object,
-        path: staging,
-        budget: declaration.budget,
-      });
+      try {
+        staged = await restore.stage({
+          object: lookup.object,
+          path: staging,
+          budget: declaration.budget,
+        });
+      } finally {
+        this.#observe(() => this.#meter?.usage("r2", "class-b", 2, "derived"));
+      }
     } catch {
+      this.#observe(() => this.#meter?.allocation(this.#elapsed(restoreStarted)));
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "unavailable" as const };
     }
+    this.#observe(() => this.#meter?.allocation(this.#elapsed(restoreStarted)));
     if (staged.state === "miss") {
       await restore.remove(staging).catch(() => {});
       if (
@@ -942,6 +1008,31 @@ export class Cache {
       return { state: "miss" as const, reason: "unavailable" as const };
     }
     return { state: "hit" as const, bytes: staged.byteCount };
+  }
+
+  #admitCost(declaration: CacheDeclaration, phase: "save" | "restore"): void {
+    const limit = declaration.budget?.maxEstimatedCostUsd;
+    if (limit === undefined) return;
+    if (!this.#meter) throw new CacheError("cache snapshot exceeds budget");
+    const options = {
+      ...(declaration.budget?.maxBytes === undefined
+        ? {}
+        : { maxBytes: declaration.budget.maxBytes }),
+      ...(declaration.budget?.maxDurationMs === undefined
+        ? {}
+        : { maxDurationMs: declaration.budget.maxDurationMs }),
+    };
+    const estimate =
+      phase === "save"
+        ? this.#meter.cacheBound(options).estimate
+        : this.#meter.cacheRestoreBound(options).estimate;
+    if (!Number.isFinite(estimate.usd) || estimate.usd > limit) {
+      throw new CacheError("cache snapshot exceeds budget");
+    }
+  }
+
+  #elapsed(started: number | undefined): number {
+    return started === undefined ? 0 : Math.max(0, Math.round(this.#meter!.now() - started));
   }
 
   async lookup(id: string, declaration: CacheDeclaration) {
@@ -1014,7 +1105,7 @@ export class Cache {
     );
     let writeEtag: string | null = null;
     for (const [index, candidate] of refs.entries()) {
-      const observed = await this.#refs.get(candidate.ref);
+      const observed = await this.#getRef(candidate.ref);
       if (index === 0) writeEtag = observed?.etag ?? null;
       if (!observed) continue;
       const stored = parseRef(await observed.text());
@@ -1131,9 +1222,9 @@ export class Cache {
     let onlyIf =
       revision.etag === null ? { etagDoesNotMatch: "*" } : { etagMatches: revision.etag };
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const stored = await this.#refs.put(revision.ref, canonicalRef(ref), { onlyIf });
+      const stored = await this.#putRef(revision.ref, canonicalRef(ref), { onlyIf });
       if (stored) return { state: "published" as const };
-      const winner = await this.#refs.get(revision.ref);
+      const winner = await this.#getRef(revision.ref);
       if (!winner) throw new CacheError("cache publication stale");
       const winnerRef = parseRef(await winner.text());
       assertRefIdentity(winnerRef, expected);
@@ -1148,5 +1239,35 @@ export class Cache {
       onlyIf = { etagMatches: winner.etag };
     }
     throw new CacheError("cache publication stale");
+  }
+
+  async #getRef(key: string): ReturnType<CacheRefs["get"]> {
+    try {
+      return await this.#refs.get(key);
+    } finally {
+      this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
+    }
+  }
+
+  async #putRef(
+    key: string,
+    text: string,
+    options: Parameters<CacheRefs["put"]>[2],
+  ): ReturnType<CacheRefs["put"]> {
+    try {
+      return await this.#refs.put(key, text, options);
+    } finally {
+      this.#observe(() => this.#meter?.usage("r2", "class-a", 1, "derived"));
+    }
+  }
+
+  async flushMeter(): Promise<void> {
+    await this.#meter?.flush().catch(() => {});
+  }
+
+  #observe(work: () => void): void {
+    try {
+      work();
+    } catch {}
   }
 }

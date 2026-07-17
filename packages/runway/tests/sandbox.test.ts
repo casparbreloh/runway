@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 
+import { Meter } from "../src/meter.ts";
 import { makeRun } from "../src/run.ts";
 import { RunLostError, Sandbox, type DurableCache, type DurableStep } from "../src/sandbox.ts";
 import { source } from "../src/source.ts";
@@ -55,6 +56,139 @@ const terminalFixture = () => {
     async () => {},
   );
 };
+
+test("one bounded meter observes source, cache, command, and Sandbox lifecycle", async () => {
+  const meter = new Meter({ priceTable: { id: "test", rates: [] } });
+  const revision = "f".repeat(40);
+  const sandbox = new Sandbox({
+    runId: "unreported-run-id",
+    secrets: {},
+    meter,
+    terminal: terminalFixture(),
+    source: source(
+      {
+        repositoryId: "unreported-repository-id",
+        remote: "https://github.com/acme/example",
+        revision,
+      },
+      { prepare: async () => prepared(revision, 12) },
+    ),
+    placement: {
+      cache: async () => ({ result: { state: "miss", reason: "absent" } }),
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 7 }),
+      destroy: async () => {},
+    },
+  });
+
+  await sandbox.cache(durableCache("tree"), { key: "v1", path: ".tree" });
+  await sandbox.exec(durable("check"), "secret command");
+  await sandbox.cleanup();
+
+  const report = meter.report();
+  expect(report.samples).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "source", state: "prepared", bytes: 12 }),
+      expect.objectContaining({ type: "sandbox", phase: "ready" }),
+      expect.objectContaining({ type: "cache", state: "miss", bytes: 0 }),
+      { type: "exec", state: "finished", count: 1, durationMs: 7 },
+      expect.objectContaining({ type: "sandbox", phase: "destroy" }),
+    ]),
+  );
+  expect(JSON.stringify(report)).not.toContain("unreported");
+  expect(JSON.stringify(report)).not.toContain("secret command");
+});
+
+test("reconnect latency does not double-count the original command duration", async () => {
+  let now = 0;
+  const meter = new Meter({ priceTable: { id: "test", rates: [] }, now: () => ++now });
+  const revision = "f".repeat(40);
+  const sandbox = new Sandbox({
+    runId: "run-reconnect-meter",
+    secrets: {},
+    meter,
+    terminal: terminalFixture(),
+    source: source(
+      { repositoryId: "repository-1", remote: "https://github.com/acme/example", revision },
+      { prepare: async () => prepared(revision) },
+    ),
+    placement: {
+      exec: async () => {
+        throw new Error("recorded commands do not execute");
+      },
+      destroy: async () => {},
+    },
+  });
+  const recorded: DurableStep = {
+    id: "recorded",
+    run: async (digest) => ({
+      digest,
+      result: { exitCode: 0, stdout: "", stderr: "", durationMs: 99_999 },
+      callback: "recorded",
+    }),
+  };
+
+  await sandbox.exec(recorded, "build");
+
+  expect(meter.report().samples).toContainEqual({
+    type: "exec",
+    state: "reconnected",
+    count: 1,
+    durationMs: 1,
+  });
+});
+
+test("continuity loss and failed destroy attempts are each metered once", async () => {
+  let now = 0;
+  const meter = new Meter({
+    priceTable: {
+      id: "test",
+      rates: [
+        { source: "container", unit: "vcpu-ms", usdPerUnit: 0 },
+        { source: "container", unit: "gib-ms", usdPerUnit: 0 },
+        { source: "container", unit: "disk-gb-ms", usdPerUnit: 0 },
+      ],
+    },
+    container: { vcpu: 0.5, memoryGib: 4, diskGb: 8 },
+    now: () => ++now,
+  });
+  const revision = "f".repeat(40);
+  const sandbox = new Sandbox({
+    runId: "run-loss-meter",
+    secrets: {},
+    meter,
+    terminal: terminalFixture(),
+    source: source(
+      { repositoryId: "repository-1", remote: "https://github.com/acme/example", revision },
+      { prepare: async () => prepared(revision) },
+    ),
+    placement: {
+      exec: async () => {
+        throw new RunLostError("placement replaced");
+      },
+      destroy: async () => {
+        throw new Error("destroy unavailable");
+      },
+    },
+  });
+
+  await expect(sandbox.exec(durable("build"), "build")).rejects.toThrow("placement replaced");
+  await expect(sandbox.exec(durable("later"), "later")).rejects.toThrow("placement replaced");
+  await expect(sandbox.cleanup()).rejects.toThrow("destroy unavailable");
+
+  expect(meter.report().samples).toEqual(
+    expect.arrayContaining([
+      { type: "loss", startedCommands: 1 },
+      expect.objectContaining({ type: "sandbox", phase: "destroy", count: 1 }),
+      expect.objectContaining({
+        type: "usage",
+        source: "container",
+        unit: "vcpu-ms",
+        quantity: 1.5,
+        provenance: "allocated",
+      }),
+    ]),
+  );
+});
 
 const recordedDurable = (): DurableStep => {
   let recorded:

@@ -1,3 +1,5 @@
+import type { Meter } from "./meter.ts";
+
 export type Outcome = "success" | "failure" | "cancelled";
 
 export interface Finalization {
@@ -29,16 +31,23 @@ export class Terminal {
   readonly #identity: TerminalIdentity;
   readonly #publish: (finalization: Finalization) => Promise<void>;
   readonly #state: TerminalState;
+  readonly #meter: Meter | undefined;
+  readonly #started: number | undefined;
+  #flushed = false;
+  #reported = false;
 
   constructor(
     identity: TerminalIdentity,
     state: TerminalState,
     publish: (finalization: Finalization) => Promise<void>,
+    options: { readonly meter?: Meter } = {},
   ) {
     assertIdentity(identity);
     this.#identity = identity;
     this.#state = state;
     this.#publish = publish;
+    this.#meter = options.meter;
+    this.#started = options.meter?.now();
   }
 
   async claim(outcome: Outcome): Promise<Finalization> {
@@ -65,6 +74,26 @@ export class Terminal {
   async publish(finalization: Finalization): Promise<void> {
     await this.verify(finalization);
     await this.#publish(finalization);
+    if (this.#meter) {
+      if (!this.#reported) {
+        try {
+          this.#meter.record({
+            type: "run",
+            outcome: finalization.outcome,
+            durationMs: Math.max(0, Math.round(this.#meter.now() - this.#started!)),
+          });
+        } catch {}
+        this.#reported = true;
+      }
+      if (!this.#flushed) {
+        await this.#meter
+          .flush()
+          .then(() => {
+            this.#flushed = true;
+          })
+          .catch(() => {});
+      }
+    }
   }
 
   #assertRecord(record: TerminalRecord): void {

@@ -1,6 +1,7 @@
 import { cacheDeclarationEvidence } from "./cache.ts";
 import type { PendingCache, PreparedCache } from "./cache.ts";
 import { ExecError } from "./exec-error.ts";
+import type { Meter } from "./meter.ts";
 import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
 import type { PreparedSource, Source } from "./source.ts";
@@ -113,7 +114,9 @@ export class Sandbox {
   #lost: RunLostError | undefined;
   #priorStart = false;
   #started = false;
+  readonly #startedCommands = new Set<string>();
   #used = false;
+  readonly #meter: Meter | undefined;
   readonly #placement: Placement;
   readonly #runId: string;
   readonly #secrets: ReadonlyArray<string>;
@@ -126,12 +129,14 @@ export class Sandbox {
     readonly source: Source;
     readonly placement: Placement;
     readonly terminal: Pick<Terminal, "verify">;
+    readonly meter?: Meter;
   }) {
     this.#runId = options.runId;
     this.#secrets = Object.values(options.secrets);
     this.#source = options.source;
     this.#placement = options.placement;
     this.#terminal = options.terminal;
+    this.#meter = options.meter;
   }
 
   async cache(step: DurableCache, declaration: CacheDeclaration): Promise<CacheResult> {
@@ -154,6 +159,7 @@ export class Sandbox {
     this.#cacheDeclarations.set(step.id, evidence);
     const digest = evidence.digest;
     if (this.#placement.cache) this.#used = true;
+    const started = this.#meter?.now();
     const outcome = await step.run(digest, async () => {
       if (!this.#placement.cache) return { result: { state: "miss", reason: "unavailable" } };
       const prepared = await this.#prepare(true);
@@ -171,6 +177,14 @@ export class Sandbox {
     const record = cacheRecord(outcome.record);
     if (record.pending) this.#pendingCaches.set(step.id, record.pending);
     else this.#pendingCaches.delete(step.id);
+    this.#observe(() =>
+      this.#meter?.record({
+        type: "cache",
+        state: record.result.state,
+        durationMs: this.#elapsed(started),
+        bytes: record.result.state === "hit" ? record.result.bytes : 0,
+      }),
+    );
     return record.result;
   }
 
@@ -203,7 +217,33 @@ export class Sandbox {
 
   #prepare(allowReconstruct: boolean): Promise<PreparedSource> {
     if (this.#preparation) return this.#preparation;
-    const preparation = this.#source.prepare({ allowReconstruct });
+    const started = this.#meter?.now();
+    let durationMs: number | undefined;
+    const preparation = this.#source
+      .prepare({ allowReconstruct })
+      .then((prepared) => {
+        const observedDuration = this.#elapsed(started);
+        durationMs = observedDuration;
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "source",
+            state: prepared.result.state,
+            durationMs: observedDuration,
+            bytes: prepared.result.bytes,
+          }),
+        );
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "sandbox",
+            phase: "ready",
+            durationMs: observedDuration,
+          }),
+        );
+        return prepared;
+      })
+      .finally(() => {
+        this.#observe(() => this.#meter?.allocation(durationMs ?? this.#elapsed(started)));
+      });
     this.#preparation = preparation;
     void preparation.catch(() => {
       if (this.#preparation === preparation) this.#preparation = undefined;
@@ -218,6 +258,7 @@ export class Sandbox {
     this.#started = true;
     this.#used = true;
     let outcome: Awaited<ReturnType<DurableStep["run"]>>;
+    const started = this.#meter?.now();
     try {
       outcome = await step.run(
         digest,
@@ -231,6 +272,8 @@ export class Sandbox {
             throw error;
           }
           this.#priorStart = true;
+          this.#startedCommands.add(step.id);
+          const allocationStarted = this.#meter?.now();
           try {
             return await this.#placement.exec({
               runId: this.#runId,
@@ -242,6 +285,8 @@ export class Sandbox {
           } catch (error) {
             if (error instanceof RunLostError) throw this.#lose(error);
             throw error;
+          } finally {
+            this.#observe(() => this.#meter?.allocation(this.#elapsed(allocationStarted)));
           }
         },
         async () => await this.cleanup(),
@@ -251,10 +296,22 @@ export class Sandbox {
       throw error;
     }
     if (outcome.digest !== digest) throw this.#lose(new Error("command digest changed"));
-    if (outcome.callback === "recorded") this.#priorStart = true;
-    if ("lost" in outcome) throw this.#lose(new RunLostError(outcome.lost.message));
+    if (outcome.callback === "recorded") {
+      this.#priorStart = true;
+      this.#startedCommands.add(step.id);
+    }
+    if ("lost" in outcome) {
+      throw this.#lose(new RunLostError(outcome.lost.message));
+    }
     if ("timeout" in outcome) throw new ExecTimeoutError(outcome.timeout.message);
     const result = outcome.result;
+    this.#observe(() =>
+      this.#meter?.record({
+        type: "exec",
+        state: outcome.callback === "recorded" ? "reconnected" : "finished",
+        durationMs: outcome.callback === "recorded" ? this.#elapsed(started) : result.durationMs,
+      }),
+    );
     if (result.exitCode !== 0) {
       throw new ExecError(step.id, redactSecrets(options.command, this.#secrets), {
         ...result,
@@ -271,6 +328,9 @@ export class Sandbox {
       error instanceof RunLostError
         ? error
         : new RunLostError("run continuity was lost after command execution may have started");
+    this.#observe(() =>
+      this.#meter?.record({ type: "loss", startedCommands: this.#startedCommands.size }),
+    );
     return this.#lost;
   }
 
@@ -278,8 +338,21 @@ export class Sandbox {
     if (!this.#used || this.#cleaned) return;
     if (this.#cleaning) return await this.#cleaning;
     const cleaning = (async () => {
-      await this.#placement.destroy(this.#runId, this.#secrets);
-      this.#cleaned = true;
+      const started = this.#meter?.now();
+      try {
+        await this.#placement.destroy(this.#runId, this.#secrets);
+        this.#cleaned = true;
+      } finally {
+        const durationMs = this.#elapsed(started);
+        this.#observe(() =>
+          this.#meter?.record({
+            type: "sandbox",
+            phase: "destroy",
+            durationMs,
+          }),
+        );
+        this.#observe(() => this.#meter?.allocation(durationMs));
+      }
     })();
     this.#cleaning = cleaning;
     try {
@@ -310,6 +383,16 @@ export class Sandbox {
       await (publication ? publication.run(publish) : publish()).catch(() => {});
     }
     await this.cleanup();
+  }
+
+  #elapsed(started: number | undefined): number {
+    return started === undefined ? 0 : Math.max(0, Math.round(this.#meter!.now() - started));
+  }
+
+  #observe(work: () => void): void {
+    try {
+      work();
+    } catch {}
   }
 }
 

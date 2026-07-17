@@ -2,10 +2,12 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import type { PreparedCache } from "./cache.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
 import type { RunOperations } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
+import { SANDBOX_CAPACITY } from "./sandbox-config.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
 import type { SourceIdentity } from "./source.ts";
@@ -20,6 +22,16 @@ const CACHE_PUBLISH_STEP = "runway:cache-publish";
 const TERMINAL_START_STEP = "runway:terminal-start";
 const TERMINAL_CLAIM_STEP = "runway:terminal-claim";
 const TERMINAL_PUBLISH_STEP = "runway:terminal-publish";
+
+const measuredWorkflowStep = async <T>(meter: Meter, work: () => Promise<T>): Promise<T> => {
+  try {
+    return await work();
+  } finally {
+    try {
+      meter.usage("workflow", "step", 1, "derived");
+    } catch {}
+  }
+};
 
 const cachePublicationIdentity = async (
   finalization: Finalization,
@@ -108,6 +120,7 @@ const makeRunRuntime = (
   secrets: Readonly<Record<string, string>>,
   identity: SourceIdentity,
   terminal: Terminal,
+  meter: Meter,
 ): RunRuntime => {
   let preparedCaches: readonly PreparedCache[] = [];
   const exactSource = source(identity, {
@@ -160,47 +173,50 @@ const makeRunRuntime = (
       destroy: async () => await binding.destroy(runId, secrets),
     },
     terminal,
+    meter,
   });
   return {
     operations: {
       do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-        step.do(id, fn as () => Promise<never>) as Promise<T>,
+        measuredWorkflowStep(meter, () => step.do(id, fn as () => Promise<never>) as Promise<T>),
       exec: (id, command) =>
         sandbox.exec(
           {
             id,
             run: async (digest, work, rollback) => {
               let executed = false;
-              const recorded: unknown = await step.do(
-                id,
-                { retries: { limit: 5, delay: 0 } },
-                async (ctx) => {
-                  executed = true;
-                  try {
-                    return {
-                      digest,
-                      result: await work({
-                        count: ctx.step.count,
-                        attempt: ctx.attempt,
-                      }),
-                    } as never;
-                  } catch (error) {
-                    if (error instanceof RunLostError) {
+              const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+                step.do(
+                  id,
+                  { retries: { limit: 5, delay: 0 } },
+                  async (ctx) => {
+                    executed = true;
+                    try {
                       return {
                         digest,
-                        lost: { message: error.message, attempt: ctx.attempt },
+                        result: await work({
+                          count: ctx.step.count,
+                          attempt: ctx.attempt,
+                        }),
                       } as never;
+                    } catch (error) {
+                      if (error instanceof RunLostError) {
+                        return {
+                          digest,
+                          lost: { message: error.message, attempt: ctx.attempt },
+                        } as never;
+                      }
+                      if (error instanceof ExecTimeoutError) {
+                        return {
+                          digest,
+                          timeout: { message: error.message, attempt: ctx.attempt },
+                        } as never;
+                      }
+                      throw error;
                     }
-                    if (error instanceof ExecTimeoutError) {
-                      return {
-                        digest,
-                        timeout: { message: error.message, attempt: ctx.attempt },
-                      } as never;
-                    }
-                    throw error;
-                  }
-                },
-                { rollback },
+                  },
+                  { rollback },
+                ),
               );
               if (
                 !recorded ||
@@ -236,10 +252,12 @@ const makeRunRuntime = (
           {
             id,
             run: async (digest, work) => {
-              const recorded: unknown = await step.do(
-                id,
-                { retries: { limit: 5, delay: 0 } },
-                async () => ({ digest, record: await work() }) as never,
+              const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+                step.do(
+                  id,
+                  { retries: { limit: 5, delay: 0 } },
+                  async () => ({ digest, record: await work() }) as never,
+                ),
               );
               if (
                 !recorded ||
@@ -258,14 +276,17 @@ const makeRunRuntime = (
           },
           declaration,
         ),
-      sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
+      sleep: (id: string, durationMs: number): Promise<void> =>
+        measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
     },
     cleanup: async () => {
       if (sandbox.hasPendingCaches()) {
-        const recorded = (await step.do(
-          CACHE_PREPARE_STEP,
-          { retries: { limit: 5, delay: 0 } },
-          async () => (await sandbox.prepare()) as never,
+        const recorded = (await measuredWorkflowStep(meter, async () =>
+          step.do(
+            CACHE_PREPARE_STEP,
+            { retries: { limit: 5, delay: 0 } },
+            async () => (await sandbox.prepare()) as never,
+          ),
         )) as readonly PreparedCache[];
         if (!Array.isArray(recorded)) throw new Error("invalid durable cache preparation");
         preparedCaches = structuredClone(recorded);
@@ -280,13 +301,11 @@ const makeRunRuntime = (
       return sandbox.finish(finalization, ready, {
         run: async (work) => {
           const identity = await cachePublicationIdentity(finalization, ready);
-          const recorded: unknown = await step.do(
-            CACHE_PUBLISH_STEP,
-            { retries: { limit: 5, delay: 0 } },
-            async () => {
+          const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+            step.do(CACHE_PUBLISH_STEP, { retries: { limit: 5, delay: 0 } }, async () => {
               await work();
               return { identity, published: true } as never;
-            },
+            }),
           );
           if (
             !recorded ||
@@ -308,23 +327,33 @@ const makeTerminal = async (
   step: WorkflowStep,
   binding: RuntimeBinding,
   runId: string,
+  meter: Meter,
 ): Promise<Terminal> => {
   let winner: TerminalRecord | undefined;
   const state: TerminalState = {
     claim: async (candidate) => {
-      winner = (await step.do(
-        TERMINAL_CLAIM_STEP,
-        async () => (await binding.claimTerminal(runId, candidate)) as never,
+      winner = (await measuredWorkflowStep(meter, async () =>
+        step.do(
+          TERMINAL_CLAIM_STEP,
+          async () => (await binding.claimTerminal(runId, candidate)) as never,
+        ),
       )) as TerminalRecord;
       return winner;
     },
     read: async () => (await binding.readTerminal(runId)) ?? winner,
   };
-  return new Terminal(await binding.terminal(runId), state, async (finalization) => {
-    await step.do(TERMINAL_PUBLISH_STEP, async () => {
-      await binding.publishTerminal(runId, finalization);
-    });
-  });
+  return new Terminal(
+    await binding.terminal(runId),
+    state,
+    async (finalization) => {
+      await measuredWorkflowStep(meter, async () =>
+        step.do(TERMINAL_PUBLISH_STEP, async () => {
+          await binding.publishTerminal(runId, finalization);
+        }),
+      );
+    },
+    { meter },
+  );
 };
 
 export const toEntrypoint = (
@@ -334,17 +363,29 @@ export const toEntrypoint = (
     override async run(event: WorkflowEvent<unknown>, step: WorkflowStep): Promise<unknown> {
       const binding = (this.env as DynamicWorkerEnv)[RUNTIME_BINDING];
       if (!binding) throw new Error(`missing runtime binding: ${RUNTIME_BINDING}`);
-      const terminal = await makeTerminal(step, binding, event.instanceId);
-      const started = (await step.do(
-        TERMINAL_START_STEP,
-        async () => (await binding.startRun(event.instanceId)) as never,
+      const meter = new Meter({
+        priceTable: CLOUDFLARE_PRICE_TABLE,
+        container: SANDBOX_CAPACITY,
+        emit: (report) => console.log({ type: "runway-meter", report }),
+      });
+      const terminal = await makeTerminal(step, binding, event.instanceId, meter);
+      const started = (await measuredWorkflowStep(meter, async () =>
+        step.do(
+          TERMINAL_START_STEP,
+          async () => (await binding.startRun(event.instanceId)) as never,
+        ),
       )) as boolean;
-      if (!started) return undefined;
+      if (!started) {
+        await meter.flush().catch(() => {});
+        return undefined;
+      }
       let secrets: Readonly<Record<string, string>>;
       try {
-        const snapshot = await step.do(
-          SECRET_SNAPSHOT_STEP,
-          async () => (await binding.captureSecrets(event.instanceId)) as never,
+        const snapshot = await measuredWorkflowStep(meter, async () =>
+          step.do(
+            SECRET_SNAPSHOT_STEP,
+            async () => (await binding.captureSecrets(event.instanceId)) as never,
+          ),
         );
         secrets = secretsOf(def.secrets, await binding.restoreSecrets(event.instanceId, snapshot));
       } catch (error) {
@@ -358,6 +399,7 @@ export const toEntrypoint = (
         secrets,
         await binding.source(),
         terminal,
+        meter,
       );
       let result: unknown;
       let failed = false;

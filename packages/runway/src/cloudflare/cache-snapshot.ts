@@ -1,4 +1,5 @@
 import type { Budget } from "../run.ts";
+import { CACHE_LIMITS } from "../sandbox-config.ts";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_ENTRIES = 1_000_000;
@@ -6,7 +7,7 @@ const MAX_DEPTH = 256;
 const HELPER_MEMORY_BYTES = 1024 * 1024 * 1024;
 const HELPER_CPU_SECONDS = 120;
 const HELPER_FILE_DESCRIPTORS = 64;
-const HELPER_TIMEOUT_SECONDS = 180;
+const HELPER_TIMEOUT_SECONDS = CACHE_LIMITS.helperDurationMs / 1000;
 
 export const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/bin/env python3
 import hashlib, json, math, os, resource, shutil, stat, struct, subprocess, sys, time
@@ -427,7 +428,7 @@ const parseArchive = (value: unknown): ArchiveEvidence => {
   return archive as unknown as ArchiveEvidence;
 };
 
-const maximumBytes = (budget: SnapshotBudget): number => budget?.maxBytes ?? 1024 * 1024 * 1024;
+const maximumBytes = (budget: SnapshotBudget): number => budget?.maxBytes ?? CACHE_LIMITS.maxBytes;
 
 const sameTree = (left: TreeSummary, right: TreeSummary): boolean =>
   (
@@ -561,7 +562,6 @@ export class CloudflareCacheSnapshot {
           diskBytes: summary.diskBytes,
           maxDepth: summary.maxDepth,
           durationMs: Math.max(0, this.#now() - started),
-          estimatedCostUsd: 0,
         };
       });
     } catch {

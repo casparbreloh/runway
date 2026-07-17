@@ -21,6 +21,7 @@ import {
   normalizeGitHubDelivery,
   type GitHubAcceptedDelivery,
 } from "./github.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import {
   parseGitHubRunSource,
   repositorySourceForRun,
@@ -30,7 +31,12 @@ import {
 } from "./repository-source.ts";
 import type { ExecResult } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
-import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
+import {
+  CACHE_LIMITS,
+  GITHUB_COORDINATOR_BINDING,
+  SANDBOX_BINDING,
+  SANDBOX_CAPACITY,
+} from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
@@ -326,6 +332,28 @@ export class RunwaySandboxBinding
             transfer,
           })
         : undefined;
+    const meter = new Meter({
+      priceTable: CLOUDFLARE_PRICE_TABLE,
+      container: SANDBOX_CAPACITY,
+      cache: {
+        maxBytes: CACHE_LIMITS.maxBytes,
+        maxDurationMs: CACHE_LIMITS.helperDurationMs,
+        save: {
+          classAOperations: CACHE_LIMITS.saveClassAOperations,
+          classBOperations: CACHE_LIMITS.saveClassBOperations,
+          storageHorizonMs: CACHE_LIMITS.storageHorizonMs,
+          transferDurationMs: CACHE_LIMITS.transferDurationMs,
+          workflowSteps: CACHE_LIMITS.saveWorkflowSteps,
+        },
+        restore: {
+          classAOperations: CACHE_LIMITS.restoreClassAOperations,
+          classBOperations: CACHE_LIMITS.restoreClassBOperations,
+          transferDurationMs: CACHE_LIMITS.transferDurationMs,
+          workflowSteps: CACHE_LIMITS.restoreWorkflowSteps,
+        },
+      },
+      emit: (report) => console.log({ type: "runway-meter", report }),
+    });
     return new Cache({
       context: {
         repositoryId: config.repositoryId,
@@ -370,6 +398,7 @@ export class RunwaySandboxBinding
         if (!namespace) throw new Error("GitHub coordinator is not configured");
         return await namespace.getByName(String(source.check.repository.id)).current(source);
       },
+      meter,
       ...(snapshots ? { restore: snapshots, snapshots } : {}),
     });
   }
@@ -503,7 +532,12 @@ export class RunwaySandboxBinding
     if (request.source.result.revision !== expected.revision) {
       throw new Error("cache source does not match the bound repository");
     }
-    return await this.#cache(request).record(request.id, request.declaration);
+    const cache = this.#cache(request);
+    try {
+      return await cache.record(request.id, request.declaration);
+    } finally {
+      await cache.flushMeter();
+    }
   }
 
   async quiesce(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
@@ -516,7 +550,12 @@ export class RunwaySandboxBinding
   ): ReturnType<RuntimeBinding["prepareCaches"]> {
     this.#assertRun(request.runId);
     this.#snapshotValues(request.secrets);
-    return await this.#cache(request).prepare(request.pending);
+    const cache = this.#cache(request);
+    try {
+      return await cache.prepare(request.pending);
+    } finally {
+      await cache.flushMeter();
+    }
   }
 
   async publishCaches(request: Parameters<RuntimeBinding["publishCaches"]>[0]): Promise<void> {
@@ -534,7 +573,12 @@ export class RunwaySandboxBinding
         throw new Error("cache publication requires the terminal winner");
       }
     }
-    await this.#cache(request).commit(request.prepared);
+    const cache = this.#cache(request);
+    try {
+      await cache.commit(request.prepared);
+    } finally {
+      await cache.flushMeter();
+    }
   }
 
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {

@@ -6,17 +6,9 @@ import {
   SANDBOX_APPLICATION,
   SANDBOX_BINDING,
   SANDBOX_CLASS,
+  SANDBOX_INSTANCE_TYPES,
   SANDBOX_MIGRATION_TAG,
 } from "./sandbox-config.ts";
-
-const INSTANCE_TYPES = {
-  lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },
-  basic: { vcpu: 0.25, memoryMib: 1_024, diskMb: 4_000 },
-  "standard-1": { vcpu: 0.5, memoryMib: 4_096, diskMb: 8_000 },
-  "standard-2": { vcpu: 1, memoryMib: 6_144, diskMb: 12_000 },
-  "standard-3": { vcpu: 2, memoryMib: 8_192, diskMb: 16_000 },
-  "standard-4": { vcpu: 4, memoryMib: 12_288, diskMb: 20_000 },
-} as const;
 
 const matchesInstanceType = (configuration: {
   instance_type?: unknown;
@@ -26,7 +18,7 @@ const matchesInstanceType = (configuration: {
 }): boolean => {
   const instanceType = SANDBOX_APPLICATION.configuration.instance_type;
   if (configuration.instance_type === instanceType) return true;
-  const expected = INSTANCE_TYPES[instanceType];
+  const expected = SANDBOX_INSTANCE_TYPES[instanceType];
   return (
     configuration.vcpu === expected.vcpu &&
     configuration.memory_mib === expected.memoryMib &&

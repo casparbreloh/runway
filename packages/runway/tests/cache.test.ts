@@ -3,6 +3,41 @@ import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
 
 import { Cache } from "../src/cache.ts";
+import { Meter } from "../src/meter.ts";
+
+const cacheMeter = (classAUsd = 0): Meter =>
+  new Meter({
+    priceTable: {
+      id: "test-cache-prices",
+      rates: [
+        { source: "container", unit: "vcpu-ms", usdPerUnit: 0 },
+        { source: "container", unit: "gib-ms", usdPerUnit: 0 },
+        { source: "container", unit: "disk-gb-ms", usdPerUnit: 0 },
+        { source: "r2", unit: "class-a", usdPerUnit: classAUsd },
+        { source: "r2", unit: "class-b", usdPerUnit: 0 },
+        { source: "r2", unit: "stored-byte-ms", usdPerUnit: 0 },
+        { source: "workflow", unit: "step", usdPerUnit: 0 },
+      ],
+    },
+    container: { vcpu: 0.5, memoryGib: 4, diskGb: 8 },
+    cache: {
+      maxBytes: 1024 * 1024 * 1024,
+      maxDurationMs: 60_000,
+      save: {
+        classAOperations: 9,
+        classBOperations: 10,
+        storageHorizonMs: 30 * 24 * 60 * 60 * 1_000,
+        transferDurationMs: 15 * 60_000,
+        workflowSteps: 3,
+      },
+      restore: {
+        classAOperations: 0,
+        classBOperations: 4,
+        transferDurationMs: 15 * 60_000,
+        workflowSteps: 1,
+      },
+    },
+  });
 
 class MemoryRefs {
   readonly objects = new Map<string, { readonly etag: string; readonly text: string }>();
@@ -37,6 +72,25 @@ class MemoryRefs {
     const etag = `version-${++this.#version}`;
     this.objects.set(key, { etag, text });
     return { etag };
+  }
+}
+
+class FlakyRefs extends MemoryRefs {
+  failures = 0;
+
+  override async put(
+    key: string,
+    text: string,
+    options: {
+      readonly onlyIf: { readonly etagMatches?: string; readonly etagDoesNotMatch?: string };
+    },
+  ): Promise<{ readonly etag: string } | null> {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      this.writes.push({ key, onlyIf: options.onlyIf });
+      return null;
+    }
+    return await super.put(key, text, options);
   }
 }
 
@@ -1048,6 +1102,95 @@ test("a successful cache snapshot is prepared as immutable content before its re
   expect(events[3]).toMatch(/^remove:\/cache\/\.runway-cache-/);
 });
 
+test("cost admission rejects the conservative save bound before capture spends work", async () => {
+  const refs = new MemoryRefs();
+  let captures = 0;
+  const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
+    inspect: async () => "absent",
+    capture: async ({ path }) => {
+      captures += 1;
+      return {
+        state: "ready",
+        archive: { path, bytes: 1, digest: "a".repeat(64) },
+        entryCount: 1,
+        uniqueInodes: 1,
+        fileCount: 1,
+        byteCount: 1,
+        diskBytes: 1,
+        maxDepth: 1,
+        treeDigest: "e".repeat(64),
+        durationMs: 1,
+      };
+    },
+    upload: async ({ expected }) => ({ state: "stored", ...expected }),
+    remove: async () => {},
+  };
+  const create = () =>
+    new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+      snapshots,
+      meter: cacheMeter(1),
+    });
+  const recorded = await create().record("tools", {
+    key: "v1",
+    path: "/cache/tools",
+    budget: { maxEstimatedCostUsd: 8 },
+  });
+  if (!recorded.pending) throw new Error("expected pending cache");
+
+  await expect(create().prepare([recorded.pending])).resolves.toEqual([
+    { state: "skipped", id: "tools", reason: "budget" },
+  ]);
+  expect(captures).toBe(0);
+});
+
+test("actual CAS retries change raw operation quantities without recording the admission bound", async () => {
+  const refs = new FlakyRefs();
+  const meter = cacheMeter();
+  const cache = new Cache({
+    context: { ...context, generation: 2 },
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+    meter,
+  });
+  const lookup = await cache.lookup("tools", { key: "v1", path: "/cache/tools" });
+  if (!lookup.revision) throw new Error("expected revision");
+  const beforeBound = structuredClone(meter.report().samples);
+
+  meter.cacheBound({ maxBytes: 1, maxDurationMs: 1 });
+  expect(meter.report().samples).toEqual(beforeBound);
+
+  refs.objects.set(lookup.revision.ref, {
+    etag: "older",
+    text: JSON.stringify({ ...refRecord(lookup.revision), generation: 1 }),
+  });
+  refs.failures = 1;
+  await cache.publish(lookup.revision, objectFixture(lookup.revision));
+
+  expect(meter.report().samples).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "usage",
+        source: "r2",
+        unit: "class-a",
+        quantity: 2,
+        provenance: "derived",
+      }),
+      expect.objectContaining({
+        type: "usage",
+        source: "r2",
+        unit: "class-b",
+        quantity: 2,
+        provenance: "derived",
+      }),
+    ]),
+  );
+});
+
 test("unsafe, corrupt, over-budget, and concurrently deleted snapshots stay unreachable", async () => {
   const cases = [
     {
@@ -1191,6 +1334,7 @@ test("a CAS conflict or newer generation leaves uploaded content unreachable and
   const refs = new MemoryRefs();
   const diagnostics: unknown[] = [];
   let uploads = 0;
+  const meter = cacheMeter();
   const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
     inspect: async () => "absent",
     capture: async ({ path }) => ({
@@ -1217,6 +1361,7 @@ test("a CAS conflict or newer generation leaves uploaded content unreachable and
       current,
       snapshots,
       diagnose: (entry) => diagnostics.push(entry),
+      meter,
     });
   const recorded = await create().record("tools", { key: "v1", path: "/cache/tools" });
   if (!recorded.pending) throw new Error("expected pending cache");
@@ -1228,6 +1373,9 @@ test("a CAS conflict or newer generation leaves uploaded content unreachable and
   expect(refs.objects.get(recorded.pending.revision.ref)!.text).toBe(winner);
   expect(diagnostics).toContainEqual({ id: "tools", state: "skipped", reason: "conflict" });
   expect(uploads).toBe(1);
+  expect(meter.report().samples).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ type: "cache", state: "saved" })]),
+  );
 
   refs.objects.delete(recorded.pending.revision.ref);
   const before = refs.writes.length;
