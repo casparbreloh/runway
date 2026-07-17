@@ -9,8 +9,8 @@ import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
 
 import type { CloudflareApi } from "../src/cloudflare-api.ts";
-import { collectResultItems, resultOf } from "../src/cloudflare-api.ts";
-import { SANDBOX_APPLICATION, SANDBOX_CONTAINER } from "../src/sandbox-config.ts";
+import { collectResultItems, defaultClient, resultOf } from "../src/cloudflare-api.ts";
+import { SANDBOX_APPLICATION, SANDBOX_CLASS } from "../src/sandbox-config.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { fetchWorkersDev } from "./live-smoke-helpers.ts";
 
@@ -170,6 +170,7 @@ const buildWorker = async (): Promise<Uint8Array> => {
 
 const uploadWorker = async (
   cf: Cloudflare,
+  api: CloudflareApi,
   options: {
     readonly accountId: string;
     readonly scriptName: string;
@@ -195,14 +196,17 @@ const uploadWorker = async (
       { type: "r2_bucket", name: "BACKUP_BUCKET", bucket_name: options.bucket },
       { type: "plain_text", name: "ACCOUNT_ID", text: options.accountId },
       { type: "plain_text", name: "BUCKET_NAME", text: options.bucket },
+      { type: "plain_text", name: "CLOUDFLARE_ACCOUNT_ID", text: options.accountId },
+      { type: "plain_text", name: "BACKUP_BUCKET_NAME", text: options.bucket },
       { type: "plain_text", name: "CACHE_OBJECT_KEY", text: options.objectKey },
       { type: "secret_text", name: "DRIVER_TOKEN", text: options.driverToken },
       { type: "secret_text", name: "R2_ACCESS_KEY_ID", text: options.accessKeyId },
       { type: "secret_text", name: "R2_SECRET_ACCESS_KEY", text: options.secretAccessKey },
     ],
-    containers: [SANDBOX_CONTAINER],
-    exports: {
-      Sandbox: { type: "durable-object", state: "created", storage: "sqlite" },
+    containers: [{ class_name: SANDBOX_CLASS }],
+    migrations: {
+      new_tag: "runway-cache-smoke-v1",
+      new_sqlite_classes: [SANDBOX_CLASS],
     },
   } as Parameters<Cloudflare["workers"]["scripts"]["update"]>[1]["metadata"];
   await cf.workers.scripts.update(options.scriptName, {
@@ -210,7 +214,7 @@ const uploadWorker = async (
     metadata,
     files: [await toFile(contents, "worker.js", { type: "application/javascript+module" })],
   });
-  await createSmokeContainer(cf as unknown as CloudflareApi, options.accountId, options.scriptName);
+  await createSmokeContainer(api, options.accountId, options.scriptName);
   await cf.workers.scripts.subdomain.create(options.scriptName, {
     account_id: options.accountId,
     enabled: true,
@@ -221,6 +225,7 @@ const run = async (): Promise<void> => {
   const { accessKeyId, secretAccessKey } = credentials();
   const token = await tokenOf();
   const cf = new Cloudflare({ apiToken: token });
+  const api = defaultClient(token);
   const accountId = await oneAccountId(cf);
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
   const scriptName = `runway-cache-smoke-${suffix}`;
@@ -268,7 +273,7 @@ const run = async (): Promise<void> => {
       }
     }
 
-    await uploadWorker(cf, {
+    await uploadWorker(cf, api, {
       accountId,
       scriptName,
       bucket,

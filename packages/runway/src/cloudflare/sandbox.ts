@@ -588,10 +588,11 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
       if (request.source.result.revision !== options.repository.commit) {
         throw new Error("command source does not match the exact repository revision");
       }
-      const storedMarker = await sandbox.readFile(REPOSITORY_MARKER);
+      const marker = await sandbox.exists(REPOSITORY_MARKER);
+      const storedMarker = marker.exists ? await sandbox.readFile(REPOSITORY_MARKER) : undefined;
       const checkout = await sandbox.exists(REPOSITORY_GIT_DIRECTORY);
       if (
-        !storedMarker.success ||
+        !storedMarker?.success ||
         storedMarker.content !== repositoryMarker(options.repository, request.source.placement) ||
         !checkout.exists
       ) {

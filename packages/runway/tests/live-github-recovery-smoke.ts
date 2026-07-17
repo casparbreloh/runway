@@ -589,7 +589,7 @@ const run = async (config: LiveConfig): Promise<void> => {
   const driverName = `${scriptName}-driver`;
   const containerName = `${scriptName}-Sandbox`;
   const token = await tokenOf();
-  const cf = new Cloudflare({ apiToken: token });
+  const cf = new Cloudflare({ apiToken: token, timeout: 15_000 });
   const accountId = await oneAccountId(cf);
   const bucketName = artifactBucketName(accountId);
   const bucketExisted = await bucketExists(cf, accountId, bucketName);

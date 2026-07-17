@@ -472,7 +472,7 @@ const run = async (): Promise<void> => {
       typeof lossReport.loss.message !== "string" ||
       !lossReport.loss.message.includes("continuity was lost")
     ) {
-      throw new Error("Smoke did not report honest placement loss");
+      throw new Error(`Smoke did not report honest placement loss: ${JSON.stringify(lossReport)}`);
     }
     const cold = observationOf(coldReport.cold);
     if (cold.head !== cold.metrics.commit) {

@@ -8,6 +8,7 @@ export default defineConfig({
       "tests/cli.test.ts",
       "tests/cloudflare-cache.test.ts",
       "tests/cloudflare-cache-snapshot.test.ts",
+      "tests/cloudflare-api.test.ts",
       "tests/cloudflare-legacy-stack.test.ts",
       "tests/cloudflare-sandbox.test.ts",
       "tests/cloudflare-stack.test.ts",

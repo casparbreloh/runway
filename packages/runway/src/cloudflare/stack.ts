@@ -70,6 +70,20 @@ const sha256 = (value: Uint8Array | string): string =>
 const equalBytes = (left: Uint8Array, right: Uint8Array): boolean =>
   left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
 
+const matchesInstanceType = (
+  configuration: Record<string, unknown> | undefined,
+  instanceType: string,
+): boolean => {
+  if (configuration?.instance_type === instanceType) return true;
+  const disk = configuration?.disk as { size_mb?: unknown } | undefined;
+  return (
+    instanceType === "standard-4" &&
+    configuration?.vcpu === 4 &&
+    configuration?.memory_mib === 12_288 &&
+    disk?.size_mb === 20_000
+  );
+};
+
 interface ProviderZone {
   readonly id: string;
   readonly name: string;
@@ -174,7 +188,6 @@ export const cloudflareStackManifest = (opts: {
       runnerAbi: SANDBOX_RUNNER_ABI,
       instanceType: SANDBOX_CONTAINER.instance_type,
       schedulingPolicy: SANDBOX_APPLICATION.scheduling_policy,
-      instances: SANDBOX_APPLICATION.instances,
       maxInstances: SANDBOX_APPLICATION.max_instances,
       tiers: SANDBOX_APPLICATION.constraints.tiers.map(String),
       rolloutActiveGracePeriod: SANDBOX_APPLICATION.rollout_active_grace_period,
@@ -316,6 +329,11 @@ export class CloudflareStackControl implements StackControl {
       );
     }
     await this.#assertRouteOwnership(manifest);
+    const scripts = await collectResultItems(
+      await this.#opts.cf.workers.scripts.list({ account_id: this.#opts.accountId }),
+      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
+    );
+    const workerExists = scripts.some(({ id }) => id === manifest.worker.name);
 
     const artifactBucket = manifest.buckets.find(({ lifecycle }) => lifecycle === "retain");
     if (!artifactBucket) throw new Error("Stack has no artifact bucket");
@@ -375,19 +393,17 @@ export class CloudflareStackControl implements StackControl {
           text,
         })),
       ],
-      containers: [
-        {
-          class_name: SANDBOX_CLASS,
-          image: manifest.container.image,
-          instance_type: manifest.container.instanceType,
-        },
-      ],
-      exports: Object.fromEntries(
-        manifest.namespaces.map(({ className }) => [
-          className,
-          { type: "durable-object", state: "created", storage: "sqlite" },
-        ]),
-      ),
+      containers: [{ class_name: SANDBOX_CLASS }],
+      ...(workerExists
+        ? {}
+        : {
+            migrations: {
+              new_tag: "runway-v1",
+              new_sqlite_classes: manifest.namespaces
+                .map(({ className }) => className)
+                .sort((left, right) => left.localeCompare(right)),
+            },
+          }),
     } as Parameters<CloudflareApi["workers"]["scripts"]["update"]>[1]["metadata"];
     await this.#opts.cf.workers.scripts.update(manifest.worker.name, {
       account_id: this.#opts.accountId,
@@ -519,7 +535,7 @@ export class CloudflareStackControl implements StackControl {
       ? rolloutResult
       : ((rolloutResult as { rollouts?: readonly unknown[] } | undefined)?.rollouts ?? []);
     const rollout = rollouts[0] as Record<string, unknown> | undefined;
-    if (!rollout || rollout.status !== "completed") {
+    if (rollout && rollout.status !== "completed") {
       throw new Error("missing active completed Cloudflare container rollout");
     }
     const configuration = application.configuration as Record<string, unknown> | undefined;
@@ -528,8 +544,7 @@ export class CloudflareStackControl implements StackControl {
     const sandboxBinding = bindings.find(({ name }) => name === SANDBOX_BINDING);
     if (
       configuration?.image !== manifest.container.image ||
-      configuration.instance_type !== manifest.container.instanceType ||
-      application.instances !== manifest.container.instances ||
+      !matchesInstanceType(configuration, manifest.container.instanceType) ||
       application.max_instances !== manifest.container.maxInstances ||
       application.scheduling_policy !== manifest.container.schedulingPolicy ||
       application.rollout_active_grace_period !== manifest.container.rolloutActiveGracePeriod ||
@@ -723,14 +738,13 @@ export class CloudflareStackControl implements StackControl {
         imageDigest: containerImage.slice(containerImage.indexOf("@") + 1),
         platform: { os: "linux", architecture: "amd64" },
         runnerAbi: SANDBOX_RUNNER_ABI,
-        instanceType: required(configuration?.instance_type, "container instance type"),
+        instanceType: manifest.container.instanceType,
         schedulingPolicy: required(application.scheduling_policy, "container scheduling policy"),
-        instances: application.instances as number,
         maxInstances: application.max_instances,
         tiers: constraints.tiers.map(String),
         rolloutActiveGracePeriod: application.rollout_active_grace_period as number,
         id: applicationId,
-        rolloutId: required(rollout.id, "container rollout id"),
+        ...(rollout ? { rolloutId: required(rollout.id, "container rollout id") } : {}),
         namespaceId: required(durableObjects?.namespace_id, "container namespace id"),
       },
       namespaces,
@@ -933,15 +947,14 @@ export class CloudflareStackControl implements StackControl {
             application.id !== resource.id ||
             application.name !== resource.name ||
             configuration?.image !== resource.image ||
-            configuration.instance_type !== resource.instanceType ||
+            !matchesInstanceType(configuration, resource.instanceType) ||
             application.scheduling_policy !== resource.schedulingPolicy ||
-            application.instances !== resource.instances ||
             application.max_instances !== resource.maxInstances ||
             JSON.stringify(constraints?.tiers) !== JSON.stringify(resource.tiers.map(Number)) ||
             application.rollout_active_grace_period !== resource.rolloutActiveGracePeriod ||
             durableObjects?.namespace_id !== resource.namespaceId ||
             rollout?.id !== resource.rolloutId ||
-            rollout.status !== "completed" ||
+            (rollout !== undefined && rollout.status !== "completed") ||
             resource.image.slice(resource.image.indexOf("@") + 1) !== resource.imageDigest
           ) {
             throw new Error("Cloudflare container deletion evidence changed");
@@ -1241,7 +1254,7 @@ export class CloudflareStackControl implements StackControl {
         image: manifest.container.image,
         instance_type: manifest.container.instanceType,
       },
-      instances: manifest.container.instances,
+      instances: SANDBOX_APPLICATION.instances,
       max_instances: manifest.container.maxInstances,
       constraints: { tiers: manifest.container.tiers.map(Number) },
       rollout_active_grace_period: manifest.container.rolloutActiveGracePeriod,
@@ -1267,10 +1280,9 @@ export class CloudflareStackControl implements StackControl {
     const constraints = existing.constraints as { tiers?: unknown } | undefined;
     const exact =
       existing.scheduling_policy === applicationBody.scheduling_policy &&
-      existing.instances === applicationBody.instances &&
       existing.max_instances === applicationBody.max_instances &&
       configuration?.image === applicationBody.configuration.image &&
-      configuration.instance_type === applicationBody.configuration.instance_type &&
+      matchesInstanceType(configuration, applicationBody.configuration.instance_type) &&
       JSON.stringify(constraints?.tiers) === JSON.stringify(applicationBody.constraints.tiers) &&
       existing.rollout_active_grace_period === applicationBody.rollout_active_grace_period;
     if (exact) return;
@@ -1292,6 +1304,10 @@ export class CloudflareStackControl implements StackControl {
       }),
     ) as { id?: unknown } | undefined;
     const rolloutId = required(rollout?.id, "container rollout id");
+    await this.#waitForContainerRollout(applicationId, rolloutId);
+  }
+
+  async #waitForContainerRollout(applicationId: string, rolloutId: string): Promise<void> {
     const deadline = Date.now() + 5 * 60_000;
     while (Date.now() < deadline) {
       const current = resultOf(

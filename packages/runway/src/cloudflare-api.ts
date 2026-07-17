@@ -136,27 +136,49 @@ export type CloudflareApi = {
   };
 };
 
-export const defaultClient = (apiToken: string): CloudflareApi => {
-  const cf = new Cloudflare({ apiToken });
+export const defaultClient = (
+  apiToken: string,
+  request: typeof globalThis.fetch = globalThis.fetch,
+): CloudflareApi => {
+  const cf = new Cloudflare({ apiToken, timeout: 15_000 });
   const containerRequest = async (
     accountId: string,
     path: string,
     init: { method?: string; body?: unknown } = {},
   ): Promise<unknown> => {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers${path}`,
-      {
-        method: init.method ?? "GET",
-        headers: {
-          authorization: `Bearer ${apiToken}`,
-          ...(init.body ? { "content-type": "application/json" } : {}),
-        },
-        ...(init.body ? { body: JSON.stringify(init.body) } : {}),
-      },
-    );
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Cloudflare Containers API ${response.status}: ${text}`);
-    return text ? (JSON.parse(text) as unknown) : undefined;
+    const method = init.method ?? "GET";
+    const attempts = method === "GET" ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      let response: Response;
+      try {
+        response = await request(
+          `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers${path}`,
+          {
+            method,
+            headers: {
+              authorization: `Bearer ${apiToken}`,
+              ...(init.body ? { "content-type": "application/json" } : {}),
+            },
+            ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+      } catch (error) {
+        if (method === "GET" && attempt < attempts - 1) continue;
+        throw new Error("Cloudflare Containers API request failed", { cause: error });
+      }
+      const text = await response.text();
+      if (response.ok) return text ? (JSON.parse(text) as unknown) : undefined;
+      if (
+        method === "GET" &&
+        attempt < attempts - 1 &&
+        (response.status === 429 || response.status >= 500)
+      ) {
+        continue;
+      }
+      throw new Error(`Cloudflare Containers API ${response.status}: ${text}`);
+    }
+    throw new Error("Cloudflare Containers API request exhausted retries");
   };
   return {
     accounts: cf.accounts,

@@ -45,7 +45,6 @@ interface StackContainer {
   readonly runnerAbi: string;
   readonly instanceType: string;
   readonly schedulingPolicy: string;
-  readonly instances: number;
   readonly maxInstances: number;
   readonly tiers: readonly string[];
   readonly rolloutActiveGracePeriod: number;
@@ -87,7 +86,7 @@ export interface StackReceipt {
   readonly workflow: StackManifest["workflow"] & { readonly id: string };
   readonly container: StackContainer & {
     readonly id: string;
-    readonly rolloutId: string;
+    readonly rolloutId?: string;
     readonly namespaceId: string;
   };
   readonly namespaces: readonly {
@@ -341,7 +340,6 @@ const assertContainer = (container: StackContainer): void => {
       "runnerAbi",
       "instanceType",
       "schedulingPolicy",
-      "instances",
       "maxInstances",
       "tiers",
       "rolloutActiveGracePeriod",
@@ -363,7 +361,6 @@ const assertContainer = (container: StackContainer): void => {
   required(container.runnerAbi, "runner ABI", 128);
   required(container.instanceType, "container instance type", 128);
   required(container.schedulingPolicy, "container scheduling policy", 128);
-  assertInteger(container.instances, "container instances");
   assertInteger(container.maxInstances, "container max instances");
   assertStrings(container.tiers, "container tiers", 128);
   assertInteger(container.rolloutActiveGracePeriod, "container rollout active grace period");
@@ -520,7 +517,6 @@ const manifestOf = (receipt: StackReceipt): StackManifest => ({
     runnerAbi: receipt.container.runnerAbi,
     instanceType: receipt.container.instanceType,
     schedulingPolicy: receipt.container.schedulingPolicy,
-    instances: receipt.container.instances,
     maxInstances: receipt.container.maxInstances,
     tiers: receipt.container.tiers,
     rolloutActiveGracePeriod: receipt.container.rolloutActiveGracePeriod,
@@ -572,7 +568,7 @@ const assertReceipt = (receipt: StackReceipt): void => {
   required(receipt.worker.providerEtag, "Worker module etag", 512);
   assertKeys(receipt.workflow, ["name", "className", "id"], "receipt workflow");
   required(receipt.workflow.id, "Dynamic Workflow id", 512);
-  assertKeys(
+  assertOptionalKeys(
     receipt.container,
     [
       "name",
@@ -582,18 +578,19 @@ const assertReceipt = (receipt: StackReceipt): void => {
       "runnerAbi",
       "instanceType",
       "schedulingPolicy",
-      "instances",
       "maxInstances",
       "tiers",
       "rolloutActiveGracePeriod",
       "id",
-      "rolloutId",
       "namespaceId",
     ],
+    ["rolloutId"],
     "receipt container",
   );
   required(receipt.container.id, "container application id", 512);
-  required(receipt.container.rolloutId, "container rollout id", 512);
+  if (receipt.container.rolloutId !== undefined) {
+    required(receipt.container.rolloutId, "container rollout id", 512);
+  }
   required(receipt.container.namespaceId, "container namespace id", 512);
   if (!Array.isArray(receipt.namespaces)) throw new Error("invalid Stack receipt namespaces");
   for (const namespace of receipt.namespaces) {

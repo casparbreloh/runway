@@ -25,6 +25,10 @@ const ARCHIVE = "/tmp/runway-cache-transfer/archive.sqsh";
 const INPUT = "/tmp/runway-cache-transfer/input";
 const PAYLOAD = "Runway direct cache transfer evidence\n";
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+const sha256 = async (value: string): Promise<string> =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 
 const archiveEvidence = (stdout: string): { readonly bytes: number; readonly digest: string } => {
   const [bytesText, digest] = stdout.trim().split(/\s+/);
@@ -146,6 +150,7 @@ const execute = async (env: Env): Promise<Record<string, unknown>> => {
   const transferLogs: unknown[] = [];
   const runId = `cache-transfer-${crypto.randomUUID()}`;
   const totalStartedAt = Date.now();
+  const payloadDigest = await sha256(PAYLOAD);
   let sdkBackupId: string | undefined;
 
   try {
@@ -192,10 +197,11 @@ const execute = async (env: Env): Promise<Record<string, unknown>> => {
     const getStartedAt = Date.now();
     const downloaded = await transfer.get({ ...request, expected: stored });
     const getMs = Date.now() - getStartedAt;
-    const restored = await sandbox.exec(`unsquashfs -cat ${shellQuote(ARCHIVE)} payload.txt`, {
-      timeout: 30_000,
-    });
-    if (!restored.success || restored.stdout !== PAYLOAD) {
+    const restored = await sandbox.exec(
+      `unsquashfs -cat ${shellQuote(ARCHIVE)} payload.txt | sha256sum | cut -d ' ' -f 1`,
+      { timeout: 30_000 },
+    );
+    if (!restored.success || restored.stdout.trim() !== payloadDigest) {
       throw new Error("downloaded SquashFS did not restore its exact payload");
     }
 
@@ -213,10 +219,11 @@ const execute = async (env: Env): Promise<Record<string, unknown>> => {
     const sdkGetStartedAt = Date.now();
     await sandbox.restoreBackup(backup);
     const sdkGetMs = Date.now() - sdkGetStartedAt;
-    const sdkRestored = await sandbox.exec(`cat ${shellQuote(`${sdkInput}/payload.txt`)}`, {
-      timeout: 30_000,
-    });
-    if (!sdkRestored.success || sdkRestored.stdout !== PAYLOAD) {
+    const sdkRestored = await sandbox.exec(
+      `sha256sum ${shellQuote(`${sdkInput}/payload.txt`)} | cut -d ' ' -f 1`,
+      { timeout: 30_000 },
+    );
+    if (!sdkRestored.success || sdkRestored.stdout.trim() !== payloadDigest) {
       throw new Error("SDK backup comparison did not restore its payload");
     }
 
@@ -274,10 +281,15 @@ export default {
     try {
       return Response.json(await execute(env));
     } catch (error) {
+      const message = error instanceof Error ? error.message : "live cache tracer failed";
+      const unsafe =
+        message.includes(env.R2_ACCESS_KEY_ID) ||
+        message.includes(env.R2_SECRET_ACCESS_KEY) ||
+        /https?:\/\/|X-Amz-|cloudflarestorage\.com/.test(message);
       return Response.json(
         {
           outcome: "failed",
-          error: error instanceof CacheTransferError ? error.message : "live cache tracer failed",
+          error: unsafe ? "live cache tracer failed" : message.slice(0, 1_024),
         },
         { status: 500 },
       );

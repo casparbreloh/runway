@@ -57,11 +57,12 @@ interface ProviderOverrides {
   readonly customDomains?: readonly string[];
   readonly deleteLifecycle?: boolean;
   readonly containerTiers?: readonly number[];
-  readonly rolloutStatus?: string;
+  readonly rolloutStatus?: string | null;
   readonly sandboxNamespaceName?: string;
   readonly providerEtag?: string;
   readonly workflowClass?: string;
   readonly containerImage?: string;
+  readonly expandedInstanceType?: boolean;
   readonly containerSchedulingPolicy?: string;
   readonly containerInstances?: number;
   readonly containerGracePeriod?: number;
@@ -183,7 +184,7 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
                   id: "container-id",
                   name: "runway-Sandbox",
                   scheduling_policy: overrides.containerSchedulingPolicy ?? "default",
-                  instances: overrides.containerInstances ?? manifest.container.instances,
+                  instances: overrides.containerInstances ?? 0,
                   max_instances: manifest.container.maxInstances,
                   constraints: {
                     tiers: overrides.containerTiers ?? manifest.container.tiers.map(Number),
@@ -194,7 +195,9 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
                   },
                   configuration: {
                     image: overrides.containerImage ?? manifest.container.image,
-                    instance_type: manifest.container.instanceType,
+                    ...(overrides.expandedInstanceType
+                      ? { vcpu: 4, memory_mib: 12_288, disk: { size_mb: 20_000 } }
+                      : { instance_type: manifest.container.instanceType }),
                   },
                 },
               ],
@@ -203,12 +206,15 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
         },
       },
       rollouts: {
-        list: async () => [
-          {
-            id: overrides.rolloutId ?? "rollout-id",
-            status: overrides.rolloutStatus ?? "completed",
-          },
-        ],
+        list: async () =>
+          overrides.rolloutStatus === null
+            ? []
+            : [
+                {
+                  id: overrides.rolloutId ?? "rollout-id",
+                  status: overrides.rolloutStatus ?? "completed",
+                },
+              ],
       },
     },
     r2: {
@@ -353,12 +359,23 @@ test("inventory rejects container configuration and active-rollout drift", async
   );
   for (const drift of [
     { containerSchedulingPolicy: "replacement" },
-    { containerInstances: 1 },
     { containerGracePeriod: 1 },
     { containerNamespaceId: "replacement-namespace" },
   ]) {
     await expect(control(api(drift)).inventory(manifest)).rejects.toThrow("container");
   }
+});
+
+test("inventory records exact absence of an initial automatic container rollout", async () => {
+  await expect(control(api({ rolloutStatus: null })).inventory(manifest)).resolves.toMatchObject({
+    container: { id: "container-id" },
+  });
+});
+
+test("inventory normalizes Cloudflare's expanded standard-4 resources", async () => {
+  await expect(
+    control(api({ expandedInstanceType: true, containerInstances: 7 })).inventory(manifest),
+  ).resolves.toMatchObject({ container: { instanceType: "standard-4" } });
 });
 
 test("inventory rejects Durable Object namespace identity drift", async () => {
@@ -431,7 +448,6 @@ test("container deletion verifies every managed application field from its recei
   const resource = { type: "container" as const, ...receipt.container };
   for (const drift of [
     { containerSchedulingPolicy: "replacement" },
-    { containerInstances: 1 },
     { containerGracePeriod: 1 },
     { containerNamespaceId: "replacement-namespace" },
   ]) {
@@ -559,9 +575,12 @@ interface ApplyCalls {
 }
 
 interface ApplyOverrides {
+  readonly worker?: "absent" | "present";
   readonly bucket?: "present" | "missing" | "forbidden";
   readonly workflowOwner?: string;
   readonly application?: "absent" | "exact" | "stale";
+  readonly expandedInstanceType?: boolean;
+  readonly providerInstances?: number;
   readonly rolloutStatus?: string;
   readonly rolloutError?: Error;
   readonly artifact?: "absent" | "exact" | "conflict" | "ambiguous" | "failed";
@@ -583,7 +602,7 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
     id: "container-id",
     name: "runway-Sandbox",
     scheduling_policy: "default",
-    instances: manifest.container.instances,
+    instances: overrides.providerInstances ?? 0,
     max_instances: manifest.container.maxInstances,
     constraints: { tiers: manifest.container.tiers.map(Number) },
     rollout_active_grace_period: 0,
@@ -593,7 +612,9 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
         overrides.application === "stale"
           ? "docker.io/replacement@sha256:bad"
           : manifest.container.image,
-      instance_type: manifest.container.instanceType,
+      ...(overrides.expandedInstanceType
+        ? { vcpu: 4, memory_mib: 12_288, disk: { size_mb: 20_000 } }
+        : { instance_type: manifest.container.instanceType }),
     },
   };
   return {
@@ -612,6 +633,7 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
         },
       },
       scripts: {
+        list: async () => (overrides.worker === "present" ? [{ id: "runway" }] : []),
         update: async (_name: string, params: { metadata: unknown }) => {
           calls.operations.push("worker-upload");
           calls.metadata = params.metadata as unknown as Record<string, unknown>;
@@ -768,13 +790,10 @@ test("apply creates missing storage, publishes content before host, and uploads 
       "workers/message": manifest.generation,
     },
     keep_bindings: ["secret_text"],
-    exports: {
-      Sandbox: { type: "durable-object", state: "created", storage: "sqlite" },
-      RunwayGitHubCoordinator: {
-        type: "durable-object",
-        state: "created",
-        storage: "sqlite",
-      },
+    containers: [{ class_name: "Sandbox" }],
+    migrations: {
+      new_tag: "runway-v1",
+      new_sqlite_classes: ["RunwayGitHubCoordinator", "Sandbox"],
     },
     bindings: expect.arrayContaining([
       { type: "worker_loader", name: "LOADER" },
@@ -790,6 +809,8 @@ test("apply creates missing storage, publishes content before host, and uploads 
       },
     ]),
   });
+  expect(calls.metadata?.containers).toEqual([{ class_name: "Sandbox" }]);
+  expect(calls.metadata?.exports).toBeUndefined();
   expect(calls.containerCreates).toHaveLength(1);
   expect(calls.workflowUpdates).toHaveLength(1);
   expect(ready).toBe(1);
@@ -797,11 +818,24 @@ test("apply creates missing storage, publishes content before host, and uploads 
 
 test("apply reuses storage and exact containers, and explains storage permission failures", async () => {
   const reused = applyCalls();
-  await control(applyApi(reused, { application: "exact" })).apply(manifest);
+  await control(applyApi(reused, { worker: "present", application: "exact" })).apply(manifest);
   expect(reused.bucketCreates).toEqual([]);
   expect(reused.containerCreates).toEqual([]);
   expect(reused.containerModifies).toEqual([]);
   expect(reused.rolloutCreates).toEqual([]);
+  expect(reused.metadata?.migrations).toBeUndefined();
+
+  const expanded = applyCalls();
+  await control(
+    applyApi(expanded, {
+      worker: "present",
+      application: "exact",
+      expandedInstanceType: true,
+      providerInstances: 7,
+    }),
+  ).apply(manifest);
+  expect(expanded.containerModifies).toEqual([]);
+  expect(expanded.rolloutCreates).toEqual([]);
 
   const forbidden = applyCalls();
   await expect(

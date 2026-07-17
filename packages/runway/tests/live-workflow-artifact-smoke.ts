@@ -367,7 +367,7 @@ const run = async (): Promise<void> => {
   const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-artifact-smoke-${suffix}`;
   const containerName = `${scriptName}-Sandbox`;
   const token = await tokenOf();
-  const cf = new Cloudflare({ apiToken: token });
+  const cf = new Cloudflare({ apiToken: token, timeout: 15_000 });
   const accountId = await oneAccountId(cf);
   const bucketName = artifactBucketName(accountId);
   const collisions = [
@@ -591,15 +591,17 @@ const run = async (): Promise<void> => {
         throw new Error("A raw secret appeared in managed command step output");
       }
       const exec = JSON.parse(execOutput) as {
-        stdout?: unknown;
-        stderr?: unknown;
-        exitCode?: unknown;
+        result?: {
+          stdout?: unknown;
+          stderr?: unknown;
+          exitCode?: unknown;
+        };
       };
       if (
-        typeof exec.stdout !== "string" ||
-        exec.stdout.trimEnd() !== "***" ||
-        exec.stderr !== "" ||
-        exec.exitCode !== 0
+        typeof exec.result?.stdout !== "string" ||
+        exec.result.stdout.trimEnd() !== "***" ||
+        exec.result.stderr !== "" ||
+        exec.result.exitCode !== 0
       ) {
         throw new Error(`Unexpected redacted command output: ${JSON.stringify(exec)}`);
       }

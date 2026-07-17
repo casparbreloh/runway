@@ -380,6 +380,12 @@ test("a fresh placement witness cannot authorize reconstruction after command ev
 });
 
 test("placement and command digest mismatches are lost without another start", async () => {
+  class MissingFileThrowsPlacement extends MemoryPlacement {
+    override readFile(path: string): Promise<{ success: boolean; content: string }> {
+      if (!this.files.has(path)) return Promise.reject(new Error(`FileNotFoundError: ${path}`));
+      return super.readFile(path);
+    }
+  }
   let placement = new MemoryPlacement([{}]);
   const sandbox = cloudflareSandbox({
     placement: () => placement,
@@ -398,7 +404,7 @@ test("placement and command digest mismatches are lost without another start", a
   ).rejects.toBeInstanceOf(RunLostError);
   expect(placement.starts).toHaveLength(1);
 
-  placement = new MemoryPlacement([], true, "fresh-placement-witness");
+  placement = new MissingFileThrowsPlacement([], false, "fresh-placement-witness");
   await expect(
     sandbox.execute({ ...request, step: { id: "next", count: 1, attempt: 1 } }),
   ).rejects.toBeInstanceOf(RunLostError);
