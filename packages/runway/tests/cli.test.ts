@@ -16,6 +16,7 @@ const run = async (
   const child = spawn(process.execPath, [bin, ...args], {
     cwd,
     env: {
+      LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
       PATH: process.env.PATH,
       NODE_OPTIONS: process.env.NODE_OPTIONS,
       RUNWAY_DISABLE_WRANGLER_AUTH: "1",
@@ -69,7 +70,7 @@ export default workflow({
 test("deploy reports missing required env vars before upload", async () => {
   const missingAll = await run(["deploy"]);
 
-  expect(missingAll.code).toBe(1);
+  expect(missingAll.code, missingAll.output).toBe(1);
   expect(missingAll.output).toMatch(/runway: deploy failed/);
   expect(missingAll.output).toMatch(
     /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
