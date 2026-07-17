@@ -5,12 +5,35 @@ import type { LegacyStackControl, LegacyStackReceipt } from "../legacy-stack.ts"
 import { SECRET_SNAPSHOT_KEY_BINDING } from "../worker-contract.ts";
 
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
+const indexMediaTypes = new Set([
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+]);
+const manifestMediaTypes = new Set([
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json",
+]);
+const configMediaTypes = new Set([
+  "application/vnd.oci.image.config.v1+json",
+  "application/vnd.docker.container.image.v1+json",
+]);
 
 const requiredDigest = (value: unknown, field: string): string => {
   if (typeof value !== "string" || !digestPattern.test(value)) {
     throw new Error(`invalid Docker Registry ${field}`);
   }
   return value;
+};
+
+const registryMediaType = (response: Response, body: Record<string, unknown>): string => {
+  const header = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
+  if (!header || (!indexMediaTypes.has(header) && !manifestMediaTypes.has(header))) {
+    throw new Error("invalid Docker Registry manifest media type");
+  }
+  if (body.mediaType !== undefined && body.mediaType !== header) {
+    throw new Error("Docker Registry manifest media type changed");
+  }
+  return header;
 };
 
 const required = (value: unknown, field: string): string => {
@@ -107,43 +130,76 @@ export const resolveDockerImageDigest = async (
     throw new Error("invalid Docker Registry token");
   }
   const headers = {
-    accept: [
-      "application/vnd.oci.image.index.v1+json",
-      "application/vnd.docker.distribution.manifest.list.v2+json",
-      "application/vnd.oci.image.manifest.v1+json",
-      "application/vnd.docker.distribution.manifest.v2+json",
-    ].join(", "),
+    accept: [...indexMediaTypes, ...manifestMediaTypes].join(", "),
     authorization: `Bearer ${tokenValue.token}`,
   };
-  const indexResponse = await fetcher(
+  const taggedResponse = await fetcher(
     `https://registry-1.docker.io/v2/${repository}/manifests/${tag}`,
     { headers },
   );
-  if (!indexResponse.ok) throw new Error(`Docker Registry manifest ${indexResponse.status}`);
-  const index = (await indexResponse.json()) as {
-    manifests?: readonly {
-      digest?: unknown;
-      platform?: { os?: unknown; architecture?: unknown };
-    }[];
+  if (!taggedResponse.ok) throw new Error(`Docker Registry manifest ${taggedResponse.status}`);
+  const tagged = record(await taggedResponse.json(), "Docker Registry manifest");
+  const taggedMediaType = registryMediaType(taggedResponse, tagged);
+
+  const verifyManifest = async (
+    response: Response,
+    manifest: Record<string, unknown>,
+    expectedDigest?: string,
+  ): Promise<string> => {
+    const mediaType = registryMediaType(response, manifest);
+    if (!manifestMediaTypes.has(mediaType)) {
+      throw new Error("invalid Docker Registry image manifest media type");
+    }
+    const observedDigest = requiredDigest(
+      response.headers.get("docker-content-digest"),
+      "content digest",
+    );
+    if (expectedDigest !== undefined && observedDigest !== expectedDigest) {
+      throw new Error("Docker Registry platform digest changed");
+    }
+    const config = record(manifest.config, "Docker Registry config descriptor");
+    if (typeof config.mediaType !== "string" || !configMediaTypes.has(config.mediaType)) {
+      throw new Error("invalid Docker Registry config media type");
+    }
+    const configDigest = requiredDigest(config.digest, "config digest");
+    const configResponse = await fetcher(
+      `https://registry-1.docker.io/v2/${repository}/blobs/${configDigest}`,
+      { headers: { authorization: headers.authorization } },
+    );
+    if (!configResponse.ok) throw new Error(`Docker Registry config ${configResponse.status}`);
+    const configBody = record(await configResponse.json(), "Docker Registry config");
+    if (configBody.os !== platform.os || configBody.architecture !== platform.architecture) {
+      throw new Error("Docker Registry config platform changed");
+    }
+    return observedDigest;
   };
-  const matches = (index.manifests ?? []).filter(
-    ({ platform: candidate }) =>
-      candidate?.os === platform.os && candidate.architecture === platform.architecture,
-  );
+
+  if (manifestMediaTypes.has(taggedMediaType)) {
+    return await verifyManifest(taggedResponse, tagged);
+  }
+  if (!indexMediaTypes.has(taggedMediaType)) {
+    throw new Error("invalid Docker Registry index media type");
+  }
+  const matches = array(tagged.manifests, "Docker Registry index manifests")
+    .map((item) => record(item, "Docker Registry index manifest"))
+    .filter(({ platform: value }) => {
+      const candidate = record(value, "Docker Registry index platform");
+      return candidate.os === platform.os && candidate.architecture === platform.architecture;
+    });
   if (matches.length !== 1) throw new Error("Docker Registry platform manifest is not unique");
-  const digest = requiredDigest(matches[0]?.digest, "platform digest");
+  const descriptor = matches[0]!;
+  if (typeof descriptor.mediaType !== "string" || !manifestMediaTypes.has(descriptor.mediaType)) {
+    throw new Error("invalid Docker Registry platform manifest media type");
+  }
+  const digest = requiredDigest(descriptor.digest, "platform digest");
   const manifestResponse = await fetcher(
     `https://registry-1.docker.io/v2/${repository}/manifests/${digest}`,
     { headers },
   );
   if (!manifestResponse.ok)
     throw new Error(`Docker Registry platform manifest ${manifestResponse.status}`);
-  const observed = requiredDigest(
-    manifestResponse.headers.get("docker-content-digest"),
-    "content digest",
-  );
-  if (observed !== digest) throw new Error("Docker Registry platform digest changed");
-  return digest;
+  const manifest = record(await manifestResponse.json(), "Docker Registry platform manifest");
+  return await verifyManifest(manifestResponse, manifest, digest);
 };
 
 export interface CloudflareLegacyStackOptions {

@@ -324,8 +324,54 @@ const fakeCloudflare = () => {
   return { cf, state, uploads: () => uploads };
 };
 
+const singleManifestFetcher = (
+  opts: {
+    readonly contentDigest?: string | null;
+    readonly contentType?: string;
+    readonly bodyMediaType?: string;
+    readonly configMediaType?: string;
+    readonly os?: string;
+    readonly architecture?: string;
+  } = {},
+): typeof fetch => {
+  const manifestDigest = `sha256:${"2".repeat(64)}`;
+  const configDigest = `sha256:${"3".repeat(64)}`;
+  return async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.startsWith("https://auth.docker.io/token?")) {
+      return Response.json({ token: "registry-token" });
+    }
+    if (url.endsWith(`/blobs/${configDigest}`)) {
+      return Response.json({
+        os: opts.os ?? "linux",
+        architecture: opts.architecture ?? "amd64",
+      });
+    }
+    const contentDigest = opts.contentDigest === undefined ? manifestDigest : opts.contentDigest;
+    return Response.json(
+      {
+        mediaType: opts.bodyMediaType ?? "application/vnd.docker.distribution.manifest.v2+json",
+        config: {
+          mediaType: opts.configMediaType ?? "application/vnd.docker.container.image.v1+json",
+          digest: configDigest,
+        },
+      },
+      {
+        headers: {
+          "content-type":
+            opts.contentType ?? "application/vnd.docker.distribution.manifest.v2+json",
+          ...(contentDigest === null ? {} : { "docker-content-digest": contentDigest }),
+        },
+      },
+    );
+  };
+};
+
 test("resolves the tagged image through the independent linux/amd64 registry manifest", async () => {
   const requests: string[] = [];
+  const indexDigest = `sha256:${"4".repeat(64)}`;
+  const manifestDigest = `sha256:${"2".repeat(64)}`;
+  const configDigest = `sha256:${"3".repeat(64)}`;
   const fetcher: typeof fetch = async (input) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     requests.push(url);
@@ -333,22 +379,48 @@ test("resolves the tagged image through the independent linux/amd64 registry man
       return Response.json({ token: "registry-token" });
     }
     if (url.endsWith("/manifests/0.12.3")) {
-      return Response.json({
-        manifests: [
-          {
-            digest: `sha256:${"1".repeat(64)}`,
-            platform: { os: "linux", architecture: "arm64" },
+      return Response.json(
+        {
+          mediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
+          manifests: [
+            {
+              mediaType: "application/vnd.docker.distribution.manifest.v2+json",
+              digest: `sha256:${"1".repeat(64)}`,
+              platform: { os: "linux", architecture: "arm64" },
+            },
+            {
+              mediaType: "application/vnd.docker.distribution.manifest.v2+json",
+              digest: manifestDigest,
+              platform: { os: "linux", architecture: "amd64" },
+            },
+          ],
+        },
+        {
+          headers: {
+            "content-type": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "docker-content-digest": indexDigest,
           },
-          {
-            digest: `sha256:${"2".repeat(64)}`,
-            platform: { os: "linux", architecture: "amd64" },
-          },
-        ],
-      });
+        },
+      );
     }
-    return new Response("", {
-      headers: { "docker-content-digest": `sha256:${"2".repeat(64)}` },
-    });
+    if (url.endsWith(`/blobs/${configDigest}`)) {
+      return Response.json({ os: "linux", architecture: "amd64" });
+    }
+    return Response.json(
+      {
+        mediaType: "application/vnd.docker.distribution.manifest.v2+json",
+        config: {
+          mediaType: "application/vnd.docker.container.image.v1+json",
+          digest: configDigest,
+        },
+      },
+      {
+        headers: {
+          "content-type": "application/vnd.docker.distribution.manifest.v2+json",
+          "docker-content-digest": manifestDigest,
+        },
+      },
+    );
   };
 
   await expect(
@@ -357,8 +429,42 @@ test("resolves the tagged image through the independent linux/amd64 registry man
       { os: "linux", architecture: "amd64" },
       fetcher,
     ),
-  ).resolves.toBe(`sha256:${"2".repeat(64)}`);
-  expect(requests).toHaveLength(3);
+  ).resolves.toBe(manifestDigest);
+  expect(requests).toHaveLength(4);
+});
+
+test("resolves a single tagged manifest only after verifying its config platform", async () => {
+  const manifestDigest = `sha256:${"2".repeat(64)}`;
+
+  await expect(
+    resolveDockerImageDigest(
+      "docker.io/cloudflare/sandbox:0.12.3",
+      { os: "linux", architecture: "amd64" },
+      singleManifestFetcher(),
+    ),
+  ).resolves.toBe(manifestDigest);
+});
+
+test("rejects single-manifest media type, digest header, and config platform drift", async () => {
+  const resolve = async (fetcher: typeof fetch): Promise<string> =>
+    await resolveDockerImageDigest(
+      "docker.io/cloudflare/sandbox:0.12.3",
+      { os: "linux", architecture: "amd64" },
+      fetcher,
+    );
+
+  await expect(
+    resolve(singleManifestFetcher({ bodyMediaType: "application/vnd.oci.image.manifest.v1+json" })),
+  ).rejects.toThrow("media type changed");
+  await expect(resolve(singleManifestFetcher({ contentDigest: null }))).rejects.toThrow(
+    "content digest",
+  );
+  await expect(resolve(singleManifestFetcher({ architecture: "arm64" }))).rejects.toThrow(
+    "config platform changed",
+  );
+  await expect(
+    resolve(singleManifestFetcher({ configMediaType: "application/octet-stream" })),
+  ).rejects.toThrow("config media type");
 });
 
 test("inventories every exact legacy surface and keeps state append-only", async () => {
