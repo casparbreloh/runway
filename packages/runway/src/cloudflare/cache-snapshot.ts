@@ -89,7 +89,28 @@ const openRelative = (rootDescriptor, root, path, flags) => {
     throw error;
   }
 };
-const pathAt = (descriptor, root, path) => join(rootPath(descriptor, root), path);
+const parentRelative = (rootDescriptor, root, path) => {
+  const components = parts(path);
+  const name = components.at(-1);
+  if (components.length === 1) {
+    return { descriptor: duplicateDirectory(rootDescriptor, root), name, path: root };
+  }
+  const parent = Buffer.concat(
+    components.slice(0, -1).flatMap((component, index) =>
+      index === 0 ? [component] : [slash, component],
+    ),
+  );
+  return {
+    descriptor: openRelative(
+      rootDescriptor,
+      root,
+      parent,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+    ),
+    name,
+    path: join(root, parent),
+  };
+};
 const scanTree = (rootValue, maxBytes, includeRecords = false) => {
   const root = Buffer.from(rootValue);
   const rootDescriptor = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
@@ -112,7 +133,7 @@ const scanTree = (rootValue, maxBytes, includeRecords = false) => {
           const path = prefix.length === 0 ? name : join(prefix, name);
           const childDepth = depth + 1;
           if (childDepth > MAX_DEPTH || path.length > MAX_PATH) fail("tree depth");
-          const absolute = pathAt(rootDescriptor, root, path);
+          const absolute = join(rootPath(directory, directoryPath), name);
           const info = fs.lstatSync(absolute, { bigint: true });
           let kind;
           let target = null;
@@ -260,13 +281,30 @@ const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
   const first = new Map();
   let actual = 0;
   try {
-    for (const record of records) if (same(record.kind, Buffer.from("d"))) fs.mkdirSync(pathAt(destinationDescriptor, destinationRoot, record.path), { mode: 0o755 });
+    for (const record of records) {
+      if (!same(record.kind, Buffer.from("d"))) continue;
+      const parent = parentRelative(destinationDescriptor, destinationRoot, record.path);
+      try {
+        fs.mkdirSync(join(rootPath(parent.descriptor, parent.path), parent.name), { mode: 0o755 });
+      } finally {
+        fs.closeSync(parent.descriptor);
+      }
+    }
     for (const record of records) {
       if (!same(record.kind, Buffer.from("f"))) continue;
       const identity = record.device + ":" + record.inode;
-      const destination = pathAt(destinationDescriptor, destinationRoot, record.path);
-      if (first.has(identity)) fs.linkSync(pathAt(destinationDescriptor, destinationRoot, first.get(identity)), destination);
-      else {
+      const destinationParent = parentRelative(destinationDescriptor, destinationRoot, record.path);
+      const destination = join(rootPath(destinationParent.descriptor, destinationParent.path), destinationParent.name);
+      try {
+        if (first.has(identity)) {
+          const sourceParent = parentRelative(destinationDescriptor, destinationRoot, first.get(identity));
+          try {
+            fs.linkSync(join(rootPath(sourceParent.descriptor, sourceParent.path), sourceParent.name), destination);
+          } finally {
+            fs.closeSync(sourceParent.descriptor);
+          }
+          continue;
+        }
         const source = openRelative(sourceDescriptor, sourceRoot, record.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
         const target = fs.openSync(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, (record.mode & 73n) !== 0n ? 0o755 : 0o644);
         const buffer = Buffer.allocUnsafe(1_048_576);
@@ -281,9 +319,19 @@ const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
           }
         } finally { fs.closeSync(source); fs.closeSync(target); }
         first.set(identity, record.path);
+      } finally {
+        fs.closeSync(destinationParent.descriptor);
       }
     }
-    for (const record of records) if (same(record.kind, Buffer.from("l"))) fs.symlinkSync(record.target, pathAt(destinationDescriptor, destinationRoot, record.path));
+    for (const record of records) {
+      if (!same(record.kind, Buffer.from("l"))) continue;
+      const parent = parentRelative(destinationDescriptor, destinationRoot, record.path);
+      try {
+        fs.symlinkSync(record.target, join(rootPath(parent.descriptor, parent.path), parent.name));
+      } finally {
+        fs.closeSync(parent.descriptor);
+      }
+    }
   } catch (error) {
     fs.closeSync(destinationDescriptor);
     fs.rmSync(staging, { force: true, recursive: true });
