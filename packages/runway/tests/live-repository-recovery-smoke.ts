@@ -9,8 +9,8 @@ import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
 import type { Registry } from "runway";
 
+import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
-import { artifactBucketName } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";

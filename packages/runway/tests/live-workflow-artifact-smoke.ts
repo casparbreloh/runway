@@ -9,8 +9,8 @@ import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
 import type { Registry } from "runway";
 
+import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
-import { artifactBucketName, ensureArtifactBucket } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
@@ -139,6 +139,16 @@ const bucketExists = async (
     if (isStatus(error, 404)) return false;
     throw error;
   }
+};
+
+const ensureArtifactBucket = async (
+  cf: Cloudflare,
+  accountId: string,
+  bucketName: string,
+): Promise<boolean> => {
+  if (await bucketExists(cf, accountId, bucketName)) return false;
+  await cf.r2.buckets.create({ account_id: accountId, name: bucketName });
+  return true;
 };
 
 const objectKeys = async (

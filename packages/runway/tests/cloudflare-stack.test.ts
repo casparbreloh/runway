@@ -1,0 +1,806 @@
+import { expect, test } from "vitest";
+
+import type { CloudflareApi } from "../src/cloudflare-api.ts";
+import { CloudflareStackControl, cloudflareStackManifest } from "../src/cloudflare/stack.ts";
+import type { PreparedDeployment } from "../src/deploy-build.ts";
+import type { StackResource } from "../src/stack.ts";
+
+const artifactVersion = "c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c";
+
+const deployment: PreparedDeployment = {
+  host: new TextEncoder().encode("export default {}"),
+  artifacts: [
+    {
+      workflowId: "check",
+      artifactVersion,
+      contents: new TextEncoder().encode("artifact"),
+    },
+  ],
+  deploymentId: "build-deployment",
+  secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
+};
+
+const manifest = cloudflareStackManifest({
+  accountId: "account",
+  repositoryId: "github:42",
+  name: "runway",
+  deployment,
+  schedules: ["0 9 * * *"],
+  secretNames: ["RUNWAY_SECRET_SNAPSHOT_KEY"],
+  snapshotKeyBindings: [],
+  artifactBucket: "runway-account",
+  stateBucket: "runway-state-account",
+});
+
+const providerBindings = manifest.bindings.map((binding) => ({
+  name: binding.name,
+  type: binding.type,
+  ...(binding.type === "r2_bucket" ? { bucket_name: binding.target } : {}),
+  ...(binding.type === "workflow" ? { workflow_name: binding.target } : {}),
+  ...(binding.type === "durable_object_namespace"
+    ? {
+        class_name: binding.target,
+        namespace_id: `namespace-${binding.name}`,
+      }
+    : {}),
+}));
+
+interface ProviderOverrides {
+  readonly moduleDigest?: string;
+  readonly workersDev?: boolean;
+  readonly routes?: readonly { readonly id: string; readonly pattern: string }[];
+  readonly publicAccess?: boolean;
+  readonly customDomains?: readonly string[];
+  readonly deleteLifecycle?: boolean;
+  readonly containerTiers?: readonly number[];
+  readonly rolloutStatus?: string;
+  readonly sandboxNamespaceName?: string;
+  readonly providerEtag?: string;
+  readonly workflowClass?: string;
+  readonly containerImage?: string;
+  readonly rolloutId?: string;
+  readonly sandboxNamespaceClass?: string;
+  readonly objectEtag?: string;
+  readonly deletions?: string[];
+  readonly absent?: StackResource["type"];
+  readonly routePattern?: string;
+}
+
+const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
+  ({
+    workers: {
+      routes: {
+        get: async () => {
+          if (overrides.absent === "route") {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          return { id: "route-id", pattern: overrides.routePattern ?? "example.com/*" };
+        },
+        delete: async (id: string) => {
+          overrides.deletions?.push(`route:${id}`);
+        },
+      },
+      scripts: {
+        list: async () =>
+          overrides.absent === "worker" ? [] : [{ id: "runway", routes: overrides.routes ?? [] }],
+        delete: async (name: string) => {
+          overrides.deletions?.push(`worker:${name}`);
+        },
+        scriptAndVersionSettings: {
+          get: async () => ({
+            annotations: {
+              "workers/tag": overrides.moduleDigest ?? manifest.worker.moduleDigest,
+              "workers/message": manifest.generation,
+            },
+          }),
+        },
+        deployments: {
+          list: async () => ({
+            deployments: [
+              {
+                id: "worker-deployment",
+                versions: [{ version_id: "worker-version", percentage: 100 }],
+              },
+            ],
+          }),
+        },
+        versions: {
+          get: async () => ({
+            resources: {
+              bindings: providerBindings,
+              script: { etag: overrides.providerEtag ?? "provider-etag" },
+            },
+          }),
+        },
+        schedules: { get: async () => ({ schedules: [{ cron: "0 9 * * *" }] }) },
+        secrets: { list: async () => [{ name: "RUNWAY_SECRET_SNAPSHOT_KEY" }] },
+        subdomain: {
+          get: async () => ({
+            enabled: overrides.workersDev ?? true,
+            previews_enabled: true,
+          }),
+        },
+      },
+    },
+    workflows: {
+      list: async () =>
+        overrides.absent === "workflow"
+          ? []
+          : [
+              {
+                id: "workflow-id",
+                name: "runway",
+                script_name: "runway",
+                class_name: overrides.workflowClass ?? "DynamicWorkflow",
+              },
+            ],
+      delete: async (name: string) => {
+        overrides.deletions?.push(`workflow:${name}`);
+      },
+    },
+    durableObjects: {
+      namespaces: {
+        list: async () =>
+          overrides.absent === "namespace"
+            ? []
+            : manifest.namespaces.map(({ binding, className, name }) => ({
+                id: `namespace-${binding}`,
+                name: binding === "RunwaySandbox" ? (overrides.sandboxNamespaceName ?? name) : name,
+                class:
+                  binding === "RunwaySandbox"
+                    ? (overrides.sandboxNamespaceClass ?? className)
+                    : className,
+                script: "runway",
+              })),
+      },
+    },
+    containers: {
+      applications: {
+        list: async () =>
+          overrides.absent === "container"
+            ? []
+            : [
+                {
+                  id: "container-id",
+                  name: "runway-Sandbox",
+                  scheduling_policy: "default",
+                  max_instances: manifest.container.maxInstances,
+                  constraints: {
+                    tiers: overrides.containerTiers ?? manifest.container.tiers.map(Number),
+                  },
+                  rollout_active_grace_period: 0,
+                  durable_objects: { namespace_id: "namespace-RunwaySandbox" },
+                  configuration: {
+                    image: overrides.containerImage ?? manifest.container.image,
+                    instance_type: manifest.container.instanceType,
+                  },
+                },
+              ],
+        delete: async (id: string) => {
+          overrides.deletions?.push(`container:${id}`);
+        },
+      },
+      rollouts: {
+        list: async () => [
+          {
+            id: overrides.rolloutId ?? "rollout-id",
+            status: overrides.rolloutStatus ?? "completed",
+          },
+        ],
+      },
+    },
+    r2: {
+      buckets: {
+        get: async (name: string) => {
+          if (overrides.absent === "bucket") {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          return { name };
+        },
+        delete: async (name: string) => {
+          overrides.deletions?.push(`bucket:${name}`);
+        },
+        lifecycle: {
+          get: async () => ({
+            rules: overrides.deleteLifecycle
+              ? [{ id: "delete", enabled: true, deleteObjectsTransition: { condition: "x" } }]
+              : [],
+          }),
+        },
+        domains: {
+          managed: {
+            list: async () => ({
+              enabled: overrides.publicAccess ?? false,
+              domain: "bucket.r2.dev",
+            }),
+          },
+          custom: {
+            list: async () => ({
+              domains: (overrides.customDomains ?? []).map((domain) => ({ domain, enabled: true })),
+            }),
+          },
+        },
+        objects: {
+          list: async (bucket: string) =>
+            bucket === "runway-account" && overrides.absent !== "object"
+              ? [
+                  {
+                    key: `artifacts/${artifactVersion}.json`,
+                    etag: overrides.objectEtag ?? "artifact-etag",
+                  },
+                ]
+              : [],
+          get: async () => new TextEncoder().encode("artifact"),
+          delete: async (bucket: string, key: string) => {
+            overrides.deletions?.push(`object:${bucket}/${key}`);
+          },
+        },
+      },
+    },
+  }) as unknown as CloudflareApi;
+
+const control = (cf: CloudflareApi) =>
+  new CloudflareStackControl({
+    cf,
+    accountId: "account",
+    registry: [],
+    deployment,
+    secretBindings: {},
+    stateBucket: "runway-state-account",
+    ready: async () => {},
+  });
+
+test("inventory rejects a deployed Worker whose provider-observed build identity drifted", async () => {
+  await expect(
+    control(api({ moduleDigest: `sha256:${"f".repeat(64)}` })).inventory(manifest),
+  ).rejects.toThrow("Worker module");
+});
+
+test("inventory rejects provider-observed workers.dev drift", async () => {
+  await expect(control(api({ workersDev: false })).inventory(manifest)).rejects.toThrow(
+    "workers.dev",
+  );
+});
+
+test("inventory rejects an unowned provider route instead of reporting no routes", async () => {
+  await expect(
+    control(api({ routes: [{ id: "route-id", pattern: "example.com/*" }] })).inventory(manifest),
+  ).rejects.toThrow("route");
+});
+
+test("inventory rejects provider-observed bucket exposure drift", async () => {
+  await expect(control(api({ publicAccess: true })).inventory(manifest)).rejects.toThrow(
+    "public access",
+  );
+});
+
+test("inventory rejects provider-observed bucket lifecycle and custom-domain drift", async () => {
+  await expect(control(api({ deleteLifecycle: true })).inventory(manifest)).rejects.toThrow(
+    "lifecycle",
+  );
+  await expect(
+    control(api({ customDomains: ["cache.example.com"] })).inventory(manifest),
+  ).rejects.toThrow("custom domains");
+});
+
+test("inventory returns exact provider evidence after every desired field is verified", async () => {
+  await expect(control(api()).inventory(manifest)).resolves.toMatchObject({
+    worker: {
+      moduleDigest: manifest.worker.moduleDigest,
+      providerEtag: "provider-etag",
+      versionId: "worker-version",
+      deploymentId: "worker-deployment",
+    },
+    workflow: {
+      id: "workflow-id",
+      name: "runway",
+      className: "DynamicWorkflow",
+    },
+    container: {
+      id: "container-id",
+      rolloutId: "rollout-id",
+      image: manifest.container.image,
+    },
+    workersDev: true,
+    routes: [],
+    buckets: [
+      expect.objectContaining({
+        name: "runway-account",
+        lifecycle: "retain",
+        publicAccess: false,
+        customDomains: [],
+      }),
+      expect.objectContaining({
+        name: "runway-state-account",
+        lifecycle: "stack-state",
+        publicAccess: false,
+        customDomains: [],
+      }),
+    ],
+  });
+});
+
+test("inventory rejects container configuration and active-rollout drift", async () => {
+  await expect(control(api({ containerTiers: [2] })).inventory(manifest)).rejects.toThrow(
+    "container",
+  );
+  await expect(control(api({ rolloutStatus: "reverted" })).inventory(manifest)).rejects.toThrow(
+    "rollout",
+  );
+});
+
+test("inventory rejects Durable Object namespace identity drift", async () => {
+  await expect(
+    control(api({ sandboxNamespaceName: "another_Sandbox" })).inventory(manifest),
+  ).rejects.toThrow("namespace");
+});
+
+test("Worker deletion evidence distinguishes exact identity from drift", async () => {
+  const receipt = await control(api()).inventory(manifest);
+  const resource = { type: "worker" as const, ...receipt.worker };
+
+  await expect(control(api()).hasResource(resource)).resolves.toBe(true);
+  await expect(
+    control(api({ providerEtag: "replacement-etag" })).hasResource(resource),
+  ).rejects.toThrow("Worker deletion evidence changed");
+});
+
+test("every non-Worker deletion check throws on replacement drift", async () => {
+  const receipt = await control(api()).inventory(manifest);
+  const bucket = receipt.buckets[0]!;
+  const cases: readonly [StackResource, ProviderOverrides, string][] = [
+    [
+      { type: "workflow", ...receipt.workflow, scriptName: receipt.worker.name },
+      { workflowClass: "ReplacementWorkflow" },
+      "Workflow",
+    ],
+    [
+      { type: "container", ...receipt.container },
+      { rolloutId: "replacement-rollout" },
+      "container",
+    ],
+    [
+      { type: "namespace", ...receipt.namespaces[1]! },
+      { sandboxNamespaceClass: "ReplacementSandbox" },
+      "namespace",
+    ],
+    [
+      {
+        type: "bucket",
+        name: bucket.name,
+        lifecycle: bucket.lifecycle,
+        publicAccess: bucket.publicAccess,
+        customDomains: bucket.customDomains,
+      },
+      { publicAccess: true },
+      "bucket",
+    ],
+    [
+      {
+        type: "object",
+        bucket: bucket.name,
+        ...bucket.objects[0]!,
+      },
+      { objectEtag: "replacement-etag" },
+      "object",
+    ],
+  ];
+
+  for (const [resource, drift, label] of cases) {
+    await expect(control(api()).hasResource(resource), label).resolves.toBe(true);
+    await expect(control(api(drift)).hasResource(resource), label).rejects.toThrow(
+      "deletion evidence changed",
+    );
+  }
+});
+
+test("delete mutates the provider only after exact evidence matches", async () => {
+  const receipt = await control(api()).inventory(manifest);
+  const bucket = receipt.buckets[0]!;
+  const resources: readonly [StackResource, string][] = [
+    [{ type: "worker", ...receipt.worker }, "worker:runway"],
+    [{ type: "workflow", ...receipt.workflow, scriptName: receipt.worker.name }, "workflow:runway"],
+    [{ type: "container", ...receipt.container }, "container:container-id"],
+    [
+      {
+        type: "bucket",
+        name: bucket.name,
+        lifecycle: bucket.lifecycle,
+        publicAccess: bucket.publicAccess,
+        customDomains: bucket.customDomains,
+      },
+      "bucket:runway-account",
+    ],
+    [
+      { type: "object", bucket: bucket.name, ...bucket.objects[0]! },
+      `object:runway-account/${bucket.objects[0]!.key}`,
+    ],
+  ];
+
+  for (const [resource, expected] of resources) {
+    const deletions: string[] = [];
+    await control(api({ deletions })).deleteResource(resource);
+    expect(deletions).toEqual([expected]);
+  }
+
+  const deletions: string[] = [];
+  await expect(
+    control(api({ deletions, rolloutId: "replacement-rollout" })).deleteResource({
+      type: "container",
+      ...receipt.container,
+    }),
+  ).rejects.toThrow("deletion evidence changed");
+  expect(deletions).toEqual([]);
+});
+
+test("absent resources are distinct from drift and deletion stays idempotent", async () => {
+  const receipt = await control(api()).inventory(manifest);
+  const bucket = receipt.buckets[0]!;
+  const resources: readonly StackResource[] = [
+    { type: "worker", ...receipt.worker },
+    { type: "workflow", ...receipt.workflow, scriptName: receipt.worker.name },
+    { type: "container", ...receipt.container },
+    { type: "namespace", ...receipt.namespaces[1]! },
+    {
+      type: "bucket",
+      name: bucket.name,
+      lifecycle: bucket.lifecycle,
+      publicAccess: bucket.publicAccess,
+      customDomains: bucket.customDomains,
+    },
+    { type: "object", bucket: bucket.name, ...bucket.objects[0]! },
+  ];
+
+  for (const resource of resources) {
+    const deletions: string[] = [];
+    const absent = api({ absent: resource.type, deletions });
+    await expect(control(absent).hasResource(resource)).resolves.toBe(false);
+    await expect(control(absent).deleteResource(resource)).resolves.toBeUndefined();
+    expect(deletions).toEqual([]);
+  }
+});
+
+test("route deletion uses exact zone-scoped evidence", async () => {
+  const route: StackResource = {
+    type: "route",
+    zoneId: "zone-id",
+    id: "route-id",
+    pattern: "example.com/*",
+  };
+  await expect(control(api()).hasResource(route)).resolves.toBe(true);
+  await expect(
+    control(api({ routePattern: "replacement.example.com/*" })).hasResource(route),
+  ).rejects.toThrow("route deletion evidence changed");
+  await expect(control(api({ absent: "route" })).hasResource(route)).resolves.toBe(false);
+
+  const deletions: string[] = [];
+  await control(api({ deletions })).deleteResource(route);
+  expect(deletions).toEqual(["route:route-id"]);
+});
+
+interface ApplyCalls {
+  readonly operations: string[];
+  readonly bucketCreates: unknown[];
+  readonly containerCreates: unknown[];
+  readonly containerModifies: unknown[];
+  readonly rolloutCreates: unknown[];
+  readonly workflowUpdates: unknown[];
+  readonly artifactParams: unknown[];
+  metadata?: Record<string, unknown>;
+}
+
+interface ApplyOverrides {
+  readonly bucket?: "present" | "missing" | "forbidden";
+  readonly workflowOwner?: string;
+  readonly application?: "absent" | "exact" | "stale";
+  readonly rolloutStatus?: string;
+  readonly rolloutError?: Error;
+}
+
+const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): CloudflareApi => {
+  const application = {
+    id: "container-id",
+    name: "runway-Sandbox",
+    scheduling_policy: "default",
+    max_instances: manifest.container.maxInstances,
+    constraints: { tiers: manifest.container.tiers.map(Number) },
+    rollout_active_grace_period: 0,
+    durable_objects: { namespace_id: "namespace-RunwaySandbox" },
+    configuration: {
+      image:
+        overrides.application === "stale"
+          ? "docker.io/replacement@sha256:bad"
+          : manifest.container.image,
+      instance_type: manifest.container.instanceType,
+    },
+  };
+  return {
+    workers: {
+      scripts: {
+        update: async (_name: string, params: { metadata: unknown }) => {
+          calls.operations.push("worker-upload");
+          calls.metadata = params.metadata as unknown as Record<string, unknown>;
+        },
+        versions: {
+          list: async () => [{ id: "worker-version" }],
+          get: async () => ({
+            resources: {
+              bindings: [
+                {
+                  type: "durable_object_namespace",
+                  name: "RunwaySandbox",
+                  class_name: "Sandbox",
+                  namespace_id: "namespace-RunwaySandbox",
+                },
+              ],
+            },
+          }),
+        },
+        schedules: {
+          update: async () => {},
+        },
+        subdomain: {
+          create: async () => {},
+        },
+      },
+      subdomains: {
+        get: async () => ({ subdomain: "tester" }),
+      },
+    },
+    workflows: {
+      list: async () =>
+        overrides.workflowOwner ? [{ name: "runway", script_name: overrides.workflowOwner }] : [],
+      update: async (...args: unknown[]) => {
+        calls.workflowUpdates.push(args);
+      },
+    },
+    containers: {
+      applications: {
+        list: async () =>
+          overrides.application === undefined || overrides.application === "absent"
+            ? []
+            : [application],
+        create: async (params: unknown) => {
+          calls.containerCreates.push(params);
+        },
+        modify: async (...args: unknown[]) => {
+          calls.containerModifies.push(args);
+        },
+      },
+      rollouts: {
+        create: async (...args: unknown[]) => {
+          calls.rolloutCreates.push(args);
+          if (overrides.rolloutError) throw overrides.rolloutError;
+          return { id: "rollout-id" };
+        },
+        get: async () => ({ status: overrides.rolloutStatus ?? "completed" }),
+      },
+    },
+    r2: {
+      buckets: {
+        get: async () => {
+          if (overrides.bucket === "forbidden") {
+            throw Object.assign(new Error("forbidden"), { status: 403 });
+          }
+          if (overrides.bucket === "missing") {
+            throw Object.assign(new Error("not found"), { status: 404 });
+          }
+          return {};
+        },
+        create: async (params: unknown) => {
+          calls.bucketCreates.push(params);
+        },
+        objects: {
+          upload: async (_bucket: string, key: string, _body: unknown, params: unknown) => {
+            calls.operations.push(`artifact-upload:${key}`);
+            calls.artifactParams.push(params);
+          },
+        },
+      },
+    },
+  } as unknown as CloudflareApi;
+};
+
+const applyCalls = (): ApplyCalls => ({
+  operations: [],
+  bucketCreates: [],
+  containerCreates: [],
+  containerModifies: [],
+  rolloutCreates: [],
+  workflowUpdates: [],
+  artifactParams: [],
+});
+
+test("apply refuses Dynamic Workflow takeover before any provider mutation", async () => {
+  const calls = applyCalls();
+  await expect(
+    control(applyApi(calls, { workflowOwner: "another-worker" })).apply(manifest),
+  ).rejects.toThrow("already belongs to Worker another-worker");
+  expect(calls.operations).toEqual([]);
+  expect(calls.workflowUpdates).toEqual([]);
+});
+
+test("apply creates missing storage, publishes content before host, and uploads fresh bindings", async () => {
+  const calls = applyCalls();
+  let ready = 0;
+  const stack = new CloudflareStackControl({
+    cf: applyApi(calls, { bucket: "missing" }),
+    accountId: "account",
+    registry: [],
+    deployment,
+    secretBindings: { RUNWAY_SECRET_SNAPSHOT_KEY: "snapshot" },
+    stateBucket: "runway-state-account",
+    ready: async () => {
+      ready += 1;
+    },
+  });
+
+  await stack.apply(manifest);
+
+  expect(calls.bucketCreates).toEqual([{ account_id: "account", name: "runway-account" }]);
+  expect(calls.operations).toEqual([
+    `artifact-upload:artifacts/${artifactVersion}.json`,
+    "worker-upload",
+  ]);
+  expect(calls.artifactParams).toEqual([
+    {
+      account_id: "account",
+    },
+  ]);
+  expect(calls.metadata).toMatchObject({
+    annotations: {
+      "workers/tag": manifest.worker.moduleDigest,
+      "workers/message": manifest.generation,
+    },
+    keep_bindings: ["secret_text"],
+    exports: {
+      Sandbox: { type: "durable-object", state: "created", storage: "sqlite" },
+      RunwayGitHubCoordinator: {
+        type: "durable-object",
+        state: "created",
+        storage: "sqlite",
+      },
+    },
+    bindings: expect.arrayContaining([
+      { type: "worker_loader", name: "LOADER" },
+      {
+        type: "r2_bucket",
+        name: "RUNWAY_ARTIFACTS",
+        bucket_name: "runway-account",
+      },
+      {
+        type: "secret_text",
+        name: "RUNWAY_SECRET_SNAPSHOT_KEY",
+        text: "snapshot",
+      },
+    ]),
+  });
+  expect(calls.containerCreates).toHaveLength(1);
+  expect(calls.workflowUpdates).toHaveLength(1);
+  expect(ready).toBe(1);
+});
+
+test("apply reuses storage and exact containers, and explains storage permission failures", async () => {
+  const reused = applyCalls();
+  await control(applyApi(reused, { application: "exact" })).apply(manifest);
+  expect(reused.bucketCreates).toEqual([]);
+  expect(reused.containerCreates).toEqual([]);
+  expect(reused.containerModifies).toEqual([]);
+  expect(reused.rolloutCreates).toEqual([]);
+
+  const forbidden = applyCalls();
+  await expect(
+    control(applyApi(forbidden, { bucket: "forbidden" })).apply(manifest),
+  ).rejects.toThrow("Workers R2 Storage Write permission");
+  expect(forbidden.operations).toEqual([]);
+});
+
+test("apply reconciles stale container configuration and surfaces rollout failures", async () => {
+  const reconciled = applyCalls();
+  await control(applyApi(reconciled, { application: "stale" })).apply(manifest);
+  expect(reconciled.containerModifies).toHaveLength(1);
+  expect(reconciled.rolloutCreates).toHaveLength(1);
+
+  const creationFailure = applyCalls();
+  await expect(
+    control(
+      applyApi(creationFailure, {
+        application: "stale",
+        rolloutError: new Error("rollout rejected"),
+      }),
+    ).apply(manifest),
+  ).rejects.toThrow("rollout rejected");
+
+  const reverted = applyCalls();
+  await expect(
+    control(applyApi(reverted, { application: "stale", rolloutStatus: "reverted" })).apply(
+      manifest,
+    ),
+  ).rejects.toThrow("container rollout reverted");
+});
+
+const stateApi = (
+  initial: Readonly<Record<string, string>> | undefined,
+  config: { readonly publicAccess?: boolean; readonly deleteObjects?: boolean } = {},
+) => {
+  let exists = initial !== undefined;
+  const objects = new Map(Object.entries(initial ?? {}));
+  let creates = 0;
+  let uploads = 0;
+  const cf = {
+    r2: {
+      buckets: {
+        get: async () => {
+          if (!exists) throw Object.assign(new Error("not found"), { status: 404 });
+          return {};
+        },
+        create: async () => {
+          exists = true;
+          creates += 1;
+        },
+        lifecycle: {
+          get: async () => ({
+            rules: config.deleteObjects
+              ? [{ enabled: true, deleteObjectsTransition: { condition: { type: "Age" } } }]
+              : [],
+          }),
+        },
+        domains: {
+          managed: { list: async () => ({ enabled: config.publicAccess ?? false }) },
+          custom: { list: async () => ({ domains: [] }) },
+        },
+        objects: {
+          list: async (_bucket: string, { prefix = "" }: { prefix?: string }) =>
+            [...objects.keys()]
+              .filter((key) => key.startsWith(prefix))
+              .map((key) => ({ key, etag: `etag:${key}` })),
+          upload: async (_bucket: string, key: string, body: Uint8Array) => {
+            uploads += 1;
+            objects.set(key, new TextDecoder().decode(body));
+          },
+          get: async (_bucket: string, key: string) => objects.get(key),
+          delete: async (_bucket: string, key: string) => {
+            objects.delete(key);
+          },
+        },
+      },
+    },
+  } as unknown as CloudflareApi;
+  return { cf, objects, creates: () => creates, uploads: () => uploads };
+};
+
+test("append-only state creates a missing dedicated bucket once and rereads its write", async () => {
+  const state = stateApi(undefined);
+  const stack = control(state.cf);
+  await stack.writeOnce("stack/v2/receipts/owner/generation.json", "one");
+  await stack.writeOnce("stack/v2/receipts/owner/generation.json", "one");
+  expect(state.creates()).toBe(1);
+  await expect(stack.read("stack/v2/receipts/owner/generation.json")).resolves.toMatchObject({
+    value: "one",
+  });
+});
+
+test("append-only state fails closed on unowned or conflicting pre-existing storage", async () => {
+  await expect(
+    control(stateApi({}).cf).writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+  ).rejects.toThrow("unowned");
+
+  const logical = "stack/v2/receipts/owner/generation.json";
+  const conflicting = stateApi({
+    [`${logical}.versions/one.json`]: "one",
+    [`${logical}.versions/two.json`]: "two",
+  });
+  await expect(control(conflicting.cf).read(logical)).rejects.toThrow("conflicting immutable");
+});
+
+test("append-only state verifies private retained storage before its first write", async () => {
+  const physical =
+    "stack/v2/claims/existing.json.versions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json";
+  for (const config of [{ publicAccess: true }, { deleteObjects: true }]) {
+    const state = stateApi({ [physical]: "existing" }, config);
+    await expect(
+      control(state.cf).writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+    ).rejects.toThrow("not private and retained");
+    expect(state.uploads()).toBe(0);
+  }
+});

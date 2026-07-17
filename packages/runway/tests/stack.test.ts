@@ -6,6 +6,7 @@ import {
   type StackControl,
   type StackManifest,
   type StackReceipt,
+  type StackResource,
 } from "../src/stack.ts";
 
 class MemoryControl implements StackControl {
@@ -23,14 +24,38 @@ class MemoryControl implements StackControl {
     return Promise.resolve(structuredClone(this.#objects.get(key)));
   }
 
-  compareAndSwap(key: string, revision: string | undefined, value: string): Promise<boolean> {
+  list(prefix: string): Promise<readonly { key: string; value: string; revision: string }[]> {
+    return Promise.resolve(
+      [...this.#objects.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, value]) => ({ key, ...structuredClone(value) })),
+    );
+  }
+
+  writeOnce(key: string, value: string): Promise<void> {
     const current = this.#objects.get(key);
-    if (current?.revision !== revision || (!current && revision !== undefined)) {
-      return Promise.resolve(false);
-    }
+    if (current && current.value !== value) throw new Error("immutable Stack state conflict");
+    if (current) return Promise.resolve();
     this.#revision += 1;
     this.#objects.set(key, { value, revision: String(this.#revision) });
-    return Promise.resolve(true);
+    return Promise.resolve();
+  }
+
+  deleteState(key: string, revision: string): Promise<void> {
+    if (this.#objects.get(key)?.revision === revision) this.#objects.delete(key);
+    return Promise.resolve();
+  }
+
+  apply(_manifest: StackManifest): Promise<void> {
+    throw new Error("Stack apply unavailable");
+  }
+
+  deleteResource(_resource: StackResource): Promise<void> {
+    throw new Error("Stack deletion unavailable");
+  }
+
+  hasResource(_resource: StackResource): Promise<boolean> {
+    throw new Error("Stack inventory unavailable");
   }
 
   inventoryAs(manifest: StackManifest, receipt: unknown): void {
@@ -136,6 +161,7 @@ const receiptOf = (manifest: StackManifest, suffix = "1"): StackReceipt => ({
   worker: {
     name: manifest.worker.name,
     moduleDigest: manifest.worker.moduleDigest,
+    providerEtag: `provider-etag-${suffix}`,
     versionId: `worker-version-${suffix}`,
     deploymentId: `worker-deployment-${suffix}`,
   },
@@ -222,16 +248,17 @@ test("two repository Stacks coexist while sharing only an identically configured
   await expect(new Stack(first, control).read()).resolves.toEqual(receiptOf(first, "1"));
   await expect(new Stack(second, control).read()).resolves.toEqual(receiptOf(second, "2"));
   const stackIds = [first.owner.stackId, second.owner.stackId].sort();
-  expect(control.values().join("\n")).toContain(`"stackIds":["${stackIds[0]}","${stackIds[1]}"]`);
+  expect(control.values().join("\n")).toContain(`"stackIds":["${stackIds[0]}"]`);
+  expect(control.values().join("\n")).toContain(`"stackIds":["${stackIds[1]}"]`);
   expect(
     control
       .values()
       .filter(
         (value) =>
           value.includes('"kind":"object"') &&
-          value.includes(`"stackIds":["${stackIds[0]}","${stackIds[1]}"]`),
+          stackIds.some((stackId) => value.includes(`"stackIds":["${stackId}"]`)),
       ),
-  ).toHaveLength(1);
+  ).toHaveLength(2);
 });
 
 test("cross-owner resource collisions and unknown shared state fail closed", async () => {
@@ -248,14 +275,13 @@ test("cross-owner resource collisions and unknown shared state fail closed", asy
   control.inventoryAs(first, receiptOf(first, "1"));
   control.inventoryAs(second, receiptOf(second, "2"));
   await new Stack(first, control).capture();
-  const beforeCollision = control.values();
   await expect(new Stack(second, control).capture()).rejects.toThrow("owned by another Stack");
-  expect(control.values()).toEqual(beforeCollision);
+  expect(control.values().join("\n")).not.toContain('"versionId":"worker-version-2"');
 
   const unknown = new MemoryControl();
   const manifest = manifestOf("repo-1", "runway");
   unknown.inventoryAs(manifest, receiptOf(manifest));
-  unknown.object(Stack.refKey("bucket", "runway-account-1"), '{"schema":99}');
+  unknown.object(`${Stack.refPrefix("bucket", "runway-account-1")}unknown.json`, '{"schema":99}');
   await expect(new Stack(manifest, unknown).capture()).rejects.toThrow(
     "invalid persisted Stack ownership",
   );
@@ -302,4 +328,221 @@ test("inventory mismatches, unknown receipt fields, and tag-only images never be
         control,
       ),
   ).toThrow("container image");
+});
+
+class SyncControl extends MemoryControl {
+  readonly removed: StackResource[] = [];
+  readonly live = new Map<string, StackResource>();
+  #desired: { manifest: StackManifest; receipt: StackReceipt } | undefined;
+  #failApply = false;
+
+  desire(manifest: StackManifest, receipt: StackReceipt): void {
+    this.#desired = { manifest, receipt };
+  }
+
+  failNextApply(): void {
+    this.#failApply = true;
+  }
+
+  apply(manifest: StackManifest): Promise<void> {
+    if (!this.#desired || this.#desired.manifest.generation !== manifest.generation) {
+      throw new Error("missing desired Stack application");
+    }
+    if (this.#failApply) {
+      this.#failApply = false;
+      throw new Error("partial provider apply");
+    }
+    this.inventoryAs(manifest, this.#desired.receipt);
+    for (const resource of resourcesOf(this.#desired.receipt))
+      this.live.set(resourceKey(resource), resource);
+    return Promise.resolve();
+  }
+
+  deleteResource(resource: StackResource): Promise<void> {
+    this.removed.push(structuredClone(resource));
+    this.live.delete(resourceKey(resource));
+    return Promise.resolve();
+  }
+
+  hasResource(resource: StackResource): Promise<boolean> {
+    return Promise.resolve(this.live.has(resourceKey(resource)));
+  }
+}
+
+const resourceKey = (resource: StackResource): string => {
+  const canonical = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(canonical)
+      : value && typeof value === "object"
+        ? Object.fromEntries(
+            Object.entries(value)
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([key, entry]) => [key, canonical(entry)]),
+          )
+        : value;
+  return JSON.stringify(canonical(resource));
+};
+
+const resourcesOf = (receipt: StackReceipt): readonly StackResource[] => [
+  { type: "worker", ...receipt.worker },
+  { type: "workflow", ...receipt.workflow, scriptName: receipt.worker.name },
+  { type: "container", ...receipt.container },
+  ...receipt.namespaces.map(({ id, name, className, scriptName }) => ({
+    type: "namespace" as const,
+    id,
+    name,
+    className,
+    scriptName,
+  })),
+  ...receipt.routes.map(({ zoneId, id, pattern }) => ({
+    type: "route" as const,
+    zoneId,
+    id,
+    pattern,
+  })),
+  ...receipt.buckets.flatMap((bucket) => [
+    ...(bucket.shared
+      ? []
+      : [
+          {
+            type: "bucket" as const,
+            name: bucket.name,
+            lifecycle: bucket.lifecycle,
+            publicAccess: bucket.publicAccess,
+            customDomains: bucket.customDomains,
+          },
+        ]),
+    ...bucket.objects
+      .filter((object) => !object.shared)
+      .map(({ key, digest, etag, version }) => ({
+        type: "object" as const,
+        bucket: bucket.name,
+        key,
+        digest,
+        etag,
+        ...(version ? { version } : {}),
+      })),
+  ]),
+];
+
+test("Stack sync applies and verifies one desired generation and retries a partial application", async () => {
+  const control = new SyncControl();
+  const manifest = manifestOf("repo-1", "runway");
+  const receipt = receiptOf(manifest);
+  control.desire(manifest, receipt);
+  control.failNextApply();
+  const stack = new Stack(manifest, control);
+
+  await expect(stack.sync()).rejects.toThrow("partial provider apply");
+  await expect(stack.sync()).resolves.toMatchObject({ receipt, retainedWorkerHistory: [] });
+  await expect(stack.read()).resolves.toEqual(receipt);
+});
+
+test("Stack sync prunes only exact stale owned resources and reports retained Worker history", async () => {
+  const control = new SyncControl();
+  const oldManifest = manifestOf("repo-1", "runway");
+  const oldReceipt = receiptOf(oldManifest, "old");
+  control.inventoryAs(oldManifest, oldReceipt);
+  for (const resource of resourcesOf(oldReceipt)) control.live.set(resourceKey(resource), resource);
+  await new Stack(oldManifest, control).capture();
+
+  const manifest = manifestOf("repo-1", "runway", {
+    generation: digest("9"),
+    worker: { name: "runway", moduleDigest: digest("8") },
+    schedules: [],
+    routes: [],
+    buckets: oldManifest.buckets.map((bucket) => ({
+      ...bucket,
+      objects: bucket.objects.filter(({ shared }) => shared),
+    })),
+  });
+  const receipt = receiptOf(manifest, "new");
+  control.desire(manifest, receipt);
+
+  await expect(new Stack(manifest, control).sync()).resolves.toEqual({
+    receipt,
+    retainedWorkerHistory: [
+      {
+        name: "runway",
+        versionId: "worker-version-old",
+        deploymentId: "worker-deployment-old",
+      },
+    ],
+  });
+  expect(control.removed).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "route", id: "route-old" }),
+      expect.objectContaining({ type: "object", key: "artifacts/repo-1/one" }),
+    ]),
+  );
+  expect(control.removed).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "bucket", name: "runway-account-1" }),
+      expect.objectContaining({ type: "object", key: "content/shared" }),
+      expect.objectContaining({ type: "workflow", name: "runway" }),
+      expect.objectContaining({ type: "container", name: "runway-Sandbox" }),
+      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
+      expect.objectContaining({ type: "worker" }),
+    ]),
+  );
+  expect(control.values().join("\n")).not.toContain("namespace-RunwaySandbox-old");
+});
+
+test("Stack sync separates provider identity from new deletion evidence", async () => {
+  const control = new SyncControl();
+  const oldManifest = manifestOf("repo-1", "runway");
+  const oldReceipt = receiptOf(oldManifest, "old");
+  control.inventoryAs(oldManifest, oldReceipt);
+  for (const resource of resourcesOf(oldReceipt)) control.live.set(resourceKey(resource), resource);
+  await new Stack(oldManifest, control).capture();
+
+  const manifest = { ...oldManifest, generation: digest("9") };
+  const receipt = receiptOf(manifest, "new");
+  control.desire(manifest, receipt);
+  await new Stack(manifest, control).sync();
+
+  expect(control.removed).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "object", key: "artifacts/repo-1/one" }),
+      expect.objectContaining({ type: "workflow", name: "runway" }),
+      expect.objectContaining({ type: "container", name: "runway-Sandbox" }),
+      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
+    ]),
+  );
+});
+
+test("Stack remove verifies ownership, is idempotent, and re-queries exact survivors", async () => {
+  const control = new SyncControl();
+  const manifest = manifestOf("repo-1", "runway");
+  const receipt = receiptOf(manifest);
+  control.inventoryAs(manifest, receipt);
+  for (const resource of resourcesOf(receipt)) control.live.set(resourceKey(resource), resource);
+  const stack = new Stack(manifest, control);
+  await stack.capture();
+
+  await expect(stack.remove()).resolves.toEqual({
+    retainedWorkerHistory: [
+      {
+        name: "runway",
+        versionId: "worker-version-1",
+        deploymentId: "worker-deployment-1",
+      },
+    ],
+  });
+  await expect(stack.remove()).resolves.toEqual({ retainedWorkerHistory: [] });
+  const survivors: StackResource[] = [];
+  for (const resource of resourcesOf(receipt).filter(({ type }) => type !== "worker")) {
+    if (await control.hasResource(resource)) survivors.push(resource);
+  }
+  expect(survivors).toEqual([]);
+  await expect(
+    control.hasResource(resourcesOf(receipt).find(({ type }) => type === "worker")!),
+  ).resolves.toBe(false);
+  const types = control.removed.map(({ type }) => type);
+  expect(types.indexOf("object")).toBeLessThan(types.indexOf("worker"));
+  expect(types.indexOf("container")).toBeLessThan(types.indexOf("namespace"));
+  expect(types.indexOf("worker")).toBeLessThan(types.indexOf("namespace"));
+  expect(types.indexOf("route")).toBeLessThan(types.indexOf("worker"));
+  expect(types.indexOf("workflow")).toBeLessThan(types.indexOf("worker"));
+  expect(control.values().join("\n")).not.toContain(`"stackId":"${manifest.owner.stackId}"`);
 });

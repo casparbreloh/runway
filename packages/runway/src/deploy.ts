@@ -1,33 +1,26 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 
 import type { CloudflareApi } from "./cloudflare-api.ts";
+import { waitForDeploymentReadiness } from "./cloudflare/readiness.ts";
+import {
+  artifactBucketName,
+  CloudflareStackControl,
+  cloudflareStackManifest,
+  validateBindings,
+} from "./cloudflare/stack.ts";
 import { resolveAuth } from "./deploy-auth.ts";
 import { buildDeployment } from "./deploy-build.ts";
-import {
-  currentSandboxMigrationTag,
-  reconcileSandboxContainer,
-  runwayMigration,
-} from "./deploy-container.ts";
-import {
-  assertDynamicWorkflowOwnership,
-  deleteStaleDynamicWorkflows,
-  updateCronSchedules,
-  updateDynamicWorkflow,
-  waitForDeploymentReadiness,
-  enableWorkersDev,
-} from "./deploy-finalize.ts";
-import { uploadWorkflowArtifacts } from "./deploy-storage.ts";
-import { uploadWorker, validateBindings } from "./deploy-upload.ts";
 import { createGitHubProvider, type GitHubProvider } from "./github.ts";
 import { resolveScriptName } from "./naming.ts";
-import { secretNamesOf } from "./registry.ts";
+import { cronsOf, secretNamesOf } from "./registry.ts";
 import {
   assertRepositorySourceReachable,
   resolveRepositorySource,
   type RepositorySource,
 } from "./repository-source.ts";
 import { listScriptSecrets } from "./secret-store.ts";
+import { Stack, type StackControl, type StackManifest } from "./stack.ts";
 import type { ProgressEvent, Registry } from "./types.ts";
 import {
   GITHUB_APP_ID_BINDING,
@@ -62,6 +55,9 @@ interface DeployAdapters {
     readonly deploymentId: string;
   }) => Promise<void>;
   readonly github?: Pick<GitHubProvider, "resolveRepository" | "createInstallationToken">;
+  readonly stack?: (
+    manifest: StackManifest,
+  ) => StackControl & { urls(): readonly { readonly id: string; readonly url: string }[] };
 }
 
 const githubRepositoryNameOf = (repository: RepositorySource): string | undefined => {
@@ -107,15 +103,11 @@ export const deployWithAdapters = async (
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
   const scriptName = await resolveScriptName({ cwd: opts.cwd, env });
-  const workflowName = scriptName;
   const { accountId, cf } = await resolveAuth(
     { ...opts, ...(adapters.client ? { client: adapters.client } : {}) },
     env,
   );
-  await assertDynamicWorkflowOwnership(cf, accountId, workflowName, scriptName);
   const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
-  const migrationTag = await currentSandboxMigrationTag(cf, accountId, scriptName);
-  const migration = runwayMigration(migrationTag);
   const missingSecrets = registry.flatMap((w) =>
     w.def.secrets
       .filter((name) => !env[name] && !remoteSecrets.has(name))
@@ -229,32 +221,45 @@ export const deployWithAdapters = async (
     });
   }
   opts.onProgress?.({ step: "deploy", status: "start" });
-  const artifactBucketName = await uploadWorkflowArtifacts(cf, accountId, deployment);
-  await uploadWorker(cf, {
+  const artifacts = artifactBucketName(accountId);
+  const stateBucket = `runway-state-${accountId}`;
+  const repositoryId =
+    repository.authentication.type === "github"
+      ? `github:${repository.authentication.repository.id}`
+      : `source:${createHash("sha256").update(repository.remote).digest("hex")}`;
+  const allSecretNames = [...new Set([...remoteSecrets, ...Object.keys(secretBindings)])].sort();
+  const snapshotKeyBindings = allSecretNames.filter((name) =>
+    name.startsWith(`${SECRET_SNAPSHOT_KEY_BINDING}_`),
+  );
+  const manifest = cloudflareStackManifest({
     accountId,
-    scriptName,
-    workflowName,
-    artifactBucketName,
-    contents: deployment.host,
-    secretBindings,
-    ...(migration ? { migration } : {}),
+    repositoryId,
+    name: scriptName,
+    deployment,
+    schedules: cronsOf(registry),
+    secretNames: allSecretNames,
+    snapshotKeyBindings,
+    artifactBucket: artifacts,
+    stateBucket,
   });
-  await reconcileSandboxContainer(cf, accountId, scriptName);
-  await updateDynamicWorkflow(cf, accountId, workflowName, scriptName);
-  await updateCronSchedules(cf, accountId, scriptName, registry);
-  await deleteStaleDynamicWorkflows(cf, accountId, workflowName, scriptName);
-  const workersDev = await enableWorkersDev(cf, accountId, scriptName, registry);
-  await (adapters.ready ?? waitUntilReady)({
-    host: workersDev.host,
-    scriptName,
-    deploymentId: deployment.deploymentId,
-  });
+  const control =
+    adapters.stack?.(manifest) ??
+    new CloudflareStackControl({
+      cf,
+      accountId,
+      registry,
+      deployment,
+      secretBindings,
+      stateBucket,
+      ready: adapters.ready ?? waitUntilReady,
+    });
+  await new Stack(manifest, control).sync();
 
   opts.onProgress?.({ step: "deploy", status: "done" });
   return {
     script: scriptName,
     artifactVersions: deployment.artifacts.map(({ artifactVersion }) => artifactVersion),
-    urls: workersDev.urls,
+    urls: control.urls(),
   };
 };
 

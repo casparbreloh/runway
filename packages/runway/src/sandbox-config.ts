@@ -1,10 +1,9 @@
 export const SANDBOX_BINDING = "RunwaySandbox";
 export const SANDBOX_CLASS = "Sandbox";
-export const SANDBOX_IMAGE = "docker.io/cloudflare/sandbox:0.12.3";
-export const SANDBOX_MIGRATION_TAG = "runway-sandbox-v1";
+export const SANDBOX_IMAGE =
+  "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042";
 export const GITHUB_COORDINATOR_BINDING = "RUNWAY_GITHUB_COORDINATOR";
 export const GITHUB_COORDINATOR_CLASS = "RunwayGitHubCoordinator";
-export const GITHUB_COORDINATOR_MIGRATION_TAG = "runway-github-coordinator-v2";
 
 export const SANDBOX_INSTANCE_TYPES = {
   lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },

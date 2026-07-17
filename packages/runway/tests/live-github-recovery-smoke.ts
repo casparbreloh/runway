@@ -9,8 +9,8 @@ import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
 import type { Registry } from "runway";
 
+import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
-import { artifactBucketName } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
 import { createGitHubProvider } from "../src/github.ts";
 import { githubRepositoryRemote, resolveRepositorySource } from "../src/repository-source.ts";

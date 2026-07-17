@@ -9,9 +9,8 @@ import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
 
 import type { CloudflareApi } from "../src/cloudflare-api.ts";
-import { resultOf } from "../src/cloudflare-api.ts";
-import { reconcileSandboxContainer } from "../src/deploy-container.ts";
-import { SANDBOX_CONTAINER } from "../src/sandbox-config.ts";
+import { collectResultItems, resultOf } from "../src/cloudflare-api.ts";
+import { SANDBOX_APPLICATION, SANDBOX_CONTAINER } from "../src/sandbox-config.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { fetchWorkersDev } from "./live-smoke-helpers.ts";
 
@@ -47,6 +46,40 @@ const oneAccountId = async (cf: Cloudflare): Promise<string> => {
 
 const isStatus = (error: unknown, status: number): boolean =>
   !!error && typeof error === "object" && "status" in error && error.status === status;
+
+const createSmokeContainer = async (
+  cf: CloudflareApi,
+  accountId: string,
+  scriptName: string,
+): Promise<void> => {
+  const versions = await collectResultItems(
+    await cf.workers.scripts.versions.list(scriptName, { account_id: accountId, per_page: 1 }),
+    (item) =>
+      item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string"
+        ? (item as { id: string }).id
+        : undefined,
+  );
+  const versionId = versions[0];
+  if (!versionId) throw new Error("smoke Worker has no version");
+  const version = resultOf(
+    await cf.workers.scripts.versions.get(scriptName, versionId, { account_id: accountId }),
+  ) as { resources?: { bindings?: readonly Record<string, unknown>[] } } | undefined;
+  const binding = version?.resources?.bindings?.find(
+    ({ type, name, class_name: className }) =>
+      type === "durable_object_namespace" && name === "CacheSandbox" && className === "Sandbox",
+  );
+  if (typeof binding?.namespace_id !== "string") {
+    throw new Error("smoke Worker has no Sandbox namespace");
+  }
+  await cf.containers.applications.create({
+    account_id: accountId,
+    body: {
+      name: `${scriptName}-Sandbox`,
+      ...SANDBOX_APPLICATION,
+      durable_objects: { namespace_id: binding.namespace_id },
+    },
+  });
+};
 
 const bucketExists = async (
   cf: Cloudflare,
@@ -168,18 +201,16 @@ const uploadWorker = async (
       { type: "secret_text", name: "R2_SECRET_ACCESS_KEY", text: options.secretAccessKey },
     ],
     containers: [SANDBOX_CONTAINER],
-    migrations: { new_tag: "cache-transfer-smoke-v1", new_sqlite_classes: ["Sandbox"] },
+    exports: {
+      Sandbox: { type: "durable-object", state: "created", storage: "sqlite" },
+    },
   } as Parameters<Cloudflare["workers"]["scripts"]["update"]>[1]["metadata"];
   await cf.workers.scripts.update(options.scriptName, {
     account_id: options.accountId,
     metadata,
     files: [await toFile(contents, "worker.js", { type: "application/javascript+module" })],
   });
-  await reconcileSandboxContainer(
-    cf as unknown as CloudflareApi,
-    options.accountId,
-    options.scriptName,
-  );
+  await createSmokeContainer(cf as unknown as CloudflareApi, options.accountId, options.scriptName);
   await cf.workers.scripts.subdomain.create(options.scriptName, {
     account_id: options.accountId,
     enabled: true,

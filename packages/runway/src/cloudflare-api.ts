@@ -9,9 +9,14 @@ export type CloudflareApi = {
     list(): Promise<unknown>;
   };
   workers: {
+    routes: {
+      get(routeId: string, params: { zone_id: string }): Promise<unknown>;
+      delete(routeId: string, params: { zone_id: string }): Promise<unknown>;
+    };
     scripts: {
       list(params: { account_id: string }): Promise<unknown>;
       update: AsyncMethod<Cloudflare["workers"]["scripts"]["update"]>;
+      delete(scriptName: string, params: { account_id: string; force?: boolean }): Promise<unknown>;
       secrets: {
         list(scriptName: string, params: { account_id: string }): Promise<unknown>;
         bulkUpdate(scriptName: string, params: unknown): Promise<unknown>;
@@ -27,15 +32,28 @@ export type CloudflareApi = {
           params: { account_id: string },
         ): Promise<unknown>;
       };
+      deployments: {
+        list(scriptName: string, params: { account_id: string }): Promise<unknown>;
+      };
       schedules: {
         update: AsyncMethod<Cloudflare["workers"]["scripts"]["schedules"]["update"]>;
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
       };
       subdomain: {
         create: AsyncMethod<Cloudflare["workers"]["scripts"]["subdomain"]["create"]>;
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      scriptAndVersionSettings: {
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
       };
     };
     subdomains: {
       get(params: { account_id: string }): Promise<unknown>;
+    };
+  };
+  durableObjects: {
+    namespaces: {
+      list(params: { account_id: string }): Promise<unknown>;
     };
   };
   workflows: {
@@ -51,6 +69,7 @@ export type CloudflareApi = {
         applicationId: string,
         params: { account_id: string; body: unknown },
       ): Promise<unknown>;
+      delete(applicationId: string, params: { account_id: string }): Promise<unknown>;
     };
     rollouts: {
       create(
@@ -62,17 +81,42 @@ export type CloudflareApi = {
         rolloutId: string,
         params: { account_id: string },
       ): Promise<unknown>;
+      list(applicationId: string, params: { account_id: string }): Promise<unknown>;
     };
   };
   r2: {
     buckets: {
+      list(params: { account_id: string }): Promise<unknown>;
       get(bucketName: string, params: { account_id: string }): Promise<unknown>;
       create(params: { account_id: string; name: string }): Promise<unknown>;
+      delete(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      lifecycle: {
+        get(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      domains: {
+        managed: {
+          list(bucketName: string, params: { account_id: string }): Promise<unknown>;
+        };
+        custom: {
+          list(bucketName: string, params: { account_id: string }): Promise<unknown>;
+        };
+      };
       objects: {
         upload(
           bucketName: string,
           objectKey: string,
           body: Uint8Array,
+          params: { account_id: string },
+        ): Promise<unknown>;
+        list(bucketName: string, params: { account_id: string; prefix?: string }): Promise<unknown>;
+        get(
+          bucketName: string,
+          objectKey: string,
+          params: { account_id: string },
+        ): Promise<unknown>;
+        delete(
+          bucketName: string,
+          objectKey: string,
           params: { account_id: string },
         ): Promise<unknown>;
       };
@@ -106,6 +150,7 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
     accounts: cf.accounts,
     workers: cf.workers,
     workflows: cf.workflows,
+    durableObjects: cf.durableObjects,
     containers: {
       applications: {
         list: async ({ account_id }) => await containerRequest(account_id, "/applications"),
@@ -115,6 +160,10 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
           await containerRequest(account_id, `/applications/${applicationId}`, {
             method: "PATCH",
             body,
+          }),
+        delete: async (applicationId, { account_id }) =>
+          await containerRequest(account_id, `/applications/${applicationId}`, {
+            method: "DELETE",
           }),
       },
       rollouts: {
@@ -128,6 +177,8 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
             account_id,
             `/applications/${applicationId}/rollouts/${rolloutId}`,
           ),
+        list: async (applicationId, { account_id }) =>
+          await containerRequest(account_id, `/applications/${applicationId}/rollouts`),
       },
     },
     r2: cf.r2,
