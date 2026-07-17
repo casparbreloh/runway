@@ -1,6 +1,6 @@
 import { github, workflow } from "runway";
 
-import { finishRepository, prepareRepository, repositoryCommand } from "../repository.ts";
+import { prepareRepository, repositoryCommand } from "../repository.ts";
 
 export default workflow({
   id: "check",
@@ -18,5 +18,4 @@ export default workflow({
   await run.exec("lint", repositoryCommand("pnpm lint"));
   await run.exec("typecheck", repositoryCommand("pnpm typecheck"));
   await run.exec("fallow", repositoryCommand("pnpm fallow"));
-  await finishRepository(run);
 });

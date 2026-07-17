@@ -2,15 +2,7 @@ import type { ExecOptions, Run } from "runway";
 
 const toolchainRoot = "/cache/runway-ci-toolchain";
 const dependencyStore = "/cache/runway-ci-pnpm-store";
-const nodeModulesRoot = "/workspace/node_modules";
 const systemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const dependencyFiles = [
-  ".runway/repository.ts",
-  "package.json",
-  "packages/runway/package.json",
-  "pnpm-lock.yaml",
-  "pnpm-workspace.yaml",
-] as const;
 const environment = {
   LD_LIBRARY_PATH: `${toolchainRoot}/lib`,
   PATH: `${toolchainRoot}/node/bin:${toolchainRoot}/bin:${systemPath}`,
@@ -56,32 +48,14 @@ export const repositoryCommand = (
 });
 
 export const prepareRepository = async (run: Run): Promise<void> => {
-  await run.cache("toolchain", {
-    key: { files: [".runway/repository.ts", "package.json"] },
-    path: toolchainRoot,
-  });
-  const dependencies = await run.cache("dependencies", {
-    key: { files: dependencyFiles },
-    path: dependencyStore,
-  });
-  const nodeModules = await run.cache("node-modules", {
-    key: { files: dependencyFiles },
-    path: nodeModulesRoot,
-  });
   await run.exec("setup-node", repositoryCommand(setupToolchain, { timeoutMs: 15 * 60_000 }));
   await run.exec("setup-pnpm", repositoryCommand("pnpm --version"));
   await run.exec("toolchain", repositoryCommand("node --version && pnpm --version"));
   await run.exec(
     "install",
     repositoryCommand(
-      nodeModules.state === "hit"
-        ? "test -x node_modules/.bin/oxfmt && test -x node_modules/.bin/oxlint && test -x node_modules/.bin/tsgo && test -x node_modules/.bin/fallow && test -x node_modules/.bin/vitest && test -d node_modules/@cloudflare/vitest-pool-workers && ln -s ../packages/runway node_modules/runway"
-        : `pnpm install ${dependencies.state === "hit" ? "--offline " : ""}--frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16 --package-import-method=hardlink --node-linker=hoisted --store-dir ${dependencyStore}`,
+      `pnpm install --frozen-lockfile --reporter=append-only --child-concurrency=1 --network-concurrency=16 --package-import-method=hardlink --node-linker=hoisted --store-dir ${dependencyStore}`,
       { env: { NODE_OPTIONS: "--max-old-space-size=128" } },
     ),
   );
-};
-
-export const finishRepository = async (run: Run): Promise<void> => {
-  await run.exec("clean-dependencies", repositoryCommand("rm -f node_modules/runway"));
 };

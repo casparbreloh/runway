@@ -1,6 +1,6 @@
 import { github, workflow } from "runway";
 
-import { finishRepository, prepareRepository, repositoryCommand } from "../repository.ts";
+import { prepareRepository, repositoryCommand } from "../repository.ts";
 
 export default workflow({
   id: "test",
@@ -15,5 +15,4 @@ export default workflow({
 }).run(async (run) => {
   await prepareRepository(run);
   await run.exec("test", repositoryCommand("pnpm test", { env: { VITEST_MAX_WORKERS: "1" } }));
-  await finishRepository(run);
 });

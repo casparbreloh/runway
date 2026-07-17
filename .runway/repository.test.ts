@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 
 import type {
   CacheDeclaration,
-  CacheResult,
   ExecOptions,
   ExecResult,
   Run,
@@ -15,10 +14,7 @@ type Invocation =
   | { readonly type: "cache"; readonly id: string; readonly declaration: CacheDeclaration }
   | { readonly type: "exec"; readonly id: string; readonly command: string | ExecOptions };
 
-const invoke = async (
-  workflow: WorkflowDefinition,
-  cacheResult: CacheResult = { state: "miss", reason: "absent" },
-): Promise<readonly Invocation[]> => {
+const invoke = async (workflow: WorkflowDefinition): Promise<readonly Invocation[]> => {
   const invocations: Invocation[] = [];
   const result: ExecResult = { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
   const run: Run = {
@@ -27,7 +23,7 @@ const invoke = async (
     do: async (_id, work) => await work(),
     cache: async (id, declaration) => {
       invocations.push({ type: "cache", id, declaration });
-      return cacheResult;
+      return { state: "miss", reason: "absent" };
     },
     exec: async (id, command) => {
       invocations.push({ type: "exec", id, command });
@@ -49,56 +45,18 @@ const execs = (
   invocations.filter((invocation) => invocation.type === "exec");
 
 describe("Runway's repository workflows", () => {
-  test("Check and Test share exact-source toolchain and dependency caches before commands", async () => {
+  test("Check and Test do not declare repository-specific caches", async () => {
     const checkInvocations = await invoke(check);
     const testInvocations = await invoke(testWorkflow);
-    const expected = [
-      {
-        type: "cache",
-        id: "toolchain",
-        declaration: {
-          key: { files: [".runway/repository.ts", "package.json"] },
-          path: "/cache/runway-ci-toolchain",
-        },
-      },
-      {
-        type: "cache",
-        id: "dependencies",
-        declaration: {
-          key: {
-            files: [
-              ".runway/repository.ts",
-              "package.json",
-              "packages/runway/package.json",
-              "pnpm-lock.yaml",
-              "pnpm-workspace.yaml",
-            ],
-          },
-          path: "/cache/runway-ci-pnpm-store",
-        },
-      },
-      {
-        type: "cache",
-        id: "node-modules",
-        declaration: {
-          key: {
-            files: [
-              ".runway/repository.ts",
-              "package.json",
-              "packages/runway/package.json",
-              "pnpm-lock.yaml",
-              "pnpm-workspace.yaml",
-            ],
-          },
-          path: "/workspace/node_modules",
-        },
-      },
-    ];
 
-    expect(caches(checkInvocations)).toEqual(expected);
-    expect(caches(testInvocations)).toEqual(expected);
-    expect(checkInvocations.slice(0, 3)).toEqual(expected);
-    expect(testInvocations.slice(0, 3)).toEqual(expected);
+    expect(caches(checkInvocations)).toEqual([]);
+    expect(caches(testInvocations)).toEqual([]);
+    expect(checkInvocations.at(0)).toEqual(
+      expect.objectContaining({ type: "exec", id: "setup-node" }),
+    );
+    expect(testInvocations.at(0)).toEqual(
+      expect.objectContaining({ type: "exec", id: "setup-node" }),
+    );
   });
 
   test("a cold Check and Test preserve the repository CI command sequence", async () => {
@@ -114,7 +72,6 @@ describe("Runway's repository workflows", () => {
       "lint",
       "typecheck",
       "fallow",
-      "clean-dependencies",
     ]);
     expect(testCommands.map(({ id }) => id)).toEqual([
       "setup-node",
@@ -122,15 +79,14 @@ describe("Runway's repository workflows", () => {
       "toolchain",
       "install",
       "test",
-      "clean-dependencies",
     ]);
-    expect(checkCommands.slice(-5, -1).map(({ command }) => command)).toEqual([
+    expect(checkCommands.slice(-4).map(({ command }) => command)).toEqual([
       expect.objectContaining({ command: "pnpm format-check" }),
       expect.objectContaining({ command: "pnpm lint" }),
       expect.objectContaining({ command: "pnpm typecheck" }),
       expect.objectContaining({ command: "pnpm fallow" }),
     ]);
-    expect(testCommands.at(-2)?.command).toEqual(
+    expect(testCommands.at(-1)?.command).toEqual(
       expect.objectContaining({
         command: "pnpm test",
         env: expect.objectContaining({ VITEST_MAX_WORKERS: "1" }),
@@ -138,42 +94,34 @@ describe("Runway's repository workflows", () => {
     );
   });
 
-  test("a warm run after pre-command replacement validates node_modules and skips install", async () => {
-    const invocations = await invoke(check, { state: "hit", bytes: 4096 });
-    const install = execs(invocations).find(({ id }) => id === "install");
-
-    expect(invocations.slice(0, 3).every(({ type }) => type === "cache")).toBe(true);
-    expect(install?.command).toEqual(
-      expect.objectContaining({
-        command: expect.stringContaining(
-          "test -x node_modules/.bin/oxfmt && test -x node_modules/.bin/oxlint",
-        ),
-      }),
-    );
-    expect((install?.command as ExecOptions | undefined)?.command).not.toContain("pnpm install");
-    expect((install?.command as ExecOptions | undefined)?.command).toContain(
-      "ln -s ../packages/runway node_modules/runway",
-    );
-    expect((install?.command as ExecOptions | undefined)?.env).toEqual(
-      expect.objectContaining({ pnpm_config_verify_deps_before_run: "false" }),
-    );
-  });
-
-  test("a node_modules miss installs the hoisted tree and success removes its workspace link", async () => {
-    const invocations = await invoke(check, { state: "miss", reason: "absent" });
+  test("repository setup always performs a frozen hoisted install", async () => {
+    const invocations = await invoke(check);
     const install = execs(invocations).find(({ id }) => id === "install");
     const command = (install?.command as ExecOptions | undefined)?.command;
 
     expect(command).toContain("pnpm install --frozen-lockfile");
     expect(command).toContain("--node-linker=hoisted");
     expect(command).toContain("--store-dir /cache/runway-ci-pnpm-store");
-    expect(command).not.toContain("tar ");
-    expect(execs(invocations).at(-1)).toEqual(
-      expect.objectContaining({
-        id: "clean-dependencies",
-        command: expect.objectContaining({ command: "rm -f node_modules/runway" }),
-      }),
+    expect(command).not.toContain("--offline");
+    expect((install?.command as ExecOptions | undefined)?.env).toEqual(
+      expect.objectContaining({ NODE_OPTIONS: "--max-old-space-size=128" }),
     );
+  });
+
+  test("repository setup does not retain cache-publication cleanup", async () => {
+    const invocations = await invoke(check);
+    const install = execs(invocations).find(({ id }) => id === "install");
+    const command = (install?.command as ExecOptions | undefined)?.command;
+
+    expect(command).not.toContain("tar ");
+    expect(execs(invocations).some(({ id }) => id === "clean-dependencies")).toBe(false);
+    expect(
+      execs(invocations).some(({ command: value }) =>
+        typeof value === "string"
+          ? value.includes("rm -f node_modules/runway")
+          : value.command.includes("rm -f node_modules/runway"),
+      ),
+    ).toBe(false);
   });
 
   test("repository setup pins and verifies Node, pnpm, and the Linux runtime library", async () => {
