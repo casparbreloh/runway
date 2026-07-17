@@ -14,6 +14,7 @@ export default defineConfig({
       "tests/github.test.ts",
       "tests/legacy-stack.test.ts",
       "tests/meter.test.ts",
+      "../../.runway/repository.test.ts",
       "tests/sandbox.test.ts",
       "tests/stack.test.ts",
       "tests/terminal.test.ts",

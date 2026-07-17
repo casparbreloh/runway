@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { builtinModules } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
@@ -33,13 +34,10 @@ const runtimeDependencyResolver: Plugin = {
   name: "runway-runtime-dependencies",
   setup(build) {
     build.onResolve({ filter: /^@cloudflare\/dynamic-workflows$/ }, () => ({
-      path: path.resolve(
-        import.meta.dirname,
-        "../node_modules/@cloudflare/dynamic-workflows/dist/index.js",
-      ),
+      path: fileURLToPath(import.meta.resolve("@cloudflare/dynamic-workflows")),
     }));
     build.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
-      path: path.resolve(import.meta.dirname, "../node_modules/@cloudflare/sandbox/dist/index.js"),
+      path: fileURLToPath(import.meta.resolve("@cloudflare/sandbox")),
     }));
     build.onResolve({ filter: /^runway:host-runtime$/ }, () => ({
       path: path.resolve(import.meta.dirname, "host-runtime.ts"),
