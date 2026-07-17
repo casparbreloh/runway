@@ -10,6 +10,7 @@ export type CloudflareApi = {
   };
   workers: {
     routes: {
+      create(params: { zone_id: string; pattern: string; script: string }): Promise<unknown>;
       list(params: { zone_id: string }): Promise<unknown>;
       get(routeId: string, params: { zone_id: string }): Promise<unknown>;
       delete(routeId: string, params: { zone_id: string }): Promise<unknown>;
@@ -117,6 +118,7 @@ export type CloudflareApi = {
           objectKey: string,
           body: Uint8Array,
           params: { account_id: string },
+          options?: { headers?: Readonly<Record<string, string>> },
         ): Promise<unknown>;
         list(bucketName: string, params: { account_id: string; prefix?: string }): Promise<unknown>;
         get(

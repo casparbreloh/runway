@@ -48,7 +48,11 @@ const providerBindings = manifest.bindings.map((binding) => ({
 interface ProviderOverrides {
   readonly moduleDigest?: string;
   readonly workersDev?: boolean;
-  readonly routes?: readonly { readonly id: string; readonly pattern: string }[];
+  readonly routes?: readonly {
+    readonly id: string;
+    readonly pattern: string;
+    readonly script?: string;
+  }[];
   readonly publicAccess?: boolean;
   readonly customDomains?: readonly string[];
   readonly deleteLifecycle?: boolean;
@@ -58,6 +62,10 @@ interface ProviderOverrides {
   readonly providerEtag?: string;
   readonly workflowClass?: string;
   readonly containerImage?: string;
+  readonly containerSchedulingPolicy?: string;
+  readonly containerInstances?: number;
+  readonly containerGracePeriod?: number;
+  readonly containerNamespaceId?: string;
   readonly rolloutId?: string;
   readonly sandboxNamespaceClass?: string;
   readonly objectEtag?: string;
@@ -70,6 +78,8 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
   ({
     workers: {
       routes: {
+        create: async () => ({ id: "created-route" }),
+        list: async () => overrides.routes ?? [],
         get: async () => {
           if (overrides.absent === "route") {
             throw Object.assign(new Error("not found"), { status: 404 });
@@ -81,8 +91,7 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
         },
       },
       scripts: {
-        list: async () =>
-          overrides.absent === "worker" ? [] : [{ id: "runway", routes: overrides.routes ?? [] }],
+        list: async () => (overrides.absent === "worker" ? [] : [{ id: "runway" }]),
         delete: async (name: string) => {
           overrides.deletions?.push(`worker:${name}`);
         },
@@ -138,6 +147,9 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
         overrides.deletions?.push(`workflow:${name}`);
       },
     },
+    zones: {
+      list: async () => [{ id: "zone-id", name: "example.com" }],
+    },
     durableObjects: {
       namespaces: {
         list: async () =>
@@ -163,13 +175,16 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
                 {
                   id: "container-id",
                   name: "runway-Sandbox",
-                  scheduling_policy: "default",
+                  scheduling_policy: overrides.containerSchedulingPolicy ?? "default",
+                  instances: overrides.containerInstances ?? manifest.container.instances,
                   max_instances: manifest.container.maxInstances,
                   constraints: {
                     tiers: overrides.containerTiers ?? manifest.container.tiers.map(Number),
                   },
-                  rollout_active_grace_period: 0,
-                  durable_objects: { namespace_id: "namespace-RunwaySandbox" },
+                  rollout_active_grace_period: overrides.containerGracePeriod ?? 0,
+                  durable_objects: {
+                    namespace_id: overrides.containerNamespaceId ?? "namespace-RunwaySandbox",
+                  },
                   configuration: {
                     image: overrides.containerImage ?? manifest.container.image,
                     instance_type: manifest.container.instanceType,
@@ -264,7 +279,9 @@ test("inventory rejects provider-observed workers.dev drift", async () => {
 
 test("inventory rejects an unowned provider route instead of reporting no routes", async () => {
   await expect(
-    control(api({ routes: [{ id: "route-id", pattern: "example.com/*" }] })).inventory(manifest),
+    control(
+      api({ routes: [{ id: "route-id", pattern: "example.com/*", script: "runway" }] }),
+    ).inventory(manifest),
   ).rejects.toThrow("route");
 });
 
@@ -327,6 +344,14 @@ test("inventory rejects container configuration and active-rollout drift", async
   await expect(control(api({ rolloutStatus: "reverted" })).inventory(manifest)).rejects.toThrow(
     "rollout",
   );
+  for (const drift of [
+    { containerSchedulingPolicy: "replacement" },
+    { containerInstances: 1 },
+    { containerGracePeriod: 1 },
+    { containerNamespaceId: "replacement-namespace" },
+  ]) {
+    await expect(control(api(drift)).inventory(manifest)).rejects.toThrow("container");
+  }
 });
 
 test("inventory rejects Durable Object namespace identity drift", async () => {
@@ -390,6 +415,21 @@ test("every non-Worker deletion check throws on replacement drift", async () => 
     await expect(control(api()).hasResource(resource), label).resolves.toBe(true);
     await expect(control(api(drift)).hasResource(resource), label).rejects.toThrow(
       "deletion evidence changed",
+    );
+  }
+});
+
+test("container deletion verifies every managed application field from its receipt", async () => {
+  const receipt = await control(api()).inventory(manifest);
+  const resource = { type: "container" as const, ...receipt.container };
+  for (const drift of [
+    { containerSchedulingPolicy: "replacement" },
+    { containerInstances: 1 },
+    { containerGracePeriod: 1 },
+    { containerNamespaceId: "replacement-namespace" },
+  ]) {
+    await expect(control(api(drift)).hasResource(resource)).rejects.toThrow(
+      "container deletion evidence changed",
     );
   }
 });
@@ -486,6 +526,8 @@ interface ApplyCalls {
   readonly rolloutCreates: unknown[];
   readonly workflowUpdates: unknown[];
   readonly artifactParams: unknown[];
+  readonly artifactOptions: unknown[];
+  readonly routeCreates: unknown[];
   metadata?: Record<string, unknown>;
 }
 
@@ -495,13 +537,26 @@ interface ApplyOverrides {
   readonly application?: "absent" | "exact" | "stale";
   readonly rolloutStatus?: string;
   readonly rolloutError?: Error;
+  readonly artifact?: "absent" | "exact" | "conflict" | "ambiguous" | "failed";
+  readonly routes?: readonly {
+    readonly id: string;
+    readonly pattern: string;
+    readonly script?: string;
+  }[];
+  readonly zoneName?: string;
 }
 
 const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): CloudflareApi => {
+  let routes = [...(overrides.routes ?? [])];
+  let artifact =
+    overrides.bucket === "missing" || overrides.artifact === "absent"
+      ? undefined
+      : new TextEncoder().encode(overrides.artifact === "conflict" ? "replacement" : "artifact");
   const application = {
     id: "container-id",
     name: "runway-Sandbox",
     scheduling_policy: "default",
+    instances: manifest.container.instances,
     max_instances: manifest.container.maxInstances,
     constraints: { tiers: manifest.container.tiers.map(Number) },
     rollout_active_grace_period: 0,
@@ -516,6 +571,19 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
   };
   return {
     workers: {
+      routes: {
+        list: async () => routes,
+        create: async (params: { zone_id: string; pattern: string; script: string }) => {
+          calls.routeCreates.push(params);
+          const route = {
+            id: `route-${routes.length + 1}`,
+            pattern: params.pattern,
+            script: params.script,
+          };
+          routes = [...routes, route];
+          return route;
+        },
+      },
       scripts: {
         update: async (_name: string, params: { metadata: unknown }) => {
           calls.operations.push("worker-upload");
@@ -554,6 +622,9 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
         calls.workflowUpdates.push(args);
       },
     },
+    zones: {
+      list: async () => [{ id: "zone-id", name: overrides.zoneName ?? "example.com" }],
+    },
     containers: {
       applications: {
         list: async () =>
@@ -591,9 +662,23 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
           calls.bucketCreates.push(params);
         },
         objects: {
-          upload: async (_bucket: string, key: string, _body: unknown, params: unknown) => {
+          get: async () => {
+            if (!artifact) throw Object.assign(new Error("not found"), { status: 404 });
+            return artifact;
+          },
+          upload: async (
+            _bucket: string,
+            key: string,
+            _body: unknown,
+            params: unknown,
+            options: unknown,
+          ) => {
             calls.operations.push(`artifact-upload:${key}`);
             calls.artifactParams.push(params);
+            calls.artifactOptions.push(options);
+            if (overrides.artifact === "failed") throw new Error("upload failed");
+            artifact = new TextEncoder().encode("artifact");
+            if (overrides.artifact === "ambiguous") throw new Error("ambiguous upload");
           },
         },
       },
@@ -609,6 +694,8 @@ const applyCalls = (): ApplyCalls => ({
   rolloutCreates: [],
   workflowUpdates: [],
   artifactParams: [],
+  artifactOptions: [],
+  routeCreates: [],
 });
 
 test("apply refuses Dynamic Workflow takeover before any provider mutation", async () => {
@@ -647,6 +734,7 @@ test("apply creates missing storage, publishes content before host, and uploads 
       account_id: "account",
     },
   ]);
+  expect(calls.artifactOptions).toEqual([{ headers: { "If-None-Match": "*" } }]);
   expect(calls.metadata).toMatchObject({
     annotations: {
       "workers/tag": manifest.worker.moduleDigest,
@@ -693,6 +781,59 @@ test("apply reuses storage and exact containers, and explains storage permission
     control(applyApi(forbidden, { bucket: "forbidden" })).apply(manifest),
   ).rejects.toThrow("Workers R2 Storage Write permission");
   expect(forbidden.operations).toEqual([]);
+});
+
+test("apply never overwrites an existing conflicting content-addressed artifact", async () => {
+  const conflict = applyCalls();
+  await expect(
+    control(applyApi(conflict, { artifact: "conflict" })).apply(manifest),
+  ).rejects.toThrow("conflicts with workflow artifact");
+  expect(conflict.operations).toEqual([]);
+
+  const ambiguous = applyCalls();
+  await expect(
+    control(applyApi(ambiguous, { artifact: "ambiguous", bucket: "missing" })).apply(manifest),
+  ).resolves.toBeUndefined();
+  expect(ambiguous.operations).toEqual([
+    `artifact-upload:artifacts/${artifactVersion}.json`,
+    "worker-upload",
+  ]);
+
+  const failed = applyCalls();
+  await expect(
+    control(applyApi(failed, { artifact: "failed", bucket: "missing" })).apply(manifest),
+  ).rejects.toThrow("upload failed");
+  expect(failed.operations).toEqual([`artifact-upload:artifacts/${artifactVersion}.json`]);
+});
+
+test("apply and inventory own exact non-empty zone-scoped routes", async () => {
+  const routed = { ...manifest, routes: ["ci.example.com/*"] };
+  const calls = applyCalls();
+  await control(applyApi(calls)).apply(routed);
+  expect(calls.routeCreates).toEqual([
+    { zone_id: "zone-id", pattern: "ci.example.com/*", script: "runway" },
+  ]);
+
+  await expect(
+    control(
+      api({
+        routes: [{ id: "route-id", pattern: "ci.example.com/*", script: "runway" }],
+      }),
+    ).inventory(routed),
+  ).resolves.toMatchObject({
+    routes: [{ zoneId: "zone-id", id: "route-id", pattern: "ci.example.com/*" }],
+  });
+
+  const takeover = applyCalls();
+  await expect(
+    control(
+      applyApi(takeover, {
+        routes: [{ id: "route-id", pattern: "ci.example.com/*", script: "another-worker" }],
+      }),
+    ).apply(routed),
+  ).rejects.toThrow("belongs to another Worker");
+  expect(takeover.operations).toEqual([]);
+  expect(takeover.routeCreates).toEqual([]);
 });
 
 test("apply reconciles stale container configuration and surfaces rollout failures", async () => {

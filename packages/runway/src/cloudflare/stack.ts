@@ -16,6 +16,7 @@ import {
 import {
   stackIdOf,
   type StackControl,
+  type StackBucket,
   type StackManifest,
   type StackReceipt,
   type StackResource,
@@ -65,6 +66,30 @@ const required = (value: unknown, field: string): string => {
 
 const sha256 = (value: Uint8Array | string): string =>
   createHash("sha256").update(value).digest("hex");
+
+const equalBytes = (left: Uint8Array, right: Uint8Array): boolean =>
+  left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+
+interface ProviderZone {
+  readonly id: string;
+  readonly name: string;
+}
+
+interface ProviderRoute {
+  readonly zoneId: string;
+  readonly id: string;
+  readonly pattern: string;
+  readonly script?: string;
+}
+
+const routeHostname = (pattern: string): string => {
+  const authority = pattern.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split("/", 1)[0]!;
+  return authority
+    .replace(/^\*\.?/, "")
+    .replace(/:\d+$/, "")
+    .replace(/\.$/, "")
+    .toLowerCase();
+};
 
 export const artifactBucketName = (accountId: string): string => `runway-${accountId}`;
 
@@ -148,8 +173,11 @@ export const cloudflareStackManifest = (opts: {
       platform: { os: "linux", architecture: "amd64" },
       runnerAbi: SANDBOX_RUNNER_ABI,
       instanceType: SANDBOX_CONTAINER.instance_type,
+      schedulingPolicy: SANDBOX_APPLICATION.scheduling_policy,
+      instances: SANDBOX_APPLICATION.instances,
       maxInstances: SANDBOX_APPLICATION.max_instances,
       tiers: SANDBOX_APPLICATION.constraints.tiers.map(String),
+      rolloutActiveGracePeriod: SANDBOX_APPLICATION.rollout_active_grace_period,
     },
     namespaces: [
       {
@@ -270,9 +298,6 @@ export class CloudflareStackControl implements StackControl {
   async apply(manifest: StackManifest): Promise<void> {
     if (manifest.owner.accountId !== this.#opts.accountId)
       throw new Error("Stack account mismatch");
-    if (manifest.routes.length > 0) {
-      throw new Error("Cloudflare Stack route creation requires explicit zone ownership");
-    }
     const workflows = await collectResultItems(
       await this.#opts.cf.workflows.list({ account_id: this.#opts.accountId }),
       (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
@@ -290,6 +315,7 @@ export class CloudflareStackControl implements StackControl {
         `Dynamic Workflow ${manifest.workflow.name} already belongs to Worker ${collisionOwner}`,
       );
     }
+    await this.#assertRouteOwnership(manifest);
 
     const artifactBucket = manifest.buckets.find(({ lifecycle }) => lifecycle === "retain");
     if (!artifactBucket) throw new Error("Stack has no artifact bucket");
@@ -306,12 +332,7 @@ export class CloudflareStackControl implements StackControl {
         });
       }
       for (const artifact of this.#opts.deployment.artifacts) {
-        await this.#opts.cf.r2.buckets.objects.upload(
-          artifactBucket.name,
-          workflowArtifactKey(artifact.artifactVersion),
-          artifact.contents,
-          { account_id: this.#opts.accountId },
-        );
+        await this.#persistArtifact(artifactBucket, artifact);
       }
     } catch (error) {
       if (!status(error, 403)) throw error;
@@ -392,6 +413,7 @@ export class CloudflareStackControl implements StackControl {
       account_id: this.#opts.accountId,
       enabled: manifest.workersDev,
     });
+    await this.#reconcileRoutes(manifest);
     const account = resultOf(
       await this.#opts.cf.workers.subdomains.get({ account_id: this.#opts.accountId }),
     ) as { subdomain?: unknown } | undefined;
@@ -421,10 +443,6 @@ export class CloudflareStackControl implements StackControl {
     );
     const script = scripts.find(({ id }) => id === manifest.worker.name);
     if (!script) throw new Error("missing exact Cloudflare Worker");
-    const scriptRoutes = Array.isArray(script.routes) ? script.routes : [];
-    if (scriptRoutes.length > 0 || manifest.routes.length > 0) {
-      throw new Error("Cloudflare Worker route inventory lacks exact zone ownership");
-    }
     const deployment = deploymentOf(
       await this.#opts.cf.workers.scripts.deployments.list(manifest.worker.name, {
         account_id: this.#opts.accountId,
@@ -511,9 +529,10 @@ export class CloudflareStackControl implements StackControl {
     if (
       configuration?.image !== manifest.container.image ||
       configuration.instance_type !== manifest.container.instanceType ||
+      application.instances !== manifest.container.instances ||
       application.max_instances !== manifest.container.maxInstances ||
-      application.scheduling_policy !== SANDBOX_APPLICATION.scheduling_policy ||
-      application.rollout_active_grace_period !== SANDBOX_APPLICATION.rollout_active_grace_period ||
+      application.scheduling_policy !== manifest.container.schedulingPolicy ||
+      application.rollout_active_grace_period !== manifest.container.rolloutActiveGracePeriod ||
       JSON.stringify(constraints?.tiers) !== JSON.stringify(manifest.container.tiers.map(Number)) ||
       durableObjects?.namespace_id !== sandboxBinding?.namespaceId
     ) {
@@ -523,6 +542,20 @@ export class CloudflareStackControl implements StackControl {
       throw new Error("invalid Cloudflare container capacity");
     }
     const containerImage = required(configuration.image, "container image");
+    const providerRoutes = await this.#providerRoutes();
+    const desiredRoutes = new Set(manifest.routes);
+    for (const route of providerRoutes.routes.filter(({ pattern }) => desiredRoutes.has(pattern))) {
+      if (route.script !== manifest.worker.name) {
+        throw new Error(`Cloudflare route ${route.pattern} belongs to another Worker`);
+      }
+    }
+    const routes = providerRoutes.routes
+      .filter(({ script }) => script === manifest.worker.name)
+      .map(({ zoneId, id, pattern }) => ({ zoneId, id, pattern }))
+      .sort((left, right) => left.pattern.localeCompare(right.pattern));
+    if (JSON.stringify(routes.map(({ pattern }) => pattern)) !== JSON.stringify(manifest.routes)) {
+      throw new Error("Cloudflare Worker routes do not match Stack manifest");
+    }
     const schedulesResult = resultOf(
       await this.#opts.cf.workers.scripts.schedules.get(manifest.worker.name, {
         account_id: this.#opts.accountId,
@@ -686,10 +719,14 @@ export class CloudflareStackControl implements StackControl {
         platform: { os: "linux", architecture: "amd64" },
         runnerAbi: SANDBOX_RUNNER_ABI,
         instanceType: required(configuration?.instance_type, "container instance type"),
+        schedulingPolicy: required(application.scheduling_policy, "container scheduling policy"),
+        instances: application.instances as number,
         maxInstances: application.max_instances,
         tiers: constraints.tiers.map(String),
+        rolloutActiveGracePeriod: application.rollout_active_grace_period as number,
         id: applicationId,
         rolloutId: required(rollout.id, "container rollout id"),
+        namespaceId: required(durableObjects?.namespace_id, "container namespace id"),
       },
       namespaces,
       schedules,
@@ -698,7 +735,7 @@ export class CloudflareStackControl implements StackControl {
       secretNames,
       secretSnapshot,
       buckets,
-      routes: [],
+      routes,
     };
   }
 
@@ -884,13 +921,20 @@ export class CloudflareStackControl implements StackControl {
           const rollout = rollouts[0] as Record<string, unknown> | undefined;
           const configuration = application.configuration as Record<string, unknown> | undefined;
           const constraints = application.constraints as { tiers?: unknown } | undefined;
+          const durableObjects = application.durable_objects as
+            | { namespace_id?: unknown }
+            | undefined;
           if (
             application.id !== resource.id ||
             application.name !== resource.name ||
             configuration?.image !== resource.image ||
             configuration.instance_type !== resource.instanceType ||
+            application.scheduling_policy !== resource.schedulingPolicy ||
+            application.instances !== resource.instances ||
             application.max_instances !== resource.maxInstances ||
             JSON.stringify(constraints?.tiers) !== JSON.stringify(resource.tiers.map(Number)) ||
+            application.rollout_active_grace_period !== resource.rolloutActiveGracePeriod ||
+            durableObjects?.namespace_id !== resource.namespaceId ||
             rollout?.id !== resource.rolloutId ||
             rollout.status !== "completed" ||
             resource.image.slice(resource.image.indexOf("@") + 1) !== resource.imageDigest
@@ -990,6 +1034,166 @@ export class CloudflareStackControl implements StackControl {
     }
   }
 
+  async #readArtifact(bucket: string, key: string): Promise<Uint8Array | undefined> {
+    try {
+      return await bytesOf(
+        await this.#opts.cf.r2.buckets.objects.get(bucket, key, {
+          account_id: this.#opts.accountId,
+        }),
+      );
+    } catch (error) {
+      if (status(error, 404)) return undefined;
+      throw error;
+    }
+  }
+
+  #verifyArtifact(
+    bucket: StackBucket,
+    artifact: PreparedDeployment["artifacts"][number],
+    contents: Uint8Array,
+  ): void {
+    const key = workflowArtifactKey(artifact.artifactVersion);
+    const declared = bucket.objects.find((object) => object.key === key);
+    const digest = `sha256:${sha256(artifact.contents)}`;
+    if (!declared || !declared.shared || declared.digest !== digest) {
+      throw new Error(`workflow artifact ${key} does not match Stack manifest`);
+    }
+    if (
+      `sha256:${sha256(contents)}` !== declared.digest ||
+      !equalBytes(contents, artifact.contents)
+    ) {
+      throw new Error(`Cloudflare R2 object conflicts with workflow artifact ${key}`);
+    }
+  }
+
+  async #persistArtifact(
+    bucket: StackBucket,
+    artifact: PreparedDeployment["artifacts"][number],
+  ): Promise<void> {
+    const key = workflowArtifactKey(artifact.artifactVersion);
+    const existing = await this.#readArtifact(bucket.name, key);
+    if (existing) {
+      this.#verifyArtifact(bucket, artifact, existing);
+      return;
+    }
+    let uploadError: unknown;
+    try {
+      await this.#opts.cf.r2.buckets.objects.upload(
+        bucket.name,
+        key,
+        artifact.contents,
+        {
+          account_id: this.#opts.accountId,
+        },
+        { headers: { "If-None-Match": "*" } },
+      );
+    } catch (error) {
+      uploadError = error;
+    }
+    const stored = await this.#readArtifact(bucket.name, key);
+    if (!stored) {
+      if (uploadError) throw uploadError;
+      throw new Error(`workflow artifact ${key} disappeared after upload`);
+    }
+    this.#verifyArtifact(bucket, artifact, stored);
+  }
+
+  async #providerRoutes(): Promise<{
+    readonly zones: readonly ProviderZone[];
+    readonly routes: readonly ProviderRoute[];
+  }> {
+    const zones = await collectResultItems(
+      await this.#opts.cf.zones.list({ account: { id: this.#opts.accountId }, per_page: 100 }),
+      (item) => {
+        if (!item || typeof item !== "object") return undefined;
+        const zone = item as Record<string, unknown>;
+        return {
+          id: required(zone.id, "zone id"),
+          name: required(zone.name, "zone name").toLowerCase(),
+        };
+      },
+    );
+    const routes = (
+      await Promise.all(
+        zones.map(
+          async (zone) =>
+            await collectResultItems(
+              await this.#opts.cf.workers.routes.list({ zone_id: zone.id }),
+              (item) => {
+                if (!item || typeof item !== "object") return undefined;
+                const route = item as Record<string, unknown>;
+                return {
+                  zoneId: zone.id,
+                  id: required(route.id, "Worker route id"),
+                  pattern: required(route.pattern, "Worker route pattern"),
+                  ...(typeof route.script === "string" ? { script: route.script } : {}),
+                };
+              },
+            ),
+        ),
+      )
+    ).flat();
+    return { zones, routes };
+  }
+
+  async #assertRouteOwnership(manifest: StackManifest): Promise<void> {
+    const { routes } = await this.#providerRoutes();
+    const desired = new Set(manifest.routes);
+    const unexpected = routes.find(
+      ({ script, pattern }) => script === manifest.worker.name && !desired.has(pattern),
+    );
+    if (unexpected) {
+      throw new Error(`Cloudflare Worker has an unowned route ${unexpected.pattern}`);
+    }
+    for (const pattern of manifest.routes) {
+      const matches = routes.filter((route) => route.pattern === pattern);
+      if (matches.length > 1) throw new Error(`Cloudflare route ${pattern} is ambiguous`);
+      if (matches[0] && matches[0].script !== manifest.worker.name) {
+        throw new Error(`Cloudflare route ${pattern} belongs to another Worker`);
+      }
+    }
+  }
+
+  async #reconcileRoutes(manifest: StackManifest): Promise<void> {
+    await this.#assertRouteOwnership(manifest);
+    for (const pattern of manifest.routes) {
+      let provider = await this.#providerRoutes();
+      const existing = provider.routes.filter((route) => route.pattern === pattern);
+      if (existing.length === 1 && existing[0]!.script === manifest.worker.name) continue;
+      if (existing.length > 0)
+        throw new Error(`Cloudflare route ${pattern} is not exclusively owned`);
+      const hostname = routeHostname(pattern);
+      const zones = provider.zones
+        .filter(({ name }) => hostname === name || hostname.endsWith(`.${name}`))
+        .sort((left, right) => right.name.length - left.name.length);
+      const zone = zones[0];
+      if (!zone || (zones[1] && zones[1].name.length === zone.name.length)) {
+        throw new Error(`Cloudflare route ${pattern} does not resolve to one account zone`);
+      }
+      let createError: unknown;
+      try {
+        await this.#opts.cf.workers.routes.create({
+          zone_id: zone.id,
+          pattern,
+          script: manifest.worker.name,
+        });
+      } catch (error) {
+        createError = error;
+      }
+      provider = await this.#providerRoutes();
+      const created = provider.routes.filter((route) => route.pattern === pattern);
+      if (
+        created.length === 1 &&
+        created[0]!.zoneId === zone.id &&
+        created[0]!.script === manifest.worker.name
+      ) {
+        continue;
+      }
+      if (createError) throw createError;
+      throw new Error(`Cloudflare route ${pattern} was not created exactly`);
+    }
+  }
+
   async #reconcileContainer(manifest: StackManifest): Promise<void> {
     const versions = await collectResultItems(
       await this.#opts.cf.workers.scripts.versions.list(manifest.worker.name, {
@@ -1023,15 +1227,15 @@ export class CloudflareStackControl implements StackControl {
       : [];
     const existing = applications.find(({ name }) => name === manifest.container.name);
     const applicationBody = {
-      scheduling_policy: SANDBOX_APPLICATION.scheduling_policy,
+      scheduling_policy: manifest.container.schedulingPolicy,
       configuration: {
         image: manifest.container.image,
         instance_type: manifest.container.instanceType,
       },
-      instances: SANDBOX_APPLICATION.instances,
+      instances: manifest.container.instances,
       max_instances: manifest.container.maxInstances,
       constraints: { tiers: manifest.container.tiers.map(Number) },
-      rollout_active_grace_period: SANDBOX_APPLICATION.rollout_active_grace_period,
+      rollout_active_grace_period: manifest.container.rolloutActiveGracePeriod,
     };
     if (!existing) {
       await this.#opts.cf.containers.applications.create({
@@ -1054,6 +1258,7 @@ export class CloudflareStackControl implements StackControl {
     const constraints = existing.constraints as { tiers?: unknown } | undefined;
     const exact =
       existing.scheduling_policy === applicationBody.scheduling_policy &&
+      existing.instances === applicationBody.instances &&
       existing.max_instances === applicationBody.max_instances &&
       configuration?.image === applicationBody.configuration.image &&
       configuration.instance_type === applicationBody.configuration.instance_type &&

@@ -44,8 +44,11 @@ interface StackContainer {
   readonly platform: { readonly os: string; readonly architecture: string };
   readonly runnerAbi: string;
   readonly instanceType: string;
+  readonly schedulingPolicy: string;
+  readonly instances: number;
   readonly maxInstances: number;
   readonly tiers: readonly string[];
+  readonly rolloutActiveGracePeriod: number;
 }
 
 interface StackSnapshotOwnership {
@@ -85,6 +88,7 @@ export interface StackReceipt {
   readonly container: StackContainer & {
     readonly id: string;
     readonly rolloutId: string;
+    readonly namespaceId: string;
   };
   readonly namespaces: readonly {
     readonly binding: string;
@@ -334,8 +338,11 @@ const assertContainer = (container: StackContainer): void => {
       "platform",
       "runnerAbi",
       "instanceType",
+      "schedulingPolicy",
+      "instances",
       "maxInstances",
       "tiers",
+      "rolloutActiveGracePeriod",
     ],
     "container",
   );
@@ -353,8 +360,11 @@ const assertContainer = (container: StackContainer): void => {
   required(container.platform.architecture, "container architecture", 128);
   required(container.runnerAbi, "runner ABI", 128);
   required(container.instanceType, "container instance type", 128);
+  required(container.schedulingPolicy, "container scheduling policy", 128);
+  assertInteger(container.instances, "container instances");
   assertInteger(container.maxInstances, "container max instances");
   assertStrings(container.tiers, "container tiers", 128);
+  assertInteger(container.rolloutActiveGracePeriod, "container rollout active grace period");
 };
 
 const assertBuckets = (buckets: readonly StackBucket[], receipt: boolean): void => {
@@ -507,8 +517,11 @@ const manifestOf = (receipt: StackReceipt): StackManifest => ({
     platform: receipt.container.platform,
     runnerAbi: receipt.container.runnerAbi,
     instanceType: receipt.container.instanceType,
+    schedulingPolicy: receipt.container.schedulingPolicy,
+    instances: receipt.container.instances,
     maxInstances: receipt.container.maxInstances,
     tiers: receipt.container.tiers,
+    rolloutActiveGracePeriod: receipt.container.rolloutActiveGracePeriod,
   },
   namespaces: receipt.namespaces.map(({ binding, className, name }) => ({
     binding,
@@ -566,15 +579,20 @@ const assertReceipt = (receipt: StackReceipt): void => {
       "platform",
       "runnerAbi",
       "instanceType",
+      "schedulingPolicy",
+      "instances",
       "maxInstances",
       "tiers",
+      "rolloutActiveGracePeriod",
       "id",
       "rolloutId",
+      "namespaceId",
     ],
     "receipt container",
   );
   required(receipt.container.id, "container application id", 512);
   required(receipt.container.rolloutId, "container rollout id", 512);
+  required(receipt.container.namespaceId, "container namespace id", 512);
   if (!Array.isArray(receipt.namespaces)) throw new Error("invalid Stack receipt namespaces");
   for (const namespace of receipt.namespaces) {
     assertKeys(
@@ -973,6 +991,15 @@ export class Stack {
   }> {
     await this.#publishClaims(manifestClaimsOf(this.#manifest));
     const previous = await this.#receipts();
+    const desiredRoutePatterns = new Set(this.#manifest.routes);
+    for (const stored of previous) {
+      await this.#verifyClaims(claimsOf(manifestOf(stored.receipt), stored.receipt));
+      for (const route of resourcesOf(stored.receipt)) {
+        if (route.type === "route" && !desiredRoutePatterns.has(route.pattern)) {
+          await this.#deleteAndVerify(route);
+        }
+      }
+    }
     await this.#control.apply(this.#manifest);
     const receipt = await this.capture();
     const desired = new Set(resourcesOf(receipt).map(resourceKeyOf));

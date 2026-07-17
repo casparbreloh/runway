@@ -97,7 +97,12 @@ class MemoryStack implements StackControl {
         deploymentId: "worker-deployment",
       },
       workflow: { ...manifest.workflow, id: "workflow-id" },
-      container: { ...manifest.container, id: "container-id", rolloutId: "rollout-id" },
+      container: {
+        ...manifest.container,
+        id: "container-id",
+        rolloutId: "rollout-id",
+        namespaceId: "namespace-RunwaySandbox",
+      },
       namespaces: manifest.namespaces.map(({ binding, name, className }) => ({
         binding,
         name,

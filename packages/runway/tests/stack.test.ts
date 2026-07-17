@@ -99,8 +99,11 @@ const manifestOf = (
     platform: { os: "linux", architecture: "amd64" },
     runnerAbi: "runway-sandbox-v1",
     instanceType: "standard-4",
+    schedulingPolicy: "default",
+    instances: 0,
     maxInstances: 20,
     tiers: ["1", "2"],
+    rolloutActiveGracePeriod: 0,
   },
   namespaces: [
     {
@@ -179,8 +182,12 @@ const receiptOf = (manifest: StackManifest, suffix = "1"): StackReceipt => ({
     platform: manifest.container.platform,
     runnerAbi: manifest.container.runnerAbi,
     instanceType: manifest.container.instanceType,
+    schedulingPolicy: manifest.container.schedulingPolicy,
+    instances: manifest.container.instances,
     maxInstances: manifest.container.maxInstances,
     tiers: manifest.container.tiers,
+    rolloutActiveGracePeriod: manifest.container.rolloutActiveGracePeriod,
+    namespaceId: `namespace-RunwaySandbox-${suffix}`,
   },
   namespaces: manifest.namespaces.map(({ binding, className, name }) => ({
     binding,
@@ -351,6 +358,14 @@ class SyncControl extends MemoryControl {
     if (this.#failApply) {
       this.#failApply = false;
       throw new Error("partial provider apply");
+    }
+    const desiredRoutes = new Set(manifest.routes);
+    if (
+      [...this.live.values()].some(
+        (resource) => resource.type === "route" && !desiredRoutes.has(resource.pattern),
+      )
+    ) {
+      throw new Error("stale route reached provider apply");
     }
     this.inventoryAs(manifest, this.#desired.receipt);
     for (const resource of resourcesOf(this.#desired.receipt))
