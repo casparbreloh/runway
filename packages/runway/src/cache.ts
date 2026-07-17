@@ -50,16 +50,40 @@ interface CacheOptions {
   readonly refs: CacheRefs;
   readonly current: () => Promise<boolean>;
   readonly restore?: CacheRestore;
+  readonly snapshots?: CacheSnapshots;
+  readonly diagnose?: (diagnostic: CacheDiagnostic) => void;
 }
 
 interface CacheRestore {
   inspect(path: string): Promise<"absent" | "empty" | "nonempty">;
   stage(request: {
-    readonly object: { readonly digest: string };
+    readonly object: {
+      readonly digest: string;
+      readonly archiveBytes: number;
+      readonly archiveDigest: string;
+      readonly byteCount: number;
+      readonly entryCount: number;
+      readonly fileCount: number;
+      readonly manifest: string;
+      readonly maxDepth: number;
+      readonly treeDigest: string;
+      readonly uniqueInodes: number;
+    };
     readonly path: string;
     readonly budget: CacheDeclaration["budget"];
   }): Promise<
-    | { readonly state: "ready"; readonly bytes: number; readonly digest: string }
+    | {
+        readonly state: "ready";
+        readonly archiveBytes: number;
+        readonly archiveDigest: string;
+        readonly byteCount: number;
+        readonly diskBytes: number;
+        readonly entryCount: number;
+        readonly fileCount: number;
+        readonly maxDepth: number;
+        readonly treeDigest: string;
+        readonly uniqueInodes: number;
+      }
     | {
         readonly state: "miss";
         readonly reason: "absent" | "budget" | "corrupt" | "unavailable";
@@ -67,6 +91,53 @@ interface CacheRestore {
   >;
   remove(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+}
+
+interface SnapshotArchive {
+  readonly path: string;
+  readonly bytes: number;
+  readonly digest: string;
+}
+
+interface SnapshotCapture {
+  readonly state: "ready";
+  readonly archive: SnapshotArchive;
+  readonly entryCount: number;
+  readonly uniqueInodes: number;
+  readonly fileCount: number;
+  readonly byteCount: number;
+  readonly diskBytes: number;
+  readonly maxDepth: number;
+  readonly treeDigest: string;
+  readonly durationMs: number;
+  readonly estimatedCostUsd: number;
+}
+
+interface CacheSnapshots {
+  inspect(path: string): Promise<"absent" | "empty" | "nonempty">;
+  capture(request: {
+    readonly target: string;
+    readonly path: string;
+    readonly budget: CacheDeclaration["budget"];
+  }): Promise<
+    | SnapshotCapture
+    | {
+        readonly state: "skipped";
+        readonly reason: "unsafe" | "corrupt" | "unavailable" | "budget";
+      }
+  >;
+  upload(request: {
+    readonly key: string;
+    readonly path: string;
+    readonly expected: SnapshotArchive;
+  }): Promise<{ readonly state: "stored" | "present" } & SnapshotArchive>;
+  remove(path: string): Promise<void>;
+}
+
+interface CacheDiagnostic {
+  readonly id: string;
+  readonly state: "saved" | "skipped";
+  readonly reason?: "unsafe" | "corrupt" | "unavailable" | "budget" | "conflict";
 }
 
 const bytes = (value: string | Uint8Array): Uint8Array =>
@@ -207,10 +278,13 @@ export const cacheDeclarationEvidence = async (
 const SHA256 = /^[0-9a-f]{64}$/;
 
 interface CacheRef {
+  readonly archiveBytes: number;
+  readonly archiveDigest: string;
   readonly cacheIdDigest: string;
   readonly declarationDigest: string;
   readonly generation: number;
   readonly keyDigest: string;
+  readonly manifest: string;
   readonly objectDigest: string;
   readonly platformDigest: string;
   readonly repositoryDigest: string;
@@ -218,23 +292,69 @@ interface CacheRef {
   readonly scopeDigest: string;
 }
 
-interface CacheRevision extends Omit<CacheRef, "objectDigest"> {
+interface CacheRevision extends Omit<
+  CacheRef,
+  "archiveBytes" | "archiveDigest" | "manifest" | "objectDigest"
+> {
   readonly ref: string;
   readonly etag: string | null;
 }
 
+export interface PendingCache {
+  readonly schema: 1;
+  readonly id: string;
+  readonly declaration: CacheDeclaration;
+  readonly target: string;
+  readonly revision: CacheRevision;
+}
+
+export type PreparedCache =
+  | {
+      readonly state: "ready";
+      readonly pending: PendingCache;
+      readonly object: {
+        readonly digest: string;
+        readonly key: string;
+        readonly archiveBytes: number;
+        readonly archiveDigest: string;
+        readonly manifest: string;
+      };
+    }
+  | {
+      readonly state: "skipped";
+      readonly id: string;
+      readonly reason: "unsafe" | "corrupt" | "unavailable" | "budget";
+    };
+
 const canonicalRef = (ref: CacheRef): string =>
   JSON.stringify({
+    archiveBytes: ref.archiveBytes,
+    archiveDigest: ref.archiveDigest,
     cacheIdDigest: ref.cacheIdDigest,
     declarationDigest: ref.declarationDigest,
     generation: ref.generation,
     keyDigest: ref.keyDigest,
+    manifest: ref.manifest,
     objectDigest: ref.objectDigest,
     platformDigest: ref.platformDigest,
     repositoryDigest: ref.repositoryDigest,
     schema: ref.schema,
     scopeDigest: ref.scopeDigest,
   });
+
+const canonicalJson = (text: string): boolean => {
+  try {
+    const value: unknown = JSON.parse(text);
+    return (
+      !!value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      JSON.stringify(value) === text
+    );
+  } catch {
+    return false;
+  }
+};
 
 const parseRef = (text: string): CacheRef => {
   let value: unknown;
@@ -249,12 +369,18 @@ const parseRef = (text: string): CacheRef => {
   const record = value as Record<string, unknown>;
   if (
     Object.keys(record).sort().join(",") !==
-      "cacheIdDigest,declarationDigest,generation,keyDigest,objectDigest,platformDigest,repositoryDigest,schema,scopeDigest" ||
+      "archiveBytes,archiveDigest,cacheIdDigest,declarationDigest,generation,keyDigest,manifest,objectDigest,platformDigest,repositoryDigest,schema,scopeDigest" ||
+    !Number.isSafeInteger(record.archiveBytes) ||
+    (record.archiveBytes as number) < 0 ||
+    typeof record.archiveDigest !== "string" ||
     typeof record.cacheIdDigest !== "string" ||
     typeof record.declarationDigest !== "string" ||
     !Number.isSafeInteger(record.generation) ||
     (record.generation as number) < 1 ||
     typeof record.keyDigest !== "string" ||
+    typeof record.manifest !== "string" ||
+    byteLength(record.manifest) > 16 * 1024 ||
+    !canonicalJson(record.manifest) ||
     typeof record.objectDigest !== "string" ||
     typeof record.platformDigest !== "string" ||
     typeof record.repositoryDigest !== "string" ||
@@ -262,6 +388,7 @@ const parseRef = (text: string): CacheRef => {
     typeof record.scopeDigest !== "string" ||
     ![
       record.cacheIdDigest,
+      record.archiveDigest,
       record.declarationDigest,
       record.keyDigest,
       record.objectDigest,
@@ -279,7 +406,10 @@ const parseRef = (text: string): CacheRef => {
 
 const assertRefIdentity = (
   ref: CacheRef,
-  expected: Omit<CacheRef, "generation" | "objectDigest">,
+  expected: Omit<
+    CacheRef,
+    "archiveBytes" | "archiveDigest" | "generation" | "manifest" | "objectDigest"
+  >,
 ): void => {
   for (const key of Object.keys(expected) as Array<keyof typeof expected>) {
     if (ref[key] !== expected[key]) throw new CacheError("cache ref identity mismatch");
@@ -328,6 +458,145 @@ const keyDigest = async (key: CacheKey, files: CacheFiles): Promise<string> => {
   return digest(fields);
 };
 
+const sameArchive = (left: SnapshotArchive, right: SnapshotArchive): boolean =>
+  left.path === right.path && left.bytes === right.bytes && left.digest === right.digest;
+
+const safeInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
+
+const validateCapture = (capture: SnapshotCapture, budget: CacheDeclaration["budget"]): void => {
+  if (
+    !safeInteger(capture.archive.bytes) ||
+    !SHA256.test(capture.archive.digest) ||
+    !safeInteger(capture.fileCount) ||
+    !safeInteger(capture.byteCount) ||
+    !safeInteger(capture.diskBytes) ||
+    !safeInteger(capture.entryCount) ||
+    !safeInteger(capture.uniqueInodes) ||
+    !safeInteger(capture.maxDepth) ||
+    !SHA256.test(capture.treeDigest) ||
+    !safeInteger(capture.durationMs) ||
+    !Number.isFinite(capture.estimatedCostUsd) ||
+    capture.estimatedCostUsd < 0 ||
+    capture.entryCount > 1_000_000 ||
+    capture.uniqueInodes > capture.entryCount ||
+    capture.fileCount > capture.entryCount ||
+    capture.maxDepth > 256
+  ) {
+    throw new CacheError("corrupt cache snapshot");
+  }
+  if (
+    (budget?.maxBytes !== undefined &&
+      Math.max(capture.archive.bytes, capture.byteCount, capture.diskBytes) > budget.maxBytes) ||
+    (budget?.maxDurationMs !== undefined && capture.durationMs > budget.maxDurationMs) ||
+    (budget?.maxEstimatedCostUsd !== undefined &&
+      capture.estimatedCostUsd > budget.maxEstimatedCostUsd)
+  ) {
+    throw new CacheError("cache snapshot exceeds budget");
+  }
+};
+
+const manifestOf = (
+  pending: PendingCache,
+  context: CacheContext,
+  capture: SnapshotCapture,
+): string =>
+  JSON.stringify({
+    archiveDigest: capture.archive.digest,
+    byteCount: capture.byteCount,
+    declarationDigest: pending.revision.declarationDigest,
+    entryCount: capture.entryCount,
+    fileCount: capture.fileCount,
+    keyDigest: pending.revision.keyDigest,
+    maxDepth: capture.maxDepth,
+    name: pending.id,
+    platform: {
+      architecture: context.platform.architecture,
+      imageDigest: context.platform.imageDigest,
+      os: context.platform.os,
+      runnerAbi: context.platform.runnerAbi,
+    },
+    schema: context.platform.schema,
+    target: pending.target,
+    treeDigest: capture.treeDigest,
+    uniqueInodes: capture.uniqueInodes,
+  });
+
+const validateStoredObject = async (
+  ref: CacheRef,
+  expected: Omit<
+    CacheRef,
+    "archiveBytes" | "archiveDigest" | "generation" | "manifest" | "objectDigest"
+  >,
+  name: string,
+  target: string,
+  context: CacheContext,
+): Promise<{
+  readonly byteCount: number;
+  readonly entryCount: number;
+  readonly fileCount: number;
+  readonly maxDepth: number;
+  readonly treeDigest: string;
+  readonly uniqueInodes: number;
+}> => {
+  let value: unknown;
+  try {
+    value = JSON.parse(ref.manifest);
+  } catch {
+    throw new CacheError("invalid cache manifest");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new CacheError("invalid cache manifest");
+  }
+  const record = value as Record<string, unknown>;
+  const platform = record.platform;
+  if (
+    Object.keys(record).join(",") !==
+      "archiveDigest,byteCount,declarationDigest,entryCount,fileCount,keyDigest,maxDepth,name,platform,schema,target,treeDigest,uniqueInodes" ||
+    !platform ||
+    typeof platform !== "object" ||
+    Array.isArray(platform) ||
+    Object.keys(platform).join(",") !== "architecture,imageDigest,os,runnerAbi" ||
+    !safeInteger(record.byteCount as number) ||
+    !safeInteger(record.entryCount as number) ||
+    !safeInteger(record.fileCount as number) ||
+    !safeInteger(record.maxDepth as number) ||
+    !safeInteger(record.uniqueInodes as number) ||
+    typeof record.treeDigest !== "string" ||
+    !SHA256.test(record.treeDigest) ||
+    (record.fileCount as number) > (record.entryCount as number) ||
+    (record.uniqueInodes as number) > (record.entryCount as number) ||
+    (record.maxDepth as number) > 256 ||
+    record.archiveDigest !== ref.archiveDigest ||
+    record.declarationDigest !== expected.declarationDigest ||
+    record.keyDigest !== expected.keyDigest ||
+    record.name !== name ||
+    record.schema !== expected.schema ||
+    record.target !== target ||
+    (platform as Record<string, unknown>).architecture !== context.platform.architecture ||
+    (platform as Record<string, unknown>).imageDigest !== context.platform.imageDigest ||
+    (platform as Record<string, unknown>).os !== context.platform.os ||
+    (platform as Record<string, unknown>).runnerAbi !== context.platform.runnerAbi ||
+    JSON.stringify(record) !== ref.manifest
+  ) {
+    throw new CacheError("invalid cache manifest");
+  }
+  const expectedDigest = await digest([
+    "cache-object",
+    ref.manifest,
+    ref.archiveDigest,
+    String(ref.archiveBytes),
+  ]);
+  if (expectedDigest !== ref.objectDigest) throw new CacheError("invalid cache object evidence");
+  return {
+    byteCount: record.byteCount as number,
+    entryCount: record.entryCount as number,
+    fileCount: record.fileCount as number,
+    maxDepth: record.maxDepth as number,
+    treeDigest: record.treeDigest,
+    uniqueInodes: record.uniqueInodes as number,
+  };
+};
+
 export class Cache {
   readonly #context: CacheContext;
   readonly #current: () => Promise<boolean>;
@@ -337,11 +606,15 @@ export class Cache {
       readonly cacheIdDigest?: string;
       readonly declarationDigest: string;
       readonly keyDigest?: string;
+      readonly target: string;
     }
   >();
+  readonly #pending = new Map<string, PendingCache>();
   readonly #files: CacheFiles;
   readonly #refs: CacheRefs;
   readonly #restore: CacheRestore | undefined;
+  readonly #snapshots: CacheSnapshots | undefined;
+  readonly #diagnose: (diagnostic: CacheDiagnostic) => void;
 
   constructor(options: CacheOptions) {
     this.#context = options.context;
@@ -349,6 +622,209 @@ export class Cache {
     this.#files = options.files;
     this.#refs = options.refs;
     this.#restore = options.restore;
+    this.#snapshots = options.snapshots;
+    this.#diagnose = options.diagnose ?? (() => {});
+  }
+
+  async record(id: string, declaration: CacheDeclaration) {
+    const result = await this.restore(id, declaration);
+    const pending = this.#pending.get(id);
+    return pending ? { result, pending } : { result };
+  }
+
+  async #validatePending(pending: PendingCache): Promise<void> {
+    if (
+      !pending ||
+      typeof pending !== "object" ||
+      Object.keys(pending).sort().join(",") !== "declaration,id,revision,schema,target" ||
+      pending.schema !== 1 ||
+      normalizedCacheTarget(pending.declaration.path) !== pending.target ||
+      (pending.revision.etag !== null && !validText(pending.revision.etag, 1, 1024))
+    ) {
+      throw new CacheError("invalid pending cache");
+    }
+    const declarationKeys = Object.keys(pending.declaration).sort().join(",");
+    if (!(["key,path", "budget,key,path"] as const).includes(declarationKeys as never)) {
+      throw new CacheError("invalid pending cache");
+    }
+    const budget = pending.declaration.budget;
+    if (
+      budget &&
+      ![
+        "maxBytes",
+        "maxDurationMs",
+        "maxEstimatedCostUsd",
+        "maxBytes,maxDurationMs",
+        "maxBytes,maxEstimatedCostUsd",
+        "maxDurationMs,maxEstimatedCostUsd",
+        "maxBytes,maxDurationMs,maxEstimatedCostUsd",
+      ].includes(Object.keys(budget).sort().join(","))
+    ) {
+      throw new CacheError("invalid pending cache");
+    }
+    await cacheDeclarationEvidence(pending.declaration);
+    validateId(pending.id);
+    validateKeyDefinition(pending.declaration.key);
+    if (
+      !pending.revision ||
+      typeof pending.revision !== "object" ||
+      Object.keys(pending.revision).sort().join(",") !==
+        "cacheIdDigest,declarationDigest,etag,generation,keyDigest,platformDigest,ref,repositoryDigest,schema,scopeDigest" ||
+      !SHA256.test(pending.revision.keyDigest)
+    ) {
+      throw new CacheError("invalid pending cache");
+    }
+    const scopePlan = scopes(this.#context);
+    if ("policy" in scopePlan) throw new CacheError("invalid pending cache");
+    const [repositoryDigest, scopeDigest, cacheIdDigest, platformDigest, declarationDigest] =
+      await Promise.all([
+        digest(["repository", this.#context.repositoryId]),
+        digest(["scope", this.#context.repositoryId, scopePlan.write]),
+        digest(["cache-id", pending.id]),
+        digest([
+          "platform",
+          String(this.#context.platform.schema),
+          this.#context.platform.os,
+          this.#context.platform.architecture,
+          this.#context.platform.imageDigest ?? "",
+          this.#context.platform.runnerAbi,
+        ]),
+        digest([
+          "declaration",
+          pending.id,
+          pending.target,
+          ...keyDefinition(pending.declaration.key),
+          String(this.#context.platform.schema),
+        ]),
+      ]);
+    const expected = {
+      cacheIdDigest,
+      declarationDigest,
+      generation: this.#context.generation,
+      platformDigest,
+      repositoryDigest,
+      schema: this.#context.platform.schema,
+      scopeDigest,
+      ref: `refs/${repositoryDigest}/${scopeDigest}/${cacheIdDigest}/${pending.revision.keyDigest}/${platformDigest}.json`,
+    };
+    if (
+      Object.entries(expected).some(
+        ([field, value]) => pending.revision[field as keyof typeof expected] !== value,
+      )
+    ) {
+      throw new CacheError("invalid pending cache");
+    }
+    this.#declarations.set(pending.id, {
+      cacheIdDigest,
+      declarationDigest,
+      keyDigest: pending.revision.keyDigest,
+      target: pending.target,
+    });
+  }
+
+  async prepare(pendingCaches: readonly PendingCache[]): Promise<readonly PreparedCache[]> {
+    const snapshots = this.#snapshots;
+    if (!snapshots) {
+      return pendingCaches.map((pending) => ({
+        state: "skipped" as const,
+        id: pending.id,
+        reason: "unavailable" as const,
+      }));
+    }
+    const prepared: PreparedCache[] = [];
+    for (const pending of pendingCaches) {
+      let path: string | undefined;
+      try {
+        await this.#validatePending(pending);
+        const slash = pending.target.lastIndexOf("/");
+        path = `${pending.target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}.sqsh`;
+        const capture = await snapshots.capture({
+          target: pending.target,
+          path,
+          budget: pending.declaration.budget,
+        });
+        if (capture.state === "skipped") {
+          this.#diagnose({ id: pending.id, state: "skipped", reason: capture.reason });
+          prepared.push({ state: "skipped", id: pending.id, reason: capture.reason });
+          continue;
+        }
+        if (capture.archive.path !== path) throw new CacheError("corrupt cache snapshot");
+        validateCapture(capture, pending.declaration.budget);
+        const manifest = manifestOf(pending, this.#context, capture);
+        if (byteLength(manifest) > 16 * 1024) throw new CacheError("corrupt cache snapshot");
+        const objectDigest = await digest([
+          "cache-object",
+          manifest,
+          capture.archive.digest,
+          String(capture.archive.bytes),
+        ]);
+        const key = `content/${objectDigest}.sqsh`;
+        const uploaded = await snapshots.upload({ key, path, expected: capture.archive });
+        if (
+          !["stored", "present"].includes(uploaded.state) ||
+          !sameArchive(uploaded, capture.archive)
+        ) {
+          throw new CacheError("corrupt cache snapshot");
+        }
+        prepared.push({
+          state: "ready",
+          pending: structuredClone(pending),
+          object: {
+            digest: objectDigest,
+            key,
+            archiveBytes: capture.archive.bytes,
+            archiveDigest: capture.archive.digest,
+            manifest,
+          },
+        });
+      } catch (error) {
+        const reason =
+          error instanceof CacheError && error.message.includes("unsafe")
+            ? "unsafe"
+            : error instanceof CacheError && error.message.includes("budget")
+              ? "budget"
+              : error instanceof CacheError && error.message.includes("corrupt")
+                ? "corrupt"
+                : "unavailable";
+        this.#diagnose({ id: pending.id, state: "skipped", reason });
+        prepared.push({ state: "skipped", id: pending.id, reason });
+      } finally {
+        if (path) await snapshots.remove(path).catch(() => {});
+      }
+    }
+    return prepared;
+  }
+
+  async commit(preparedCaches: readonly PreparedCache[]): Promise<void> {
+    for (const prepared of preparedCaches) {
+      if (prepared.state === "skipped") continue;
+      try {
+        await this.#validatePending(prepared.pending);
+        if (
+          !prepared.object ||
+          Object.keys(prepared.object).sort().join(",") !==
+            "archiveBytes,archiveDigest,digest,key,manifest" ||
+          !SHA256.test(prepared.object.digest) ||
+          !SHA256.test(prepared.object.archiveDigest) ||
+          !safeInteger(prepared.object.archiveBytes) ||
+          prepared.object.key !== `content/${prepared.object.digest}.sqsh` ||
+          prepared.object.manifest !==
+            JSON.stringify(JSON.parse(prepared.object.manifest) as Record<string, unknown>) ||
+          byteLength(prepared.object.manifest) > 16 * 1024
+        ) {
+          throw new CacheError("invalid prepared cache");
+        }
+        await this.publish(prepared.pending.revision, {
+          digest: prepared.object.digest,
+          archiveBytes: prepared.object.archiveBytes,
+          archiveDigest: prepared.object.archiveDigest,
+          manifest: prepared.object.manifest,
+        });
+        this.#diagnose({ id: prepared.pending.id, state: "saved" });
+      } catch {
+        this.#diagnose({ id: prepared.pending.id, state: "skipped", reason: "conflict" });
+      }
+    }
   }
 
   async restore(id: string, declaration: CacheDeclaration) {
@@ -359,7 +835,11 @@ export class Cache {
       lookup = await this.lookup(id, declaration);
     } catch (error) {
       if (error instanceof CacheError) {
-        if (error.message === "invalid cache ref") {
+        if (
+          error.message === "invalid cache ref" ||
+          error.message === "invalid cache manifest" ||
+          error.message === "invalid cache object evidence"
+        ) {
           return { state: "miss" as const, reason: "corrupt" as const };
         }
         throw error;
@@ -367,26 +847,42 @@ export class Cache {
       return { state: "miss" as const, reason: "unavailable" as const };
     }
     if (lookup.state === "skipped") {
+      this.#pending.delete(id);
       return { state: "skipped" as const, reason: lookup.reason };
+    }
+    const restore = this.#restore;
+    const inspector = restore ?? this.#snapshots;
+    const target = normalizedCacheTarget(declaration.path);
+    if (lookup.revision && inspector) {
+      let targetState: Awaited<ReturnType<CacheRestore["inspect"]>>;
+      try {
+        targetState = await inspector.inspect(target);
+      } catch {
+        this.#pending.delete(id);
+        return { state: "miss" as const, reason: "unavailable" as const };
+      }
+      if (!(["absent", "empty", "nonempty"] as const).includes(targetState)) {
+        this.#pending.delete(id);
+        return { state: "miss" as const, reason: "corrupt" as const };
+      }
+      if (targetState === "nonempty") {
+        this.#pending.delete(id);
+        return { state: "skipped" as const, reason: "target" as const };
+      }
+      this.#pending.set(id, {
+        schema: 1,
+        id,
+        declaration: structuredClone(declaration),
+        target,
+        revision: lookup.revision,
+      });
+    } else {
+      this.#pending.delete(id);
     }
     if (lookup.state === "miss") {
       return { state: "miss" as const, reason: lookup.reason ?? ("absent" as const) };
     }
-    const restore = this.#restore;
     if (!restore) return { state: "miss" as const, reason: "unavailable" as const };
-    const target = normalizedCacheTarget(declaration.path);
-    let targetState: Awaited<ReturnType<CacheRestore["inspect"]>>;
-    try {
-      targetState = await restore.inspect(target);
-    } catch {
-      return { state: "miss" as const, reason: "unavailable" as const };
-    }
-    if (!(["absent", "empty", "nonempty"] as const).includes(targetState)) {
-      return { state: "miss" as const, reason: "corrupt" as const };
-    }
-    if (targetState === "nonempty") {
-      return { state: "skipped" as const, reason: "target" as const };
-    }
     const slash = target.lastIndexOf("/");
     const staging = `${target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}`;
     let staged: Awaited<ReturnType<CacheRestore["stage"]>>;
@@ -411,15 +907,31 @@ export class Cache {
       return { state: "miss" as const, reason: "corrupt" as const };
     }
     if (
-      Object.keys(staged).sort().join(",") !== "bytes,digest,state" ||
-      staged.digest !== lookup.object.digest ||
-      !Number.isSafeInteger(staged.bytes) ||
-      staged.bytes < 0
+      Object.keys(staged).sort().join(",") !==
+        "archiveBytes,archiveDigest,byteCount,diskBytes,entryCount,fileCount,maxDepth,state,treeDigest,uniqueInodes" ||
+      staged.archiveBytes !== lookup.object.archiveBytes ||
+      staged.archiveDigest !== lookup.object.archiveDigest ||
+      staged.byteCount !== lookup.object.byteCount ||
+      staged.entryCount !== lookup.object.entryCount ||
+      staged.fileCount !== lookup.object.fileCount ||
+      staged.maxDepth !== lookup.object.maxDepth ||
+      staged.treeDigest !== lookup.object.treeDigest ||
+      staged.uniqueInodes !== lookup.object.uniqueInodes ||
+      !safeInteger(staged.byteCount) ||
+      !safeInteger(staged.diskBytes) ||
+      !safeInteger(staged.entryCount) ||
+      !safeInteger(staged.fileCount) ||
+      !safeInteger(staged.maxDepth) ||
+      !safeInteger(staged.uniqueInodes)
     ) {
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "corrupt" as const };
     }
-    if (declaration.budget?.maxBytes !== undefined && staged.bytes > declaration.budget.maxBytes) {
+    if (
+      declaration.budget?.maxBytes !== undefined &&
+      Math.max(staged.archiveBytes, staged.byteCount, staged.diskBytes) >
+        declaration.budget.maxBytes
+    ) {
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "budget" as const };
     }
@@ -429,7 +941,7 @@ export class Cache {
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "unavailable" as const };
     }
-    return { state: "hit" as const, bytes: staged.bytes };
+    return { state: "hit" as const, bytes: staged.byteCount };
   }
 
   async lookup(id: string, declaration: CacheDeclaration) {
@@ -454,7 +966,7 @@ export class Cache {
     if (previous !== undefined && previous.declarationDigest !== declarationDigest) {
       throw new CacheError(`cache declaration collision for ${id}`);
     }
-    const reservation = previous ?? { declarationDigest };
+    const reservation = previous ?? { declarationDigest, target };
     if (!previous) this.#declarations.set(id, reservation);
     let key: string;
     try {
@@ -477,7 +989,12 @@ export class Cache {
         this.#context.platform.runnerAbi,
       ]),
     ]);
-    this.#declarations.set(id, { cacheIdDigest: cacheId, declarationDigest, keyDigest: key });
+    this.#declarations.set(id, {
+      cacheIdDigest: cacheId,
+      declarationDigest,
+      keyDigest: key,
+      target,
+    });
     const refs = await Promise.all(
       scopePlan.reads.map(async (scope) => {
         const scopeDigest = await digest(["scope", this.#context.repositoryId, scope]);
@@ -502,9 +1019,22 @@ export class Cache {
       if (!observed) continue;
       const stored = parseRef(await observed.text());
       assertRefIdentity(stored, candidate.identity);
+      const manifest = await validateStoredObject(
+        stored,
+        candidate.identity,
+        id,
+        target,
+        this.#context,
+      );
       return {
         state: "hit" as const,
-        object: { digest: stored.objectDigest },
+        object: {
+          digest: stored.objectDigest,
+          archiveBytes: stored.archiveBytes,
+          archiveDigest: stored.archiveDigest,
+          ...manifest,
+          manifest: stored.manifest,
+        },
         revision: {
           ...refs[0]!.identity,
           ref: refs[0]!.ref,
@@ -525,19 +1055,36 @@ export class Cache {
     };
   }
 
-  async publish(revision: CacheRevision, object: { readonly digest: string }) {
-    if (!revision || !object || !SHA256.test(object.digest)) {
+  async publish(
+    revision: CacheRevision,
+    object: {
+      readonly digest: string;
+      readonly archiveBytes: number;
+      readonly archiveDigest: string;
+      readonly manifest: string;
+    },
+  ) {
+    if (
+      !revision ||
+      !object ||
+      !SHA256.test(object.digest) ||
+      !SHA256.test(object.archiveDigest) ||
+      !safeInteger(object.archiveBytes) ||
+      byteLength(object.manifest) > 16 * 1024 ||
+      !canonicalJson(object.manifest)
+    ) {
       throw new CacheError("invalid cache publication");
     }
-    const declaration = [...this.#declarations.values()].find(
-      (candidate) =>
+    const declared = [...this.#declarations.entries()].find(
+      ([, candidate]) =>
         candidate.cacheIdDigest !== undefined &&
         candidate.keyDigest !== undefined &&
         candidate.cacheIdDigest === revision.cacheIdDigest &&
         candidate.declarationDigest === revision.declarationDigest &&
         candidate.keyDigest === revision.keyDigest,
     );
-    if (!declaration) throw new CacheError("blind cache publication");
+    if (!declared) throw new CacheError("blind cache publication");
+    const [id, declaration] = declared;
     const scopePlan = scopes(this.#context);
     if ("policy" in scopePlan) throw new CacheError("cache publication denied by policy");
     const [repositoryDigest, scopeDigest, platformDigest] = await Promise.all([
@@ -574,9 +1121,13 @@ export class Cache {
     if (!(await this.#current())) throw new CacheError("cache publication superseded");
     const ref: CacheRef = {
       ...expected,
+      archiveBytes: object.archiveBytes,
+      archiveDigest: object.archiveDigest,
       generation: revision.generation,
+      manifest: object.manifest,
       objectDigest: object.digest,
     };
+    await validateStoredObject(ref, expected, id, declaration.target, this.#context);
     let onlyIf =
       revision.etag === null ? { etagDoesNotMatch: "*" } : { etagMatches: revision.etag };
     for (let attempt = 0; attempt < 8; attempt += 1) {

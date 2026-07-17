@@ -1,11 +1,12 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { cron, ExecError, github, webhook, workflow } from "runway";
-import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "runway";
+import type { CacheDeclaration, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
-import { Cache } from "../src/cache.ts";
+import { Cache, normalizedCacheTarget } from "../src/cache.ts";
 import { createRouter } from "../src/router.ts";
+import type { RuntimeBinding } from "../src/runtime-binding.ts";
 import type { PreparedSource, SourceIdentity } from "../src/source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "../src/terminal.ts";
 import { repositoryFixture } from "./repository-fixture.ts";
@@ -622,7 +623,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     declaration: CacheDeclaration;
     secrets: Readonly<Record<string, string>>;
     source: PreparedSource;
-  }): Promise<CacheResult> {
+  }) {
     cacheRequests.push(structuredClone(request));
     const cache =
       cacheSessions.get(request.runId) ??
@@ -652,7 +653,18 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
         current: async () => true,
         restore: {
           inspect: async () => "absent",
-          stage: async ({ object }) => ({ state: "ready", bytes: 37, digest: object.digest }),
+          stage: async ({ object }) => ({
+            state: "ready",
+            archiveBytes: object.archiveBytes,
+            archiveDigest: object.archiveDigest,
+            byteCount: object.byteCount,
+            diskBytes: object.byteCount,
+            entryCount: object.entryCount,
+            fileCount: object.fileCount,
+            maxDepth: object.maxDepth,
+            treeDigest: object.treeDigest,
+            uniqueInodes: object.uniqueInodes,
+          }),
           remove: async () => {},
           rename: async () => {},
         },
@@ -660,12 +672,75 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     cacheSessions.set(request.runId, cache);
     if (request.declaration.key === "hit") {
       const lookup = await cache.lookup(request.id, request.declaration);
-      if (lookup.revision) await cache.publish(lookup.revision, { digest: "a".repeat(64) });
+      if (lookup.revision) {
+        const archiveDigest = "9".repeat(64);
+        const archiveBytes = 37;
+        const manifest = JSON.stringify({
+          archiveDigest,
+          byteCount: 37,
+          declarationDigest: lookup.revision.declarationDigest,
+          entryCount: 1,
+          fileCount: 1,
+          keyDigest: lookup.revision.keyDigest,
+          maxDepth: 1,
+          name: request.id,
+          platform: {
+            architecture: "x86_64",
+            imageDigest: `sha256:${"1".repeat(64)}`,
+            os: "linux",
+            runnerAbi: "runway-1",
+          },
+          schema: 1,
+          target: normalizedCacheTarget(request.declaration.path),
+          treeDigest: "8".repeat(64),
+          uniqueInodes: 1,
+        });
+        const fields = ["cache-object", manifest, archiveDigest, String(archiveBytes)].map(
+          (field) => new TextEncoder().encode(field),
+        );
+        const canonical = new Uint8Array(
+          fields.reduce((total, field) => total + field.byteLength + 8, 0),
+        );
+        const view = new DataView(canonical.buffer);
+        let offset = 0;
+        for (const field of fields) {
+          view.setBigUint64(offset, BigInt(field.byteLength));
+          offset += 8;
+          canonical.set(field, offset);
+          offset += field.byteLength;
+        }
+        const objectDigest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", canonical))]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+        await cache.publish(lookup.revision, {
+          digest: objectDigest,
+          archiveBytes,
+          archiveDigest,
+          manifest,
+        });
+      }
     }
-    const result = await cache.restore(request.id, request.declaration);
+    const record = await cache.record(request.id, request.declaration);
+    const result = record.result;
     runtimeLifecycleEvents.push(`cache:${result.state}:${request.source.result.revision}`);
     if (result.state === "hit") traceCacheExec = true;
-    return result;
+    return record;
+  }
+
+  async quiesce(): Promise<void> {
+    runtimeLifecycleEvents.push("cache:quiesce");
+  }
+
+  async prepareCaches(request: Parameters<RuntimeBinding["prepareCaches"]>[0]) {
+    return request.pending.map((pending) => ({
+      state: "skipped" as const,
+      id: pending.id,
+      reason: "unavailable" as const,
+    }));
+  }
+
+  async publishCaches(request: Parameters<RuntimeBinding["publishCaches"]>[0]): Promise<void> {
+    runtimeLifecycleEvents.push(`cache:publish:${request.finalization.outcome}`);
   }
 
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {

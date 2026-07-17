@@ -11,6 +11,7 @@ import {
 } from "./sandbox-config.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
+  CACHE_SECRET_BINDINGS,
   COMPATIBILITY_DATE,
   DYNAMIC_WORKFLOW_CLASS,
   GITHUB_SECRET_BINDINGS,
@@ -40,6 +41,9 @@ export const validateBindings = (secrets: ReadonlyArray<string>): void => {
   names.set(GITHUB_COORDINATOR_BINDING, "Runway GitHub coordinator binding");
   for (const binding of GITHUB_SECRET_BINDINGS) {
     names.set(binding, "Runway GitHub App binding");
+  }
+  for (const binding of CACHE_SECRET_BINDINGS) {
+    names.set(binding, "Runway cache transport binding");
   }
   for (const secret of secrets) {
     if (isSecretSnapshotKeyBinding(secret)) {

@@ -42,6 +42,10 @@ class MemoryPlacement {
   readonly processes = new Map<string, Process>();
   readonly killed = new Set<string>();
   readonly environments: ReadonlyArray<Record<string, string>> = [];
+  readonly sessionEvents: string[] = [];
+  readonly sessionRenames: Array<{ readonly from: string; readonly to: string }> = [];
+  readonly sessionFiles = new Map<string, string>();
+  readonly sessionModes = new Map<string, number>();
   destroyed = false;
   #controllers = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
   #outcomes: Outcome[];
@@ -151,8 +155,79 @@ class MemoryPlacement {
   }
 
   killAllProcesses(): Promise<void> {
+    this.sessionEvents.push("kill-all");
     for (const id of this.processes.keys()) this.killed.add(id);
     return Promise.resolve();
+  }
+
+  createSession(): Promise<{
+    readonly id: string;
+    exec(command: string): Promise<{ readonly success: boolean; readonly stdout: string }>;
+    writeFile(path: string, contents: string): Promise<{ readonly success: boolean }>;
+    deleteFile(path: string): Promise<{ readonly success: boolean }>;
+    renameFile(from: string, to: string): Promise<{ readonly success: boolean }>;
+    killAllProcesses(): Promise<void>;
+  }> {
+    this.sessionEvents.push("session:create");
+    return Promise.resolve({
+      id: "internal-session",
+      exec: async (command) => {
+        this.sessionEvents.push("session:exec");
+        if (command.startsWith("chmod 600 ")) {
+          const capability = [...this.sessionFiles].find(([, contents]) =>
+            contents.includes("cloudflarestorage.com"),
+          );
+          if (!capability) return { success: false, stdout: "" };
+          this.sessionModes.set(capability[0], 0o600);
+        }
+        if (command.startsWith("chmod 700 ")) {
+          const helper = [...this.sessionFiles.keys()].find((path) => path.includes("helper"));
+          if (!helper) return { success: false, stdout: "" };
+          this.sessionModes.set(helper, 0o700);
+        }
+        if (command.includes("curl") && command.includes("-X PUT")) {
+          const capability = [...this.sessionFiles].find(([, contents]) =>
+            contents.includes("cloudflarestorage.com"),
+          );
+          const quiesced =
+            this.sessionEvents.indexOf("kill-all") <
+            this.sessionEvents.indexOf("session:create", 1);
+          if (!capability || this.sessionModes.get(capability[0]) !== 0o600 || !quiesced) {
+            return { success: false, stdout: "" };
+          }
+          return { success: true, stdout: "201" };
+        }
+        if (command.includes("stat -c")) {
+          return { success: true, stdout: `4\n${"a".repeat(64)}\n` };
+        }
+        return { success: true, stdout: "{}" };
+      },
+      writeFile: async (path, contents) => {
+        this.sessionEvents.push("session:write");
+        this.sessionFiles.set(path, contents);
+        this.sessionModes.set(path, 0o644);
+        return { success: true };
+      },
+      deleteFile: async (path) => {
+        this.sessionEvents.push("session:delete");
+        this.sessionFiles.delete(path);
+        this.sessionModes.delete(path);
+        return { success: true };
+      },
+      renameFile: async (from, to) => {
+        this.sessionEvents.push("session:rename");
+        this.sessionRenames.push({ from, to });
+        return { success: true };
+      },
+      killAllProcesses: async () => {
+        this.sessionEvents.push("session:kill-all");
+      },
+    });
+  }
+
+  deleteSession(): Promise<{ readonly success: boolean }> {
+    this.sessionEvents.push("session:delete-session");
+    return Promise.resolve({ success: true });
   }
 
   destroy(): Promise<void> {
@@ -205,6 +280,51 @@ test("a durable retry reconnects to the exact recorded process without another s
     retried: { exitCode: 0, stdout: "", stderr: "", durationMs: expect.any(Number) },
     starts: [expect.any(String)],
   });
+});
+
+test("private cache sessions quiesce globally, hide capabilities, rename atomically, and clean up", async () => {
+  const placement = new MemoryPlacement();
+  const sandbox = cloudflareSandbox({
+    placement: () => placement,
+    repository: repositoryFixture,
+    log: () => {},
+  });
+  const process = await sandbox.cacheProcess("cache-run", []);
+  await process.write("/tmp/helper", "private helper");
+  await process.rename("/cache/.staging", "/cache/target");
+  await process.remove("/tmp/helper");
+  await process.close();
+
+  const transfer = await sandbox.cacheTransfer("cache-run", []).quiesce();
+  const capability = {
+    method: "PUT" as const,
+    url: "https://account.r2.cloudflarestorage.com/private?signature=BEARER",
+    headers: { "if-none-match": "*" },
+    expiresAtMs: Date.now() + 1000,
+  };
+  await expect(transfer.upload({ path: "/cache/archive", capability })).resolves.toBe("stored");
+  await transfer.close();
+
+  expect(placement.sessionRenames).toEqual([{ from: "/cache/.staging", to: "/cache/target" }]);
+  expect(placement.sessionEvents).toEqual([
+    "session:create",
+    "session:write",
+    "session:exec",
+    "session:rename",
+    "session:delete",
+    "session:kill-all",
+    "session:delete-session",
+    "kill-all",
+    "session:create",
+    "session:write",
+    "session:exec",
+    "session:exec",
+    "session:delete",
+    "session:kill-all",
+    "session:delete-session",
+  ]);
+  expect(placement.sessionFiles).toEqual(new Map());
+  expect(placement.sessionModes).toEqual(new Map());
 });
 
 test("placement replacement before any user command reconstructs the exact source", async () => {

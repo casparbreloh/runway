@@ -1,9 +1,10 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
+import type { PreparedCache } from "./cache.ts";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
-import type { CacheResult, RunOperations } from "./run.ts";
+import type { RunOperations } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
 import { source } from "./source.ts";
@@ -14,9 +15,76 @@ import type { WorkflowDefinition } from "./types.ts";
 import { RUNTIME_BINDING } from "./worker-contract.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
+const CACHE_PREPARE_STEP = "runway:cache-prepare";
+const CACHE_PUBLISH_STEP = "runway:cache-publish";
 const TERMINAL_START_STEP = "runway:terminal-start";
 const TERMINAL_CLAIM_STEP = "runway:terminal-claim";
 const TERMINAL_PUBLISH_STEP = "runway:terminal-publish";
+
+const cachePublicationIdentity = async (
+  finalization: Finalization,
+  prepared: readonly PreparedCache[],
+): Promise<string> => {
+  const fields: string[] = [
+    "cache-publication",
+    finalization.claimId,
+    finalization.outcome,
+    String(prepared.length),
+  ];
+  for (const entry of prepared) {
+    if (entry.state !== "ready") throw new Error("invalid durable cache publication");
+    const { pending, object } = entry;
+    const key = pending.declaration.key;
+    fields.push(
+      "ready",
+      pending.id,
+      pending.target,
+      String(pending.schema),
+      typeof key === "string" ? "string" : "files",
+      ...(typeof key === "string"
+        ? [key]
+        : [key.salt ?? "", String(key.files.length), ...key.files]),
+      pending.declaration.path,
+      pending.declaration.budget?.maxBytes === undefined
+        ? "maxBytes:unset"
+        : `maxBytes:${pending.declaration.budget.maxBytes}`,
+      pending.declaration.budget?.maxDurationMs === undefined
+        ? "maxDurationMs:unset"
+        : `maxDurationMs:${pending.declaration.budget.maxDurationMs}`,
+      pending.declaration.budget?.maxEstimatedCostUsd === undefined
+        ? "maxEstimatedCostUsd:unset"
+        : `maxEstimatedCostUsd:${pending.declaration.budget.maxEstimatedCostUsd}`,
+      pending.revision.cacheIdDigest,
+      pending.revision.declarationDigest,
+      pending.revision.etag ?? "etag:missing",
+      String(pending.revision.generation),
+      pending.revision.keyDigest,
+      pending.revision.platformDigest,
+      pending.revision.ref,
+      pending.revision.repositoryDigest,
+      String(pending.revision.schema),
+      pending.revision.scopeDigest,
+      object.archiveDigest,
+      String(object.archiveBytes),
+      object.digest,
+      object.key,
+      object.manifest,
+    );
+  }
+  const encoder = new TextEncoder();
+  const chunks = fields.map((field) => encoder.encode(field));
+  const bytes = new Uint8Array(chunks.reduce((sum, field) => sum + field.byteLength + 8, 0));
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+  for (const field of chunks) {
+    view.setBigUint64(offset, BigInt(field.byteLength));
+    offset += 8;
+    bytes.set(field, offset);
+    offset += field.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string | Promise<string> }>;
@@ -41,6 +109,7 @@ const makeRunRuntime = (
   identity: SourceIdentity,
   terminal: Terminal,
 ): RunRuntime => {
+  let preparedCaches: readonly PreparedCache[] = [];
   const exactSource = source(identity, {
     prepare: async (requested, options) =>
       await binding.prepareSource({ runId, source: requested, secrets, ...options }),
@@ -52,6 +121,11 @@ const makeRunRuntime = (
     placement: {
       cache: async ({ secrets: _secrets, ...request }) =>
         await binding.restoreCache({ ...request, secrets }),
+      quiesce: async () => await binding.quiesce(runId, secrets),
+      prepareCaches: async ({ secrets: _secrets, ...request }) =>
+        await binding.prepareCaches({ ...request, secrets }),
+      publishCaches: async ({ secrets: _secrets, ...request }) =>
+        await binding.publishCaches({ ...request, secrets }),
       exec: async ({
         step: durableStep,
         source: prepared,
@@ -165,26 +239,68 @@ const makeRunRuntime = (
               const recorded: unknown = await step.do(
                 id,
                 { retries: { limit: 5, delay: 0 } },
-                async () => ({ digest, result: await work() }) as never,
+                async () => ({ digest, record: await work() }) as never,
               );
               if (
                 !recorded ||
                 typeof recorded !== "object" ||
                 Array.isArray(recorded) ||
-                Object.keys(recorded).sort().join(",") !== "digest,result" ||
+                Object.keys(recorded).sort().join(",") !== "digest,record" ||
                 typeof (recorded as { digest?: unknown }).digest !== "string"
               ) {
                 throw new Error("invalid durable cache evidence");
               }
-              return recorded as { readonly digest: string; readonly result: CacheResult };
+              return recorded as {
+                readonly digest: string;
+                readonly record: Awaited<ReturnType<typeof work>>;
+              };
             },
           },
           declaration,
         ),
       sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
     },
-    cleanup: () => sandbox.cleanup(),
-    finish: (finalization) => sandbox.finish(finalization),
+    cleanup: async () => {
+      if (sandbox.hasPendingCaches()) {
+        const recorded = (await step.do(
+          CACHE_PREPARE_STEP,
+          { retries: { limit: 5, delay: 0 } },
+          async () => (await sandbox.prepare()) as never,
+        )) as readonly PreparedCache[];
+        if (!Array.isArray(recorded)) throw new Error("invalid durable cache preparation");
+        preparedCaches = structuredClone(recorded);
+      }
+      await sandbox.cleanup();
+    },
+    finish: (finalization) => {
+      const ready = preparedCaches.filter(
+        (entry): entry is Extract<PreparedCache, { readonly state: "ready" }> =>
+          entry.state === "ready",
+      );
+      return sandbox.finish(finalization, ready, {
+        run: async (work) => {
+          const identity = await cachePublicationIdentity(finalization, ready);
+          const recorded: unknown = await step.do(
+            CACHE_PUBLISH_STEP,
+            { retries: { limit: 5, delay: 0 } },
+            async () => {
+              await work();
+              return { identity, published: true } as never;
+            },
+          );
+          if (
+            !recorded ||
+            typeof recorded !== "object" ||
+            Array.isArray(recorded) ||
+            Object.keys(recorded).sort().join(",") !== "identity,published" ||
+            (recorded as { identity?: unknown }).identity !== identity ||
+            (recorded as { published?: unknown }).published !== true
+          ) {
+            throw new Error("invalid durable cache publication");
+          }
+        },
+      });
+    },
   };
 };
 

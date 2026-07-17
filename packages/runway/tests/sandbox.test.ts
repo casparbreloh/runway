@@ -76,19 +76,20 @@ const recordedDurable = (): DurableStep => {
 
 const durableCache = (id: string): DurableCache => ({
   id,
-  run: async (digest, work) => ({ digest, result: await work() }),
+  run: async (digest, work) => ({ digest, record: await work() }),
 });
 
 const cacheSandbox = (options: {
   readonly cache?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["cache"]>;
   readonly destroy?: () => void;
   readonly exec?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["exec"]>;
+  readonly terminal?: Terminal;
 }) => {
   const revision = "e".repeat(40);
   return new Sandbox({
     runId: "run-cache",
     secrets: {},
-    terminal: terminalFixture(),
+    terminal: options.terminal ?? terminalFixture(),
     source: source(
       {
         repositoryId: "repository-1",
@@ -128,7 +129,7 @@ test("a cache miss prepares the exact source and leaves execution available", as
     placement: {
       cache: async ({ source: exact }) => {
         events.push(`cache:${exact.result.revision}`);
-        return { state: "miss", reason: "absent" };
+        return { result: { state: "miss", reason: "absent" } };
       },
       exec: async ({ command }) => {
         events.push(`exec:${command.command}`);
@@ -157,21 +158,29 @@ test("an unavailable cache placement is an advisory miss", async () => {
 test("cache declarations are canonical, retryable, disjoint, safe, and ordered before exec", async () => {
   const stored = new Map<
     string,
-    { readonly digest: string; readonly result: { state: "miss"; reason: "absent" } }
+    {
+      readonly digest: string;
+      readonly record: { readonly result: { state: "miss"; reason: "absent" } };
+    }
   >();
   const recorded = (id: string): DurableCache => ({
     id,
     run: async (digest, work) => {
       const prior = stored.get(id);
       if (prior) return prior;
-      const result = await work();
-      if (result.state !== "miss") throw new Error("expected miss");
-      const value = { digest, result: { state: "miss" as const, reason: "absent" as const } };
+      const record = await work();
+      if (record.result.state !== "miss") throw new Error("expected miss");
+      const value = {
+        digest,
+        record: { result: { state: "miss" as const, reason: "absent" as const } },
+      };
       stored.set(id, value);
       return value;
     },
   });
-  const sandbox = cacheSandbox({ cache: async () => ({ state: "miss", reason: "absent" }) });
+  const sandbox = cacheSandbox({
+    cache: async () => ({ result: { state: "miss", reason: "absent" } }),
+  });
 
   await expect(
     sandbox.cache(recorded("one"), {
@@ -212,12 +221,14 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
 });
 
 test("durable cache replays reject changed declarations and malformed results", async () => {
-  const sandbox = cacheSandbox({ cache: async () => ({ state: "miss", reason: "absent" }) });
+  const sandbox = cacheSandbox({
+    cache: async () => ({ result: { state: "miss", reason: "absent" } }),
+  });
   await expect(
     sandbox.cache(
       {
         id: "changed",
-        run: async (_digest, work) => ({ digest: "0".repeat(64), result: await work() }),
+        run: async (_digest, work) => ({ digest: "0".repeat(64), record: await work() }),
       },
       { key: "v1", path: "/cache/changed" },
     ),
@@ -226,7 +237,10 @@ test("durable cache replays reject changed declarations and malformed results", 
     sandbox.cache(
       {
         id: "malformed",
-        run: async (digest) => ({ digest, result: { state: "hit", bytes: -1 } as never }),
+        run: async (digest) => ({
+          digest,
+          record: { result: { state: "hit", bytes: -1 } as never },
+        }),
       },
       { key: "v1", path: "/cache/malformed" },
     ),
@@ -236,7 +250,7 @@ test("durable cache replays reject changed declarations and malformed results", 
 test("a cache-only Sandbox is cleaned after a restore attempt", async () => {
   let destroys = 0;
   const sandbox = cacheSandbox({
-    cache: async () => ({ state: "miss", reason: "absent" }),
+    cache: async () => ({ result: { state: "miss", reason: "absent" } }),
     destroy: () => {
       destroys += 1;
     },
@@ -261,13 +275,177 @@ test("a recorded cache replay still cleans the run placement", async () => {
     id: "recorded",
     run: async (digest) => ({
       digest,
-      result: { state: "miss", reason: "absent" },
+      record: { result: { state: "miss", reason: "absent" } },
     }),
   };
 
   await sandbox.cache(recorded, { key: "v1", path: "/cache/recorded" });
   await sandbox.cleanup();
   expect(destroys).toBe(1);
+});
+
+test("only a verified success publishes durable cache evidence after one quiesce and cleanup", async () => {
+  const events: string[] = [];
+  const terminal = terminalFixture();
+  const pending = { schema: 1, id: "tree" } as never;
+  const preparedCache = { state: "ready", pending, object: { digest: "a".repeat(64) } } as never;
+  const sandbox = new Sandbox({
+    runId: "run-1",
+    secrets: {},
+    terminal,
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision: "a".repeat(40),
+      },
+      { prepare: async () => prepared("a".repeat(40)) },
+    ),
+    placement: {
+      cache: async () => ({
+        result: { state: "miss", reason: "absent" },
+        pending,
+      }),
+      quiesce: async () => {
+        events.push("quiesce");
+      },
+      prepareCaches: async ({ pending: observed }) => {
+        events.push(`prepare:${observed.length}`);
+        return [preparedCache];
+      },
+      publishCaches: async ({ finalization, prepared: snapshots }) => {
+        events.push(`publish:${finalization.outcome}:${snapshots.length}`);
+      },
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      destroy: async () => {
+        events.push("destroy");
+      },
+    },
+  });
+
+  await sandbox.cache(durableCache("tree"), { key: "v1", path: "/cache/tree" });
+  const snapshots = await sandbox.prepare();
+  expect(events).toEqual(["quiesce", "prepare:1"]);
+  await sandbox.cleanup();
+  expect(events).toEqual(["quiesce", "prepare:1", "destroy"]);
+  const success = await terminal.claim("success");
+  await sandbox.finish(success, snapshots);
+  expect(events).toEqual(["quiesce", "prepare:1", "destroy", "publish:success:1"]);
+});
+
+test.each(["failure", "cancelled"] as const)(
+  "%s discards pending cache evidence without preparing or publishing a ref",
+  async (outcome) => {
+    const events: string[] = [];
+    const terminal = terminalFixture();
+    const sandbox = new Sandbox({
+      runId: "run-1",
+      secrets: {},
+      terminal,
+      source: source(
+        {
+          repositoryId: "repository-1",
+          remote: "https://github.com/acme/example",
+          revision: "a".repeat(40),
+        },
+        { prepare: async () => prepared("a".repeat(40)) },
+      ),
+      placement: {
+        cache: async () => ({
+          result: { state: "miss", reason: "absent" },
+          pending: { schema: 1, id: "tree" } as never,
+        }),
+        quiesce: async () => {
+          events.push("quiesce");
+        },
+        prepareCaches: async () => {
+          events.push("prepare");
+          return [];
+        },
+        publishCaches: async () => {
+          events.push("publish");
+        },
+        exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+        destroy: async () => {
+          events.push("destroy");
+        },
+      },
+    });
+
+    await sandbox.cache(durableCache("tree"), { key: "v1", path: "/cache/tree" });
+    await sandbox.finish(await terminal.claim(outcome));
+    expect(events).toEqual(["destroy"]);
+  },
+);
+
+test("a lost cache publication response retries idempotently and exhausted failure stays advisory", async () => {
+  const terminal = terminalFixture();
+  const events: string[] = [];
+  const sandbox = new Sandbox({
+    runId: "run-1",
+    secrets: {},
+    terminal,
+    source: source(
+      {
+        repositoryId: "repository-1",
+        remote: "https://github.com/acme/example",
+        revision: "a".repeat(40),
+      },
+      { prepare: async () => prepared("a".repeat(40)) },
+    ),
+    placement: {
+      publishCaches: async () => {
+        events.push("cas");
+      },
+      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+      destroy: async () => {
+        events.push("destroy");
+      },
+    },
+  });
+  const ready = [{ state: "ready" }] as never;
+  const winner = await terminal.claim("success");
+
+  await expect(
+    sandbox.finish(winner, ready, {
+      run: async (work) => {
+        await work();
+        events.push("response-lost");
+        await work();
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(events).toEqual(["cas", "response-lost", "cas"]);
+
+  await expect(
+    sandbox.finish(winner, ready, {
+      run: async () => {
+        throw new Error("publication retries exhausted");
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(events).toEqual(["cas", "response-lost", "cas"]);
+});
+
+test("a success with no ready cache evidence runs neither prepare nor publication", async () => {
+  const terminal = terminalFixture();
+  let publications = 0;
+  const sandbox = cacheSandbox({ terminal });
+  await expect(sandbox.prepare()).resolves.toEqual([]);
+  await sandbox.finish(await terminal.claim("success"), [], {
+    run: async () => {
+      publications += 1;
+    },
+  });
+  expect(publications).toBe(0);
+});
+
+test("a cache-free run does not spend a process quiescence barrier", async () => {
+  const sandbox = cacheSandbox({
+    exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 }),
+  });
+  await expect(sandbox.prepare()).resolves.toEqual([]);
+  expect(sandbox.hasPendingCaches()).toBe(false);
 });
 
 test("a recorded command rejects changed canonical options without starting again", async () => {

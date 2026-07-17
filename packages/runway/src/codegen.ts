@@ -72,6 +72,7 @@ export const generateHost = (
   });
   const config = JSON.stringify({
     accountId: opts.accountId,
+    cacheBucket: `runway-${opts.accountId}`,
     scriptName: opts.scriptName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,

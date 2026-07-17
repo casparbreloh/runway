@@ -876,6 +876,22 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     return run.terminal ?? undefined;
   }
 
+  async current(sourceValue: GitHubRunSource): Promise<boolean> {
+    const source = parseGitHubRunSource(sourceValue);
+    const run = parseRun(await this.ctx.storage.get(runKey(source.runId)), source.runId);
+    await this.#validateDispatchIdentity(run);
+    this.#validateLifecycleSource(run, source);
+    const generation = await this.ctx.storage.get(generationStorageKey(run.activeKey));
+    if (!positiveInteger(generation) || generation < run.generation) invariant();
+    const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
+    const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
+    return (
+      generation === run.generation &&
+      active?.runId === run.runId &&
+      active.generation === run.generation
+    );
+  }
+
   async publishTerminal(request: {
     readonly source: GitHubRunSource;
     readonly finalization: Finalization;

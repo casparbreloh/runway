@@ -163,6 +163,7 @@ test("a repeated conditional PUT cannot replace immutable cache content", async 
     accessKeyId: "access",
     secretAccessKey: "secret",
     expiresInSeconds: 120,
+    now: () => new Date("2026-07-16T12:34:56.000Z"),
     transport: remote,
     objects: remote,
   });

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { expect, test } from "vitest";
 
 import { Cache } from "../src/cache.ts";
@@ -63,15 +65,76 @@ const revisionOf = (result: { readonly revision: ObservedRevision | null }): Obs
   return result.revision;
 };
 
+const fixtureDigest = (fields: readonly string[]): string => {
+  const hash = createHash("sha256");
+  for (const field of fields) {
+    const value = Buffer.from(field);
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(value.byteLength));
+    hash.update(length);
+    hash.update(value);
+  }
+  return hash.digest("hex");
+};
+
+const treeEvidence = {
+  diskBytes: 4096,
+  entryCount: 1,
+  maxDepth: 1,
+  treeDigest: "e".repeat(64),
+  uniqueInodes: 1,
+} as const;
+
+const objectFixture = (
+  revision: ObservedRevision,
+  variant = "a",
+  name = "tools",
+  target = "/cache/tools",
+) => {
+  const archiveDigest = variant.repeat(64);
+  const archiveBytes = 4096;
+  const manifest = JSON.stringify({
+    archiveDigest,
+    byteCount: 12,
+    declarationDigest: revision.declarationDigest,
+    entryCount: treeEvidence.entryCount,
+    fileCount: 1,
+    keyDigest: revision.keyDigest,
+    maxDepth: treeEvidence.maxDepth,
+    name,
+    platform: {
+      architecture: context.platform.architecture,
+      imageDigest: context.platform.imageDigest,
+      os: context.platform.os,
+      runnerAbi: context.platform.runnerAbi,
+    },
+    schema: revision.schema,
+    target,
+    treeDigest: treeEvidence.treeDigest,
+    uniqueInodes: treeEvidence.uniqueInodes,
+  });
+  return {
+    digest: fixtureDigest(["cache-object", manifest, archiveDigest, String(archiveBytes)]),
+    archiveBytes,
+    archiveDigest,
+    manifest,
+  };
+};
+
 const refRecord = (
   revision: ObservedRevision,
-  objectDigest = "a".repeat(64),
+  variant = "a",
+  name = "tools",
+  target = "/cache/tools",
 ): Record<string, unknown> => ({
+  archiveBytes: objectFixture(revision, variant, name, target).archiveBytes,
+  archiveDigest: objectFixture(revision, variant, name, target).archiveDigest,
   cacheIdDigest: revision.cacheIdDigest,
   declarationDigest: revision.declarationDigest,
   generation: revision.generation,
   keyDigest: revision.keyDigest,
-  objectDigest,
+  manifest: objectFixture(revision, variant, name, target).manifest,
+  objectDigest: objectFixture(revision, variant, name, target).digest,
   platformDigest: revision.platformDigest,
   repositoryDigest: revision.repositoryDigest,
   schema: revision.schema,
@@ -81,11 +144,16 @@ const refRecord = (
 const seed = (
   refs: MemoryRefs,
   revision: ObservedRevision,
-  options: { readonly etag?: string; readonly objectDigest?: string } = {},
+  options: {
+    readonly etag?: string;
+    readonly variant?: string;
+    readonly name?: string;
+    readonly target?: string;
+  } = {},
 ): void => {
   refs.objects.set(revision.ref, {
     etag: options.etag ?? "version-1",
-    text: JSON.stringify(refRecord(revision, options.objectDigest)),
+    text: JSON.stringify(refRecord(revision, options.variant, options.name, options.target)),
   });
 };
 
@@ -177,9 +245,16 @@ test("a hit stages beside its target and becomes visible only after verified ren
                 events.push(`inspect:${path}:${target}`);
                 return target;
               },
-              stage: async ({ object, path }: { object: { digest: string }; path: string }) => {
+              stage: async ({ object, path }) => {
                 events.push(`stage:${object.digest}:${path}`);
-                return { state: "ready" as const, bytes: 37, digest: object.digest };
+                return {
+                  state: "ready" as const,
+                  archiveBytes: 4096,
+                  archiveDigest: "c".repeat(64),
+                  byteCount: 12,
+                  ...treeEvidence,
+                  fileCount: 1,
+                };
               },
               remove: async (path: string) => {
                 events.push(`remove:${path}`);
@@ -196,11 +271,15 @@ test("a hit stages beside its target and becomes visible only after verified ren
   const declaration = { key: "v1", path: "/cache/tree" } as const;
   const miss = await create(false).lookup("tree", declaration);
   if (!miss.revision) throw new Error("expected observation");
-  seed(refs, miss.revision, { objectDigest: "c".repeat(64) });
+  seed(refs, miss.revision, { variant: "c", name: "tree", target: "/cache/tree" });
 
-  await expect(create().restore("tree", declaration)).resolves.toEqual({ state: "hit", bytes: 37 });
+  await expect(create().restore("tree", declaration)).resolves.toEqual({ state: "hit", bytes: 12 });
   expect(events[0]).toBe("inspect:/cache/tree:absent");
-  expect(events[1]).toMatch(/^stage:c{64}:\/cache\/\.runway-cache-[0-9a-f-]+$/);
+  expect(events[1]).toMatch(
+    new RegExp(
+      `^stage:${objectFixture(miss.revision, "c", "tree", "/cache/tree").digest}:/cache/\\.runway-cache-[0-9a-f-]+$`,
+    ),
+  );
   expect(events[2]).toMatch(/^rename:\/cache\/\.runway-cache-[0-9a-f-]+:\/cache\/tree$/);
 });
 
@@ -215,7 +294,7 @@ test("a failed atomic rename preserves an existing empty target", async () => {
   });
   const miss = await base.lookup("tree", declaration);
   if (!miss.revision) throw new Error("expected observation");
-  seed(refs, miss.revision, { objectDigest: "d".repeat(64) });
+  seed(refs, miss.revision, { variant: "d", name: "tree", target: "/cache/tree" });
   let target = "empty" as "empty" | "absent";
   const removals: string[] = [];
   const cache = new Cache({
@@ -225,7 +304,14 @@ test("a failed atomic rename preserves an existing empty target", async () => {
     current: async () => true,
     restore: {
       inspect: async () => target,
-      stage: async ({ object }) => ({ state: "ready", bytes: 1, digest: object.digest }),
+      stage: async () => ({
+        state: "ready",
+        archiveBytes: 4096,
+        archiveDigest: "d".repeat(64),
+        byteCount: 12,
+        ...treeEvidence,
+        fileCount: 1,
+      }),
       remove: async (path) => {
         removals.push(path);
         if (path === "/cache/tree") target = "absent";
@@ -245,6 +331,140 @@ test("a failed atomic rename preserves an existing empty target", async () => {
   expect(removals[0]).toMatch(/^\/cache\/\.runway-cache-/);
 });
 
+test("a poisoned canonical manifest is a corrupt miss before staging or target mutation", async () => {
+  const refs = new MemoryRefs();
+  const declaration = { key: "v1", path: "/cache/tree" } as const;
+  const base = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+  });
+  const miss = await base.lookup("tree", declaration);
+  if (!miss.revision) throw new Error("expected observation");
+  seed(refs, miss.revision, { variant: "d", name: "tree", target: "/cache/tree" });
+  const stored = refs.objects.get(miss.revision.ref)!;
+  const ref = JSON.parse(stored.text) as Record<string, unknown>;
+  ref.manifest = (ref.manifest as string).replace(
+    '"target":"/cache/tree"',
+    '"target":"/cache/other"',
+  );
+  refs.objects.set(miss.revision.ref, { ...stored, text: JSON.stringify(ref) });
+  let staged = false;
+  const cache = new Cache({
+    context,
+    refs,
+    files: { inspect: async () => ({ type: "missing" as const }) },
+    current: async () => true,
+    restore: {
+      inspect: async () => "absent",
+      stage: async () => {
+        staged = true;
+        throw new Error("must not stage");
+      },
+      remove: async () => {},
+      rename: async () => {},
+    },
+  });
+
+  await expect(cache.restore("tree", declaration)).resolves.toEqual({
+    state: "miss",
+    reason: "corrupt",
+  });
+  expect(staged).toBe(false);
+});
+
+test("wrong archive or extracted evidence and interrupted extraction preserve the target", async () => {
+  const declaration = { key: "v1", path: "/cache/tree" } as const;
+  const cases = [
+    {
+      name: "archive digest",
+      stage: {
+        state: "ready" as const,
+        archiveBytes: 4096,
+        archiveDigest: "e".repeat(64),
+        byteCount: 12,
+        ...treeEvidence,
+        fileCount: 1,
+      },
+      reason: "corrupt",
+    },
+    {
+      name: "archive size",
+      stage: {
+        state: "ready" as const,
+        archiveBytes: 4097,
+        archiveDigest: "d".repeat(64),
+        byteCount: 12,
+        ...treeEvidence,
+        fileCount: 1,
+      },
+      reason: "corrupt",
+    },
+    {
+      name: "decompression bomb",
+      stage: {
+        state: "ready" as const,
+        archiveBytes: 4096,
+        archiveDigest: "d".repeat(64),
+        byteCount: 12_000_000,
+        ...treeEvidence,
+        fileCount: 1,
+      },
+      reason: "corrupt",
+    },
+    {
+      name: "partial extraction",
+      stage: undefined,
+      reason: "unavailable",
+    },
+  ] as const;
+  for (const example of cases) {
+    const refs = new MemoryRefs();
+    const base = new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+    });
+    const miss = await base.lookup("tree", declaration);
+    if (!miss.revision) throw new Error("expected observation");
+    seed(refs, miss.revision, { variant: "d", name: "tree", target: "/cache/tree" });
+    let target = "empty";
+    let renames = 0;
+    const removals: string[] = [];
+    const cache = new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+      restore: {
+        inspect: async () => "empty",
+        stage: async () => {
+          if (!example.stage) throw new Error("concurrent deletion during extraction");
+          return example.stage;
+        },
+        remove: async (path) => {
+          removals.push(path);
+        },
+        rename: async () => {
+          target = "changed";
+          renames += 1;
+        },
+      },
+    });
+
+    await expect(cache.restore("tree", declaration), example.name).resolves.toEqual({
+      state: "miss",
+      reason: example.reason,
+    });
+    expect(target, example.name).toBe("empty");
+    expect(renames, example.name).toBe(0);
+    expect(removals, example.name).toHaveLength(1);
+    expect(removals[0]).toMatch(/^\/cache\/\.runway-cache-/);
+  }
+});
+
 test("a nonempty target is left unchanged without staging a hit", async () => {
   const refs = new MemoryRefs();
   const declaration = { key: "v1", path: "/cache/tree" } as const;
@@ -256,7 +476,7 @@ test("a nonempty target is left unchanged without staging a hit", async () => {
   });
   const miss = await base.lookup("tree", declaration);
   if (!miss.revision) throw new Error("expected observation");
-  seed(refs, miss.revision, { objectDigest: "e".repeat(64) });
+  seed(refs, miss.revision, { variant: "e", name: "tree", target: "/cache/tree" });
   const cache = new Cache({
     context,
     refs,
@@ -520,11 +740,11 @@ test("every platform identity dimension independently misses an otherwise matchi
     });
   const absent = await create().lookup("tools", declaration);
   if (!absent.revision) throw new Error("expected observation");
-  seed(refs, absent.revision, { objectDigest: "b".repeat(64) });
+  seed(refs, absent.revision, { variant: "b" });
 
   await expect(create().lookup("tools", declaration)).resolves.toMatchObject({
     state: "hit",
-    object: { digest: "b".repeat(64) },
+    object: { digest: objectFixture(absent.revision, "b").digest },
     revision: { etag: "version-1" },
   });
   const variants = [
@@ -572,12 +792,12 @@ test("misses and hits retain the exact write revision separately from a fallback
     source: { ref: trusted.revision.ref, etag: "trusted-version" },
   });
   if (!fallback.revision) throw new Error("expected branch observation");
-  seed(refs, fallback.revision, { etag: "branch-version", objectDigest: "b".repeat(64) });
+  seed(refs, fallback.revision, { etag: "branch-version", variant: "b" });
   const readsBeforeOwnHit = refs.reads.length;
 
   await expect(branchCache.lookup("tools", declaration)).resolves.toMatchObject({
     state: "hit",
-    object: { digest: "b".repeat(64) },
+    object: { digest: objectFixture(fallback.revision, "b").digest },
     revision: { ref: fallback.revision.ref, etag: "branch-version" },
     source: { ref: fallback.revision.ref, etag: "branch-version" },
   });
@@ -603,12 +823,12 @@ test("publication uses the observed missing or version CAS and writes only the a
   if (!missing.revision) throw new Error("expected observation");
 
   await expect(
-    trustedCache.publish(missing.revision, { digest: "a".repeat(64) }),
+    trustedCache.publish(missing.revision, objectFixture(missing.revision, "a")),
   ).resolves.toMatchObject({ state: "published" });
   const hit = await trustedCache.lookup("tools", declaration);
   if (!hit.revision) throw new Error("expected observation");
   await expect(
-    trustedCache.publish(hit.revision, { digest: "b".repeat(64) }),
+    trustedCache.publish(hit.revision, objectFixture(hit.revision, "b")),
   ).resolves.toMatchObject({ state: "published" });
 
   const branchCache = create({
@@ -618,9 +838,12 @@ test("publication uses the observed missing or version CAS and writes only the a
   });
   const fallback = await branchCache.lookup("tools", declaration);
   if (!fallback.revision) throw new Error("expected observation");
-  expect(fallback).toMatchObject({ state: "hit", object: { digest: "b".repeat(64) } });
+  expect(fallback).toMatchObject({
+    state: "hit",
+    object: { digest: objectFixture(hit.revision, "b").digest },
+  });
   await expect(
-    branchCache.publish(fallback.revision, { digest: "c".repeat(64) }),
+    branchCache.publish(fallback.revision, objectFixture(fallback.revision, "c")),
   ).resolves.toMatchObject({ state: "published" });
 
   expect(refs.writes).toEqual([
@@ -629,10 +852,10 @@ test("publication uses the observed missing or version CAS and writes only the a
     { key: fallback.revision.ref, onlyIf: { etagDoesNotMatch: "*" } },
   ]);
   expect(JSON.parse(refs.objects.get(hit.revision.ref)!.text)).toMatchObject({
-    objectDigest: "b".repeat(64),
+    objectDigest: objectFixture(hit.revision, "b").digest,
   });
   expect(JSON.parse(refs.objects.get(fallback.revision.ref)!.text)).toMatchObject({
-    objectDigest: "c".repeat(64),
+    objectDigest: objectFixture(fallback.revision, "c").digest,
   });
 });
 
@@ -656,22 +879,25 @@ test("blind, stale, superseded, and cross-scope cache publications are rejected"
   if (!missing.revision) throw new Error("expected observation");
 
   await expect(
-    create(trustedAdmission).publish(missing.revision, { digest: "a".repeat(64) }),
+    create(trustedAdmission).publish(missing.revision, objectFixture(missing.revision, "a")),
   ).rejects.toThrow("blind cache publication");
-  await trusted.publish(missing.revision, { digest: "a".repeat(64) });
+  await trusted.publish(missing.revision, objectFixture(missing.revision, "a"));
   const observed = await trusted.lookup("tools", declaration);
   if (!observed.revision) throw new Error("expected observation");
-  seed(refs, observed.revision, { etag: "external-version", objectDigest: "b".repeat(64) });
-  await expect(trusted.publish(observed.revision, { digest: "c".repeat(64) })).rejects.toThrow(
-    "cache publication stale",
-  );
+  seed(refs, observed.revision, { etag: "external-version", variant: "b" });
+  await expect(
+    trusted.publish(observed.revision, objectFixture(observed.revision, "c")),
+  ).rejects.toThrow("cache publication stale");
 
   const superseded = create(trustedAdmission, async () => false);
   const supersededObservation = await superseded.lookup("tools", declaration);
   if (!supersededObservation.revision) throw new Error("expected observation");
   const writesBeforeSuperseded = refs.writes.length;
   await expect(
-    superseded.publish(supersededObservation.revision, { digest: "d".repeat(64) }),
+    superseded.publish(
+      supersededObservation.revision,
+      objectFixture(supersededObservation.revision, "d"),
+    ),
   ).rejects.toThrow("cache publication superseded");
   expect(refs.writes).toHaveLength(writesBeforeSuperseded);
 
@@ -679,9 +905,9 @@ test("blind, stale, superseded, and cross-scope cache publications are rejected"
   const older = create(trustedAdmission, async () => true, 1);
   const olderObservation = await older.lookup("tools", declaration);
   if (!olderObservation.revision) throw new Error("expected observation");
-  seed(refs, { ...olderObservation.revision, generation: 2 }, { objectDigest: "e".repeat(64) });
+  seed(refs, { ...olderObservation.revision, generation: 2 }, { variant: "e" });
   await expect(
-    older.publish(olderObservation.revision, { digest: "e".repeat(64) }),
+    older.publish(olderObservation.revision, objectFixture(olderObservation.revision, "e")),
   ).rejects.toThrow("cache publication superseded");
 
   const branch = create({
@@ -694,7 +920,10 @@ test("blind, stale, superseded, and cross-scope cache publications are rejected"
   const trustedForCrossScope = create(trustedAdmission);
   await trustedForCrossScope.lookup("tools", declaration);
   await expect(
-    trustedForCrossScope.publish(branchObservation.revision, { digest: "f".repeat(64) }),
+    trustedForCrossScope.publish(
+      branchObservation.revision,
+      objectFixture(branchObservation.revision, "f"),
+    ),
   ).rejects.toThrow("cache publication identity mismatch");
 });
 
@@ -717,7 +946,7 @@ test("concurrent identical publishers observe one winner and one duplicate", asy
   if (!firstObservation.revision || !secondObservation.revision) {
     throw new Error("expected observations");
   }
-  const object = { digest: "a".repeat(64) } as const;
+  const object = objectFixture(firstObservation.revision, "a");
 
   const results = await Promise.all([
     first.publish(firstObservation.revision, object),
@@ -746,15 +975,263 @@ test("a newer generation replaces a lower-generation winner of the missing-ref r
   ]);
   if (!olderLookup.revision || !newerLookup.revision) throw new Error("expected observations");
 
-  await older.publish(olderLookup.revision, { digest: "a".repeat(64) });
+  await older.publish(olderLookup.revision, objectFixture(olderLookup.revision, "a"));
   await expect(
-    newer.publish(newerLookup.revision, { digest: "b".repeat(64) }),
+    newer.publish(newerLookup.revision, objectFixture(newerLookup.revision, "b")),
   ).resolves.toMatchObject({ state: "published" });
-  await expect(older.publish(olderLookup.revision, { digest: "a".repeat(64) })).rejects.toThrow(
-    "cache publication superseded",
-  );
+  await expect(
+    older.publish(olderLookup.revision, objectFixture(olderLookup.revision, "a")),
+  ).rejects.toThrow("cache publication superseded");
   expect(JSON.parse(refs.objects.values().next().value!.text)).toMatchObject({
     generation: 2,
-    objectDigest: "b".repeat(64),
+    objectDigest: objectFixture(newerLookup.revision, "b").digest,
   });
+});
+
+test("a successful cache snapshot is prepared as immutable content before its ref is published", async () => {
+  const refs = new MemoryRefs();
+  const events: string[] = [];
+  const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
+    inspect: async () => "absent",
+    capture: async ({ target, path }) => {
+      events.push(`capture:${target}:${path}`);
+      return {
+        state: "ready" as const,
+        archive: { path, bytes: 4096, digest: "a".repeat(64) },
+        entryCount: 2,
+        uniqueInodes: 2,
+        fileCount: 1,
+        byteCount: 12,
+        diskBytes: 4108,
+        maxDepth: 2,
+        treeDigest: "e".repeat(64),
+        durationMs: 7,
+        estimatedCostUsd: 0.00001,
+      };
+    },
+    upload: async ({ key, expected }) => {
+      events.push(`manifest:${JSON.stringify(expected)}`);
+      events.push(`upload:${key}`);
+      return { state: "stored" as const, ...expected };
+    },
+    remove: async (path) => {
+      events.push(`remove:${path}`);
+    },
+  };
+  const create = () =>
+    new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+      snapshots,
+    });
+  const recorded = await create().record("tools", { key: "v1", path: "/cache/tools" });
+
+  const prepared = await create().prepare(recorded.pending ? [recorded.pending] : []);
+
+  expect(refs.writes).toEqual([]);
+  expect(prepared).toHaveLength(1);
+  expect(prepared[0]).toMatchObject({
+    state: "ready",
+    object: {
+      archiveBytes: 4096,
+      archiveDigest: "a".repeat(64),
+      manifest: expect.stringMatching(/^\{"archiveDigest":"a{64}","byteCount":12,/),
+    },
+  });
+  await create().commit(structuredClone(prepared));
+  expect(refs.writes).toHaveLength(1);
+  expect(events[0]).toMatch(/^capture:\/cache\/tools:\/cache\/\.runway-cache-[0-9a-f-]+\.sqsh$/);
+  expect(events[1]).toMatch(/^manifest:\{"path":"\/cache\/\.runway-cache-/);
+  expect(events[2]).toMatch(/^upload:content\/[0-9a-f]{64}\.sqsh$/);
+  expect(events[3]).toMatch(/^remove:\/cache\/\.runway-cache-/);
+});
+
+test("unsafe, corrupt, over-budget, and concurrently deleted snapshots stay unreachable", async () => {
+  const cases = [
+    {
+      name: "escaping link",
+      skipped: "unsafe",
+      reason: "unsafe",
+    },
+    {
+      name: "special file",
+      skipped: "unsafe",
+      reason: "unsafe",
+    },
+    {
+      name: "unsafe tree path",
+      skipped: "unsafe",
+      reason: "unsafe",
+    },
+    {
+      name: "partial archive",
+      change: { fileCount: 2 },
+      reason: "corrupt",
+    },
+    {
+      name: "archive bytes",
+      budget: { maxBytes: 4095 },
+      reason: "budget",
+    },
+    {
+      name: "disk bytes",
+      change: { diskBytes: 8192 },
+      budget: { maxBytes: 4096 },
+      reason: "budget",
+    },
+    {
+      name: "duration",
+      budget: { maxDurationMs: 6 },
+      reason: "budget",
+    },
+    {
+      name: "estimated cost",
+      budget: { maxEstimatedCostUsd: 0.000009 },
+      reason: "budget",
+    },
+    { name: "concurrent deletion", throws: true, reason: "unavailable" },
+  ] as const;
+  for (const example of cases) {
+    const refs = new MemoryRefs();
+    let uploads = 0;
+    const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
+      inspect: async () => "absent",
+      capture: async ({ path }) => {
+        if ("throws" in example) throw new Error("tree entry disappeared during capture");
+        if ("skipped" in example) {
+          return { state: "skipped", reason: example.skipped } as const;
+        }
+        return {
+          state: "ready",
+          archive: { path, bytes: 4096, digest: "a".repeat(64) },
+          entryCount: 1,
+          uniqueInodes: 1,
+          fileCount: 1,
+          byteCount: 12,
+          diskBytes: 4096,
+          maxDepth: 1,
+          treeDigest: "e".repeat(64),
+          durationMs: 7,
+          estimatedCostUsd: 0.00001,
+          ...("change" in example ? example.change : {}),
+        } as never;
+      },
+      upload: async ({ expected }) => {
+        uploads += 1;
+        return { state: "stored", ...expected };
+      },
+      remove: async () => {},
+    };
+    const create = () =>
+      new Cache({
+        context,
+        refs,
+        files: { inspect: async () => ({ type: "missing" as const }) },
+        current: async () => true,
+        snapshots,
+      });
+    const declaration = {
+      key: "v1",
+      path: "/cache/tools",
+      ...("budget" in example ? { budget: example.budget } : {}),
+    };
+    const recorded = await create().record("tools", declaration);
+    if (!recorded.pending) throw new Error("expected pending cache");
+
+    await expect(
+      create().prepare([structuredClone(recorded.pending)]),
+      example.name,
+    ).resolves.toEqual([{ state: "skipped", id: "tools", reason: example.reason }]);
+    expect(uploads, example.name).toBe(0);
+    expect(refs.writes, example.name).toEqual([]);
+  }
+});
+
+test("pending file-key evidence survives mutable worktree changes without re-reading inputs", async () => {
+  const refs = new MemoryRefs();
+  let inspections = 0;
+  const files = {
+    inspect: async () => {
+      inspections += 1;
+      if (inspections > 1) throw new Error("post-command file inputs must not be re-read");
+      return { type: "file" as const, bytes: new TextEncoder().encode("exact source") };
+    },
+  };
+  const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
+    inspect: async () => "absent",
+    capture: async ({ path }) => ({
+      state: "ready",
+      archive: { path, bytes: 4096, digest: "a".repeat(64) },
+      ...treeEvidence,
+      fileCount: 1,
+      byteCount: 12,
+      diskBytes: 4096,
+      durationMs: 1,
+      estimatedCostUsd: 0,
+    }),
+    upload: async ({ expected }) => ({ state: "stored", ...expected }),
+    remove: async () => {},
+  };
+  const create = () => new Cache({ context, refs, files, current: async () => true, snapshots });
+  const recorded = await create().record("tools", {
+    key: { files: ["input.lock"] },
+    path: "/cache/tools",
+  });
+  if (!recorded.pending) throw new Error("expected pending cache");
+
+  await expect(create().prepare([structuredClone(recorded.pending)])).resolves.toMatchObject([
+    { state: "ready" },
+  ]);
+  expect(inspections).toBe(1);
+});
+
+test("a CAS conflict or newer generation leaves uploaded content unreachable and diagnoses a skip", async () => {
+  const refs = new MemoryRefs();
+  const diagnostics: unknown[] = [];
+  let uploads = 0;
+  const snapshots: NonNullable<ConstructorParameters<typeof Cache>[0]["snapshots"]> = {
+    inspect: async () => "absent",
+    capture: async ({ path }) => ({
+      state: "ready",
+      archive: { path, bytes: 4096, digest: "a".repeat(64) },
+      ...treeEvidence,
+      fileCount: 1,
+      byteCount: 12,
+      diskBytes: 4096,
+      durationMs: 1,
+      estimatedCostUsd: 0,
+    }),
+    upload: async ({ expected }) => {
+      uploads += 1;
+      return { state: "stored", ...expected };
+    },
+    remove: async () => {},
+  };
+  const create = (current = async () => true) =>
+    new Cache({
+      context,
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current,
+      snapshots,
+      diagnose: (entry) => diagnostics.push(entry),
+    });
+  const recorded = await create().record("tools", { key: "v1", path: "/cache/tools" });
+  if (!recorded.pending) throw new Error("expected pending cache");
+  const prepared = await create().prepare([structuredClone(recorded.pending)]);
+  seed(refs, recorded.pending.revision, { etag: "concurrent", variant: "f" });
+  const winner = refs.objects.get(recorded.pending.revision.ref)!.text;
+
+  await create().commit(structuredClone(prepared));
+  expect(refs.objects.get(recorded.pending.revision.ref)!.text).toBe(winner);
+  expect(diagnostics).toContainEqual({ id: "tools", state: "skipped", reason: "conflict" });
+  expect(uploads).toBe(1);
+
+  refs.objects.delete(recorded.pending.revision.ref);
+  const before = refs.writes.length;
+  await create(async () => false).commit(structuredClone(prepared));
+  expect(refs.writes).toHaveLength(before);
+  expect(refs.objects.has(recorded.pending.revision.ref)).toBe(false);
 });

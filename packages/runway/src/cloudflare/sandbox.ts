@@ -8,6 +8,8 @@ import {
 } from "../sandbox.ts";
 import { redactError, StreamingRedactor } from "../secret-redaction.ts";
 import type { PreparedSource } from "../source.ts";
+import type { CacheSnapshotProcess } from "./cache-snapshot.ts";
+import type { CacheTransferCapability, CacheTransferSession } from "./cache.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;
@@ -71,6 +73,12 @@ export interface CloudflareSandbox {
     | { readonly type: "symlink" }
     | { readonly type: "directory" }
   >;
+  quiesce(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
+  cacheProcess(runId: string, secrets: ReadonlyArray<string>): Promise<CacheSnapshotProcess>;
+  cacheTransfer(
+    runId: string,
+    secrets: ReadonlyArray<string>,
+  ): { quiesce(): Promise<CacheTransferSession> };
   destroy(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
 }
 
@@ -110,7 +118,21 @@ interface PlatformSandbox {
   streamProcessLogs(id: string): Promise<ReadableStream<Uint8Array>>;
   killProcess(id: string, signal?: string): Promise<void>;
   killAllProcesses(): Promise<unknown>;
+  createSession?(options: { readonly cwd: string }): Promise<InternalSession>;
+  deleteSession?(id: string): Promise<{ readonly success: boolean }>;
   destroy(): Promise<unknown>;
+}
+
+interface InternalSession {
+  readonly id: string;
+  exec(
+    command: string,
+    options: { readonly origin: "internal"; readonly timeout: number },
+  ): Promise<{ readonly success: boolean; readonly stdout: string }>;
+  writeFile(path: string, contents: string): Promise<{ readonly success: boolean }>;
+  deleteFile(path: string): Promise<{ readonly success: boolean }>;
+  renameFile(from: string, to: string): Promise<{ readonly success: boolean }>;
+  killAllProcesses(): Promise<unknown>;
 }
 
 interface SandboxLog {
@@ -690,6 +712,180 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
       throw redactFailure(error, request.secrets);
     }
   };
+  const internalSession = async (
+    runId: string,
+  ): Promise<{
+    readonly sandbox: PlatformSandbox;
+    readonly session: InternalSession;
+  }> => {
+    const sandbox = await options.placement(await hashId("runway", [runId]));
+    if (!sandbox.createSession || !sandbox.deleteSession) {
+      throw new Error("cache snapshot process is unavailable");
+    }
+    return { sandbox, session: await sandbox.createSession({ cwd: "/" }) };
+  };
+  const internal = async (
+    session: InternalSession,
+    command: string,
+    timeout = 5 * 60_000,
+  ): Promise<string> => {
+    const result = await session.exec(command, {
+      origin: "internal",
+      timeout,
+    });
+    if (!result.success) throw new Error("internal cache snapshot process failed");
+    return result.stdout;
+  };
+  const cacheProcess: CloudflareSandbox["cacheProcess"] = async (runId, secrets) => {
+    try {
+      const { sandbox, session } = await internalSession(runId);
+      let closed = false;
+      const open = (): void => {
+        if (closed) throw new Error("cache snapshot process is closed");
+      };
+      return {
+        write: async (path, contents) => {
+          open();
+          const written = await session.writeFile(path, contents);
+          if (!written.success) throw new Error("cache helper write failed");
+          await internal(session, `chmod 700 ${shellQuote(path)}`);
+        },
+        execute: async (command, timeoutMs) => {
+          open();
+          return { stdout: await internal(session, command, timeoutMs) };
+        },
+        remove: async (path) => {
+          open();
+          const deleted = await session.deleteFile(path).catch(() => undefined);
+          if (!deleted?.success) await internal(session, `rm -rf -- ${shellQuote(path)}`);
+        },
+        rename: async (from, to) => {
+          open();
+          const renamed = await session.renameFile(from, to);
+          if (!renamed.success) throw new Error("cache staging rename failed");
+        },
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          const killed = await session.killAllProcesses().then(
+            () => ({ state: "done" as const }),
+            (error: unknown) => ({ state: "failed" as const, error }),
+          );
+          const deleted = await sandbox.deleteSession!(session.id);
+          if (!deleted.success) throw new Error("cache snapshot session cleanup failed");
+          if (killed.state === "failed") throw killed.error;
+        },
+      };
+    } catch (error) {
+      throw redactError(error, secrets);
+    }
+  };
+  const cacheTransfer: CloudflareSandbox["cacheTransfer"] = (runId, secrets) => ({
+    quiesce: async () => {
+      try {
+        const sandbox = await options.placement(await hashId("runway", [runId]));
+        await sandbox.killAllProcesses();
+        const opened = await internalSession(runId);
+        const capabilityFiles = new Set<string>();
+        let closed = false;
+        const withCapability = async <T>(
+          capability: CacheTransferCapability,
+          work: (path: string, session: InternalSession) => Promise<T>,
+        ): Promise<T> => {
+          if (closed) throw new Error("cache transfer session is closed");
+          const path = `/tmp/.runway-cache-capability-${crypto.randomUUID()}`;
+          capabilityFiles.add(path);
+          const written = await opened.session.writeFile(path, capability.url);
+          if (!written.success) throw new Error("cache capability write failed");
+          const outcome = await internal(opened.session, `chmod 600 ${shellQuote(path)}`)
+            .then(async () => await work(path, opened.session))
+            .then(
+              (value) => ({ state: "done" as const, value }),
+              (error: unknown) => ({ state: "failed" as const, error }),
+            );
+          const deleted = await opened.session.deleteFile(path).catch(() => undefined);
+          capabilityFiles.delete(path);
+          if (!deleted?.success) throw new Error("cache capability cleanup failed");
+          if (outcome.state === "failed") throw outcome.error;
+          return outcome.value;
+        };
+        const evidence = (stdout: string): { readonly bytes: number; readonly digest: string } => {
+          const [bytesText, digest] = stdout.trim().split(/\s+/);
+          const bytes = Number(bytesText);
+          if (!Number.isSafeInteger(bytes) || bytes < 0 || !/^[0-9a-f]{64}$/.test(digest ?? "")) {
+            throw new Error("invalid cache archive evidence");
+          }
+          return { bytes, digest: digest! };
+        };
+        return {
+          inspect: async (path) =>
+            evidence(
+              await internal(
+                opened.session,
+                `stat -c %s -- ${shellQuote(path)}; sha256sum -- ${shellQuote(path)} | cut -d ' ' -f 1`,
+              ),
+            ),
+          upload: async ({ path, capability }) =>
+            await withCapability(capability, async (capabilityPath, session) => {
+              const headers = Object.entries(capability.headers)
+                .map(([name, value]) => `-H ${shellQuote(`${name}: ${value}`)}`)
+                .join(" ");
+              const status = (
+                await internal(
+                  session,
+                  `url=$(cat ${shellQuote(capabilityPath)}); curl -sS -o /dev/null -w '%{http_code}' -X PUT ${headers} -T ${shellQuote(path)} "$url"`,
+                )
+              ).trim();
+              if (status === "200" || status === "201") return "stored" as const;
+              if (status === "412") return "precondition-failed" as const;
+              throw new Error("cache upload failed");
+            }),
+          download: async ({ path, capability }) =>
+            await withCapability(capability, async (capabilityPath, session) => {
+              const partial = `${path}.partial`;
+              try {
+                await internal(
+                  session,
+                  `url=$(cat ${shellQuote(capabilityPath)}); rm -f -- ${shellQuote(partial)}; curl -sSf -o ${shellQuote(partial)} "$url"`,
+                );
+                const result = evidence(
+                  await internal(
+                    session,
+                    `stat -c %s -- ${shellQuote(partial)}; sha256sum -- ${shellQuote(partial)} | cut -d ' ' -f 1`,
+                  ),
+                );
+                await internal(session, `mv -- ${shellQuote(partial)} ${shellQuote(path)}`);
+                return result;
+              } catch (error) {
+                await internal(session, `rm -f -- ${shellQuote(partial)}`).catch(() => undefined);
+                throw error;
+              }
+            }),
+          close: async () => {
+            if (closed) return;
+            closed = true;
+            const killed = await opened.session.killAllProcesses().then(
+              () => ({ state: "done" as const }),
+              (error: unknown) => ({ state: "failed" as const, error }),
+            );
+            const capabilities = await Promise.all(
+              [...capabilityFiles].map(
+                async (path) => await opened.session.deleteFile(path).catch(() => undefined),
+              ),
+            );
+            const deleted = await opened.sandbox.deleteSession!(opened.session.id);
+            if (!deleted.success) throw new Error("cache transfer session cleanup failed");
+            if (capabilities.some((result) => !result?.success)) {
+              throw new Error("cache capability cleanup failed");
+            }
+            if (killed.state === "failed") throw killed.error;
+          },
+        } satisfies CacheTransferSession;
+      } catch (error) {
+        throw redactError(error, secrets);
+      }
+    },
+  });
   const destroy = async (runId: string, secrets: ReadonlyArray<string>): Promise<void> => {
     try {
       const sandbox = await options.placement(await hashId("runway", [runId]));
@@ -702,10 +898,21 @@ export const cloudflareSandbox = (options: CloudflareSandboxOptions): Cloudflare
       throw redactError(error, secrets);
     }
   };
+  const quiesce = async (runId: string, secrets: ReadonlyArray<string>): Promise<void> => {
+    try {
+      const sandbox = await options.placement(await hashId("runway", [runId]));
+      await sandbox.killAllProcesses();
+    } catch (error) {
+      throw redactError(error, secrets);
+    }
+  };
   return {
     prepare,
     execute,
     inspectCacheFile,
+    quiesce,
+    cacheProcess,
+    cacheTransfer,
     destroy,
   };
 };

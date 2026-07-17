@@ -7,6 +7,8 @@ import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { Cache } from "./cache.ts";
+import { CloudflareCacheSnapshot } from "./cloudflare/cache-snapshot.ts";
+import { CloudflareCacheTransfer } from "./cloudflare/cache.ts";
 import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
 import type {
   GitHubCoordinatorAdmission,
@@ -26,7 +28,7 @@ import {
   type GitHubRunSource,
   type RepositorySource,
 } from "./repository-source.ts";
-import type { CacheResult, ExecResult } from "./run.ts";
+import type { ExecResult } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
@@ -35,6 +37,9 @@ import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.
 import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
+  CACHE_R2_ACCESS_KEY_ID_BINDING,
+  CACHE_R2_SECRET_ACCESS_KEY_BINDING,
+  CACHE_R2_SESSION_TOKEN_BINDING,
   COMPATIBILITY_DATE,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
@@ -79,6 +84,9 @@ interface HostEnv {
   RUNWAY_GITHUB_APP_ID?: string;
   RUNWAY_GITHUB_PRIVATE_KEY?: string;
   RUNWAY_GITHUB_WEBHOOK_SECRET?: string;
+  [CACHE_R2_ACCESS_KEY_ID_BINDING]?: string;
+  [CACHE_R2_SECRET_ACCESS_KEY_BINDING]?: string;
+  [CACHE_R2_SESSION_TOKEN_BINDING]?: string;
 }
 
 interface HostProps {
@@ -89,6 +97,8 @@ interface HostProps {
   readonly snapshotScope: string;
   readonly terminal: Omit<TerminalIdentity, "runId">;
   readonly cache: {
+    readonly accountId: string;
+    readonly bucket: string;
     readonly admission: {
       readonly type: string;
       readonly ref?: string;
@@ -132,6 +142,7 @@ type HostRoute =
 
 export interface HostConfig {
   readonly accountId: string;
+  readonly cacheBucket: string;
   readonly scriptName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
@@ -146,7 +157,6 @@ export class RunwaySandboxBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
   implements RuntimeBinding
 {
-  readonly #caches = new Map<string, Cache>();
   async startRun(runId: string): Promise<boolean> {
     this.#assertRun(runId);
     const source = this.ctx.props.source;
@@ -265,6 +275,102 @@ export class RunwaySandboxBinding
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
       },
+    });
+  }
+
+  #cache(sourceRequest?: {
+    readonly runId: string;
+    readonly secrets: Readonly<Record<string, string>>;
+    readonly source?: PreparedSource;
+  }): Cache {
+    const config = this.ctx.props.cache;
+    const accessKeyId = this.env[CACHE_R2_ACCESS_KEY_ID_BINDING];
+    const secretAccessKey = this.env[CACHE_R2_SECRET_ACCESS_KEY_BINDING];
+    const sessionToken = this.env[CACHE_R2_SESSION_TOKEN_BINDING];
+    const sandbox = this.#sandbox();
+    const snapshotSecrets = sourceRequest ? this.#snapshotValues(sourceRequest.secrets) : undefined;
+    const transfer =
+      sourceRequest &&
+      snapshotSecrets &&
+      config.imageDigest &&
+      typeof accessKeyId === "string" &&
+      accessKeyId.length > 0 &&
+      typeof secretAccessKey === "string" &&
+      secretAccessKey.length > 0
+        ? new CloudflareCacheTransfer({
+            accountId: config.accountId,
+            bucket: config.bucket,
+            accessKeyId,
+            secretAccessKey,
+            ...(typeof sessionToken === "string" && sessionToken.length > 0
+              ? { sessionToken }
+              : {}),
+            expiresInSeconds: 120,
+            transport: sandbox.cacheTransfer(sourceRequest.runId, snapshotSecrets),
+            objects: {
+              head: async (key) => {
+                const object = await this.env[ARTIFACT_BUCKET_BINDING].head(key);
+                const digest = object?.customMetadata?.["runway-sha256"];
+                return object && typeof digest === "string"
+                  ? { bytes: object.size, digest }
+                  : undefined;
+              },
+            },
+          })
+        : undefined;
+    const snapshots =
+      transfer && sourceRequest && snapshotSecrets
+        ? new CloudflareCacheSnapshot({
+            runId: sourceRequest.runId,
+            process: async () => await sandbox.cacheProcess(sourceRequest.runId, snapshotSecrets),
+            transfer,
+          })
+        : undefined;
+    return new Cache({
+      context: {
+        repositoryId: config.repositoryId,
+        workflowId: config.workflowId,
+        generation: config.generation,
+        admission: config.admission,
+        platform: {
+          schema: 1,
+          os: "linux",
+          architecture: "x86_64",
+          ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
+          runnerAbi: "runway-1",
+        },
+      },
+      refs: {
+        get: async (key) => {
+          const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
+          return object ? { etag: object.httpEtag, text: async () => await object.text() } : null;
+        },
+        put: async (key, text, options) => {
+          const object = await this.env[ARTIFACT_BUCKET_BINDING].put(key, text, {
+            onlyIf: options.onlyIf,
+          });
+          return object ? { etag: object.httpEtag } : null;
+        },
+      },
+      files: {
+        inspect: async (path) => {
+          if (!sourceRequest?.source) throw new Error("cache source inspection is unavailable");
+          return await this.#sandbox().inspectCacheFile({
+            runId: sourceRequest.runId,
+            source: sourceRequest.source,
+            path,
+            secrets: this.#snapshotValues(sourceRequest.secrets),
+          });
+        },
+      },
+      current: async () => {
+        const source = this.ctx.props.source;
+        if (!source) return true;
+        const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+        if (!namespace) throw new Error("GitHub coordinator is not configured");
+        return await namespace.getByName(String(source.check.repository.id)).current(source);
+      },
+      ...(snapshots ? { restore: snapshots, snapshots } : {}),
     });
   }
 
@@ -388,61 +494,51 @@ export class RunwaySandboxBinding
     });
   }
 
-  async restoreCache(request: Parameters<RuntimeBinding["restoreCache"]>[0]): Promise<CacheResult> {
+  async restoreCache(
+    request: Parameters<RuntimeBinding["restoreCache"]>[0],
+  ): ReturnType<RuntimeBinding["restoreCache"]> {
     this.#assertRun(request.runId);
     this.#snapshotValues(request.secrets);
     const expected = sourceIdentity(this.ctx.props.repository);
     if (request.source.result.revision !== expected.revision) {
       throw new Error("cache source does not match the bound repository");
     }
-    let cache = this.#caches.get(request.runId);
-    if (!cache) {
-      const config = this.ctx.props.cache;
-      cache = new Cache({
-        context: {
-          repositoryId: config.repositoryId,
-          workflowId: config.workflowId,
-          generation: config.generation,
-          admission: config.admission,
-          platform: {
-            schema: 1,
-            os: "linux",
-            architecture: "x86_64",
-            ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
-            runnerAbi: "runway-1",
-          },
-        },
-        refs: {
-          get: async (key) => {
-            const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
-            return object ? { etag: object.httpEtag, text: async () => await object.text() } : null;
-          },
-          put: async (key, text, options) => {
-            void key;
-            void text;
-            void options;
-            throw new Error("cache publication is unavailable before durable success");
-          },
-        },
-        files: {
-          inspect: async (path) =>
-            await this.#sandbox().inspectCacheFile({
-              runId: request.runId,
-              source: request.source,
-              path,
-              secrets: this.#snapshotValues(request.secrets),
-            }),
-        },
-        current: async () => false,
-      });
-      this.#caches.set(request.runId, cache);
+    return await this.#cache(request).record(request.id, request.declaration);
+  }
+
+  async quiesce(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
+    this.#assertRun(runId);
+    await this.#sandbox().quiesce(runId, this.#snapshotValues(secrets));
+  }
+
+  async prepareCaches(
+    request: Parameters<RuntimeBinding["prepareCaches"]>[0],
+  ): ReturnType<RuntimeBinding["prepareCaches"]> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    return await this.#cache(request).prepare(request.pending);
+  }
+
+  async publishCaches(request: Parameters<RuntimeBinding["publishCaches"]>[0]): Promise<void> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    if (request.finalization.outcome !== "success") return;
+    const source = this.ctx.props.source;
+    if (source) {
+      const winner = await this.readTerminal(request.runId);
+      if (
+        !winner ||
+        winner.claimId !== request.finalization.claimId ||
+        winner.outcome !== request.finalization.outcome
+      ) {
+        throw new Error("cache publication requires the terminal winner");
+      }
     }
-    return await cache.restore(request.id, request.declaration);
+    await this.#cache(request).commit(request.prepared);
   }
 
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
     await this.#sandbox().destroy(runId, this.#snapshotValues(secrets));
-    this.#caches.delete(runId);
   }
 }
 
@@ -558,7 +654,9 @@ const loadWorker = async (
             generation: metadata.source?.generation ?? 1,
           },
           cache: {
+            accountId: config.accountId,
             admission,
+            bucket: config.cacheBucket,
             repositoryId: cacheRepositoryId,
             workflowId: artifact.workflowId,
             generation: metadata.source?.generation ?? 1,

@@ -1,4 +1,5 @@
 import { cacheDeclarationEvidence } from "./cache.ts";
+import type { PendingCache, PreparedCache } from "./cache.ts";
 import { ExecError } from "./exec-error.ts";
 import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "./run.ts";
 import { redactSecrets } from "./secret-redaction.ts";
@@ -44,8 +45,17 @@ export interface DurableCache {
   readonly id: string;
   run(
     digest: string,
-    work: () => Promise<CacheResult>,
-  ): Promise<{ readonly digest: string; readonly result: CacheResult }>;
+    work: () => Promise<CacheRecord>,
+  ): Promise<{ readonly digest: string; readonly record: CacheRecord }>;
+}
+
+export interface CacheRecord {
+  readonly result: CacheResult;
+  readonly pending?: PendingCache;
+}
+
+export interface DurableCachePublication {
+  run(work: () => Promise<void>): Promise<void>;
 }
 
 export interface Placement {
@@ -55,7 +65,19 @@ export interface Placement {
     readonly declaration: CacheDeclaration;
     readonly source: PreparedSource;
     readonly secrets: ReadonlyArray<string>;
-  }): Promise<CacheResult>;
+  }): Promise<CacheRecord>;
+  quiesce?(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
+  prepareCaches?(request: {
+    readonly runId: string;
+    readonly pending: readonly PendingCache[];
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<readonly PreparedCache[]>;
+  publishCaches?(request: {
+    readonly runId: string;
+    readonly finalization: Finalization;
+    readonly prepared: readonly PreparedCache[];
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<void>;
   exec(request: {
     readonly runId: string;
     readonly step: {
@@ -83,6 +105,8 @@ export class Sandbox {
     string,
     { readonly digest: string; readonly target: string }
   >();
+  readonly #pendingCaches = new Map<string, PendingCache>();
+  #prepared: Promise<readonly PreparedCache[]> | undefined;
   #cleaned = false;
   #cleaning: Promise<void> | undefined;
   #preparation: Promise<PreparedSource> | undefined;
@@ -131,7 +155,7 @@ export class Sandbox {
     const digest = evidence.digest;
     if (this.#placement.cache) this.#used = true;
     const outcome = await step.run(digest, async () => {
-      if (!this.#placement.cache) return { state: "miss", reason: "unavailable" };
+      if (!this.#placement.cache) return { result: { state: "miss", reason: "unavailable" } };
       const prepared = await this.#prepare(true);
       return await this.#placement.cache({
         runId: this.#runId,
@@ -144,7 +168,37 @@ export class Sandbox {
     if (outcome.digest !== digest) {
       throw new Error("cache declaration changed across durable retry");
     }
-    return cacheResult(outcome.result);
+    const record = cacheRecord(outcome.record);
+    if (record.pending) this.#pendingCaches.set(step.id, record.pending);
+    else this.#pendingCaches.delete(step.id);
+    return record.result;
+  }
+
+  async prepare(): Promise<readonly PreparedCache[]> {
+    if (this.#prepared) return await this.#prepared;
+    const preparing = (async () => {
+      if (this.#pendingCaches.size === 0) return [];
+      if (this.#placement.quiesce) {
+        await this.#placement.quiesce(this.#runId, this.#secrets);
+      }
+      if (!this.#placement.prepareCaches || this.#pendingCaches.size === 0) return [];
+      return await this.#placement.prepareCaches({
+        runId: this.#runId,
+        pending: [...this.#pendingCaches.values()],
+        secrets: this.#secrets,
+      });
+    })();
+    this.#prepared = preparing;
+    try {
+      return await preparing;
+    } catch (error) {
+      if (this.#prepared === preparing) this.#prepared = undefined;
+      throw error;
+    }
+  }
+
+  hasPendingCaches(): boolean {
+    return this.#pendingCaches.size > 0;
   }
 
   #prepare(allowReconstruct: boolean): Promise<PreparedSource> {
@@ -235,8 +289,26 @@ export class Sandbox {
     }
   }
 
-  async finish(finalization: Finalization): Promise<void> {
+  async finish(
+    finalization: Finalization,
+    prepared: readonly PreparedCache[] = [],
+    publication?: DurableCachePublication,
+  ): Promise<void> {
     await this.#terminal.verify(finalization);
+    if (
+      finalization.outcome === "success" &&
+      prepared.some((entry) => entry.state === "ready") &&
+      this.#placement.publishCaches
+    ) {
+      const publish = async (): Promise<void> =>
+        await this.#placement.publishCaches!({
+          runId: this.#runId,
+          finalization,
+          prepared,
+          secrets: this.#secrets,
+        });
+      await (publication ? publication.run(publish) : publish()).catch(() => {});
+    }
     await this.cleanup();
   }
 }
@@ -289,4 +361,20 @@ const cacheResult = (value: unknown): CacheResult => {
     return result as CacheResult;
   }
   throw new Error("invalid durable cache result");
+};
+
+const cacheRecord = (value: unknown): CacheRecord => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid durable cache record");
+  }
+  const record = value as Record<string, unknown>;
+  if (!["result", "pending,result"].includes(Object.keys(record).sort().join(","))) {
+    throw new Error("invalid durable cache record");
+  }
+  const result = cacheResult(record.result);
+  if (record.pending === undefined) return { result };
+  if (!record.pending || typeof record.pending !== "object" || Array.isArray(record.pending)) {
+    throw new Error("invalid durable cache record");
+  }
+  return { result, pending: structuredClone(record.pending) as PendingCache };
 };

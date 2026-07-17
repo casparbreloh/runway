@@ -1,5 +1,6 @@
-import type { CacheDeclaration, CacheResult, ExecResult } from "./run.ts";
-import type { NormalizedExecOptions } from "./sandbox.ts";
+import type { PendingCache, PreparedCache } from "./cache.ts";
+import type { CacheDeclaration, ExecResult } from "./run.ts";
+import type { CacheRecord, NormalizedExecOptions } from "./sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 
@@ -25,7 +26,19 @@ export interface RuntimeBinding {
     readonly declaration: CacheDeclaration;
     readonly secrets: Readonly<Record<string, string>>;
     readonly source: PreparedSource;
-  }): Promise<CacheResult>;
+  }): Promise<CacheRecord>;
+  quiesce(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
+  prepareCaches(request: {
+    readonly runId: string;
+    readonly pending: readonly PendingCache[];
+    readonly secrets: Readonly<Record<string, string>>;
+  }): Promise<readonly PreparedCache[]>;
+  publishCaches(request: {
+    readonly runId: string;
+    readonly finalization: Finalization;
+    readonly prepared: readonly PreparedCache[];
+    readonly secrets: Readonly<Record<string, string>>;
+  }): Promise<void>;
   execute(request: {
     readonly runId: string;
     readonly step: { readonly id: string; readonly count: number; readonly attempt: number };
