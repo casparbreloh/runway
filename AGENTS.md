@@ -83,8 +83,10 @@ export default workflow({
 
 ## Triggers And Secrets
 
-- `webhook({ schema })` validates with Standard Schema and types the event as its output.
-- `webhook<T>(opts)` is assertion-only typing; `webhook(opts)` gives `unknown`.
+- `webhook({ path, secret, signatureHeader, schema })` validates with Standard Schema and types the
+  event as its output.
+- `webhook<T>({ path, secret, signatureHeader })` is assertion-only typing; the same required options
+  without a generic give `unknown`.
 - `.filter(typeGuard)` narrows the event and returns a new trigger.
 - `cron(expression)` types the event as `{ cron, scheduledTime }`.
 - `github({ checkName, events })` types normalized push and pull-request events and keeps App
