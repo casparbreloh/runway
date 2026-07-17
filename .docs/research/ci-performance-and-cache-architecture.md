@@ -1,6 +1,6 @@
 # Runway CI performance and cache architecture research
 
-Research date: 2026-07-16
+Research date: 2026-07-16. Foundation evidence updated: 2026-07-17.
 
 ## Executive conclusion
 
@@ -16,8 +16,8 @@ documents reusing an arbitrary prior runner filesystem as its primary cache mech
 
 For Runway, this implies:
 
-1. Name the public execution abstraction the **Runway repository sandbox**. Cloudflare Sandbox
-   remains an internal implementation detail.
+1. Keep **Sandbox** as one internal, run-bound foundation term. Authors use the flat `Run` surface;
+   Cloudflare Sandbox, placement, processes, and cleanup remain implementation details.
 2. Build one internal cache plane with immutable objects, trust-aware namespaces,
    successful-run-only publication, observability, and fail-open misses.
 3. Keep specialized cache families separate. Tool installations, dependency stores, task outputs,
@@ -28,12 +28,38 @@ For Runway, this implies:
    entrypoint, image identity, and safe rollout/versioning strategy.
 5. Replace the root repository’s custom public archive/chunk bootstrap only after the new
    primitives are proven by Runway’s own CI.
-6. Benchmark and resize before claiming Runway is faster than GitHub. The current Runway
-   `standard-1` container has 0.5 vCPU and 4 GiB RAM, while GitHub gives this public repository
-   4 vCPU and 16 GiB RAM. Cloudflare supports `standard-4` at 4 vCPU and 12 GiB. Caching can beat
-   GitHub on warm paths, but it cannot make a half-core universally outperform four cores on cold
-   CPU-bound work. [Cloudflare instance types](https://developers.cloudflare.com/containers/platform-details/limits/),
+6. Benchmark before claiming Runway is faster than GitHub. The desired foundation manifest now uses
+   `standard-4` at 4 vCPU and 12 GiB, while GitHub gives this public repository 4 vCPU and 16 GiB.
+   The still-live legacy `runway-monorepo` stack remains on `standard-1` at 0.5 vCPU and 4 GiB;
+   it is not the final benchmark configuration. Caching can beat GitHub on warm paths, but it cannot
+   hide weak cold compute. [Cloudflare instance types](https://developers.cloudflare.com/containers/platform-details/limits/),
    [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+
+### Evidence status on 2026-07-17
+
+The foundation source now has the flat `workflow(...).run(...)` and `run.do/exec/cache/sleep`
+surface, exact Source and continuity rules, one Terminal owner, generic safe cache behavior, bounded
+Meter quantities, exact Stack ownership, cache schema 2, runner ABI `runway-sandbox-v2`, and a
+digest-pinned linux/amd64 `standard-4` desired manifest. This is local implementation evidence.
+
+At exact PR head `90a34ae`, the existing installed integration automatically ran Check
+`87800799473` successfully in 2m46s and Test `87800798140` successfully in 3m14s. Those two durations
+are **measured legacy-stack exact-head evidence**, not cold/warm cache samples and not a comparison
+with GitHub Actions.
+
+No private-cache warm hit, repeatable live miss/corrupt/cancel set, 20-sample benchmark, cost win,
+fresh `runway` Stack cutover, or legacy/bootstrap deletion has been proven. The live legacy stack is
+still `runway-monorepo`/`standard-1`; the desired fresh stack is `runway`/`standard-4`. The private
+shared workflow-artifact bucket and unknown shared objects remain preservation boundaries.
+
+| Evidence or gate                     | Performance                         | Cost                                               | Status                         |
+| ------------------------------------ | ----------------------------------- | -------------------------------------------------- | ------------------------------ |
+| Legacy exact-head Check/Test         | 2m46s / 3m14s for one PR head       | No complete per-run Meter cost captured            | Measured; not a benchmark      |
+| Desired `standard-4` cold comparison | P50 and P95 ≤1.10× GitHub four-core | ≤0.75× paid GitHub four-core list-price equivalent | Target; no samples yet         |
+| Desired `standard-4` warm comparison | P50 and P95 ≤0.60× GitHub four-core | ≤0.50× paid GitHub four-core list-price equivalent | Target; no live warm proof yet |
+
+The targets require at least 20 cold and 20 warm samples on the same commit and commands, and total
+variable infrastructure quantities rather than container compute alone.
 
 ## Verified provider facts
 
@@ -100,7 +126,7 @@ Its cache families include:
   [Blacksmith container cache](https://docs.blacksmith.sh/blacksmith-caching/docker-container-caching)
 
 This is the closest analogue for Runway: restore named filesystem state into an otherwise fresh
-repository sandbox.
+run-bound Sandbox.
 
 ### Performance-claim caveats
 
@@ -412,18 +438,18 @@ than inferred from R2 or Durable Objects behavior.
 
 ### Runway implications (inference)
 
-Artifacts is a plausible **Phase 5 repository-acceleration** implementation: Runway could import or
+Artifacts is a plausible **Phase 5 repository-acceleration Source implementation**: Runway could
 maintain a repository mirror, address exact commits, fork isolated working state, and evaluate
-ArtifactFS for lazy source hydration. It is not a replacement for the Phase 2 content-cache
-foundation. Git repositories expose histories and mutable refs; Runway caches require immutable
-byte objects, runtime-derived trust scopes, success-only publication, conditional aliases, direct
-transfer, retention, and cache-specific authorization.
+ArtifactFS for lazy source hydration. It is not a replacement for Cache. Git repositories expose
+histories and mutable refs; Runway caches require immutable byte objects, runtime-derived trust
+scopes, success-only publication, conditional aliases, direct transfer, retention, and cache-specific
+authorization.
 
-Runway should keep a future `ArtifactRepositoryStore` behind the repository-sandbox boundary rather
-than put beta bindings into `ContentCache`. That preserves R2-backed cache objects and lets Phase 5
-compare three independent source paths: normal exact-SHA clone, a bare mirror or trusted snapshot,
-and Artifacts/ArtifactFS. No mise, pnpm, Turbo, Nx, or other ecosystem semantics belong in either
-the repository store or content-cache foundation.
+Runway should keep any future Artifacts implementation behind Source rather than put beta bindings
+into the private cache plane. That preserves R2-backed cache objects and lets Phase 5 compare three
+independent source paths: normal exact-SHA clone, a bare mirror or trusted snapshot, and
+Artifacts/ArtifactFS. No package-manager, language-runtime, or tool-protocol semantics belong in
+either Source or Cache.
 
 Artifacts could later preserve agent/session filesystem histories in Phase 7, but that should not
 pull deferred agent scope into the CI milestones. Repository tokens and forks are useful isolation
@@ -451,8 +477,10 @@ must prove:
 
 ## Minimal language-neutral cache primitives
 
-The provider evidence does not justify a package-manager-specific cache core. The minimal reusable
-surface is byte-oriented and policy-aware; language and build tools remain adapters.
+The provider evidence does not justify a package-manager-specific cache core. The public reusable
+surface is one generic caller-named filesystem tree through `run.cache()`. Immutable content,
+conditional refs, transfer capabilities, trust, schema, and publication remain private implementation
+facts; language and build tools remain consumers or later adapters.
 
 ### Immutable content objects
 
@@ -494,7 +522,7 @@ model to protect default-branch caches from low-trust triggers.
 
 ### Direct transfer
 
-Large cache bodies should travel directly between the repository sandbox and object storage, not
+Large cache bodies should travel directly between the Sandbox and object storage, not
 through Worker memory or RPC streams. R2 presigned URLs authorize one operation on one object for
 1 second to 7 days and work as ordinary HTTP uploads/downloads. They are bearer tokens and should
 therefore be short-lived and narrowly scoped.
@@ -504,20 +532,23 @@ Cloudflare's own Sandbox backup implementation follows this pattern: the contain
 squashfs archive and transfers it directly to/from R2 using a presigned URL.
 [Sandbox Backups API](https://developers.cloudflare.com/sandbox/api/backups/)
 
-### Filesystem snapshots
+### Safe filesystem cache implementation
 
-Expose snapshots as a separate optional primitive rather than pretending every cache is a tarball:
+Runway's first Cache consumer is a private content-addressed SquashFS encoding, not a public snapshot
+manager. Restore stages beside the target, validates the complete tree under bounded descriptor-
+relative traversal, and atomically renames only after integrity and target checks pass. Exact Source
+reconstruction remains independent of Cache availability.
 
-```text
-capture(path, fingerprint, ttl) -> snapshotRef
-restore(snapshotRef, path) -> mounted/restored | miss
-```
+Cache schema 2 and runner ABI `runway-sandbox-v2` include a bounded canonical private hardlink-map
+trailer in the archive/object digests. The pinned image exposes high-level `squashfuse`, whose stat
+path does not preserve usable inode identity; the trailer allows Runway to validate exact regular-file
+membership and recreate hardlinks without parsing compressed SquashFS metadata. A future pinned image
+with equivalent low-level inode evidence may remove the trailer only behind another schema/ABI miss.
 
-Cloudflare backups provide compressed squashfs snapshots, direct R2 transfer, TTLs, and
-copy-on-write production restores. The restored FUSE overlay is ephemeral and must be restored
-again after Sandbox replacement. Backup IDs are UUIDs rather than content digests, so Runway should
-wrap them in an immutable, fingerprinted manifest and keep exact-SHA reconstruction independent of
-snapshot availability. [Sandbox Backups API](https://developers.cloudflare.com/sandbox/api/backups/)
+Cloudflare backups remain a benchmark alternative because they provide compressed SquashFS,
+direct R2 transfer, TTLs, and copy-on-write restores. Their restored FUSE overlay is ephemeral after
+Sandbox replacement and backup IDs are UUIDs rather than Runway content identities, so they do not
+replace current cache semantics. [Sandbox Backups API](https://developers.cloudflare.com/sandbox/api/backups/)
 
 ### Success-only publication
 
@@ -536,10 +567,10 @@ on success: authorize + compare-and-set named refs
 on failure/cancel: publish no shared refs
 ```
 
-These five pieces—immutable content, conditional refs, policy, direct transfer, and optional
-filesystem snapshots with success-only ref publication—are enough to support later ecosystem
-packages, repository mirrors, tool-native protocols, and BuildKit without teaching the cache core
-any language-specific invalidation rules.
+These five pieces—immutable content, conditional refs, policy, direct transfer, and safe generic
+filesystem trees with success-only ref publication—are enough to support later ecosystem packages,
+repository mirrors, tool-native protocols, and BuildKit without teaching the cache core any
+language-specific invalidation rules.
 
 ## Existing cache semantics worth adopting
 
@@ -604,9 +635,9 @@ the same for Nx’s native protocol.
 This section is inference from the verified behavior above, not a claim about existing provider
 implementation.
 
-### Public concept: repository sandbox
+### Internal concept: Sandbox
 
-A **Runway repository sandbox** is the run-scoped environment that:
+A **Sandbox** is the run-scoped internal owner that:
 
 - reconstructs an exact repository commit;
 - restores eligible caches;
@@ -615,12 +646,13 @@ A **Runway repository sandbox** is the run-scoped environment that:
 - survives workflow retries through deterministic identity;
 - is cleaned up at run completion.
 
-“Cloudflare Sandbox” should stay behind this boundary.
+Authors do not receive this object. They use `Run`; Cloudflare Sandbox stays behind the internal
+Sandbox boundary.
 
 ### Internal cache plane
 
-Use private R2 for immutable objects and backup payloads. Put a small metadata/control layer in the
-repository Worker or a dedicated Durable Object.
+Use private R2 for immutable objects. Keep refs and policy in the repo-scoped control plane, and do
+not proxy payload bodies through authored workflow code.
 
 A cache identity should include at least:
 
@@ -648,9 +680,10 @@ fingerprint → lookup → restore/mount → validate → use → publish-on-suc
 A miss, corrupted object, timeout, or unavailable cache must fall back to normal execution. Cache
 correctness cannot be required for workflow correctness.
 
-Do not expose a universal public cache interface until R2 archives and Cloudflare backup/restore
-exercise the storage seam and Node, Python, and Rust fixtures exercise the same named-path semantics.
-The first seam should remain internal and narrow.
+The public interface is now deliberately smaller than a universal store: `run.cache()` declares one
+named path and caller-owned key. R2 objects, refs, manifests, transfer capabilities, archive encoding,
+and snapshot helpers remain internal. Package managers and language runtimes prove only that the same
+language-neutral tree semantics work; they do not enter foundation vocabulary.
 
 Three roles should not be collapsed under the word adapter:
 
@@ -743,8 +776,9 @@ Benchmark at least these scenarios:
 
 Use repeated P50/P95 measurements, identical commits, and the same workflow commands. Keep
 CPU-heavy, I/O-heavy, and cache-heavy results separate. Compare Runway `standard-4` against
-GitHub’s four-core public Linux runner; do not compare the current half-core runner and attribute
-the difference to cache architecture.
+GitHub’s four-core public Linux runner. The live legacy half-core runner is useful exact-head
+development evidence, but it is not valid final performance evidence for the desired four-core
+manifest.
 
 The target should be precise: for example, “Runway warm source-only PR checks have lower
 webhook-to-completion P50 and P95 than GitHub-hosted Actions for the benchmark repositories,” not
@@ -771,12 +805,12 @@ caching from hiding weak compute; every warm benchmark must include transfer, va
 storage, orchestration, and miss cost. For public repositories, standard GitHub compute remains free,
 so Runway competes on feedback time and capability rather than direct compute price.
 
-## Recommended implementation order
+## Foundation milestones and remaining gates
 
 ### Phase 1 — runner foundation and subtraction
 
 - Delete the unused private cache route and consolidate repeated live Cloudflare resource ownership.
-- Establish a run-bound `RepositorySandbox` behind `exec` plus outcome-aware `finish`.
+- Establish a run-bound `Sandbox` behind flat `Run` operations plus one Terminal authority.
 - Reconstruct source only before any command may have started. After an acknowledged or ambiguous
   start, reconnect only to the proven same process/placement; otherwise fail explicitly rather than
   replaying a command that may have mutated workspace or external state.
@@ -786,7 +820,8 @@ so Runway competes on feedback time and capability rather than direct compute pr
 - Benchmark generic CPU, I/O, source, cancellation, and replacement workloads on comparable
   Cloudflare and GitHub capacity.
 
-Exit: the execution lifecycle is correct and smaller, with an honest cold-path time/cost baseline.
+Local status: the execution lifecycle and Meter exist; the comparable cold-path benchmark remains an
+open release gate.
 
 ### Phase 2 — content cache foundation
 
@@ -800,7 +835,8 @@ Exit: the execution lifecycle is correct and smaller, with an honest cold-path t
 - Benchmark direct R2 transfer against Cloudflare backup/restore before introducing a storage seam.
 - Add retention/quota/GC and proactive lookup only after lifecycle and cost measurement.
 
-Exit: content and refs are secure, observable, race-safe, cost-gated, and language-neutral.
+Local status: private identity, refs, policy, observability, budgets, and success-only publication are
+implemented. Repeatable direct private-R2 live evidence remains open.
 
 ### Phase 3 — safe filesystem snapshots and dogfood deletion
 
@@ -816,7 +852,8 @@ Exit: content and refs are secure, observable, race-safe, cost-gated, and langua
 - Once repeated cold/warm/replacement evidence is green, replace and delete Runway's temporary public
   archive, Dockerfile, hashes, shell transport, tool probes, and public bucket configuration.
 
-Exit: arbitrary repositories use one snapshot primitive, and Runway is an ordinary consumer.
+Local status: generic schema-2 trees and Runway's repository-only consumer exist. The old public
+bootstrap cannot be deleted until live miss/publish/warm/corrupt/cancel evidence passes.
 
 ### Phase 4 — runner environments, capacity, and comparable performance
 
@@ -868,14 +905,15 @@ The phase succeeds when Runway’s own workflows read approximately like:
 export default workflow({
   id: "check",
   trigger: () => github({ ... }),
-}).handler(async (ctx) => {
-  await ctx.step.exec("install", "pnpm install --frozen-lockfile");
-  await ctx.step.exec("typecheck", "pnpm typecheck");
-  await ctx.step.exec("lint", "pnpm lint");
+}).run(async (run) => {
+  await prepareRepository(run);
+  await run.exec("typecheck", repositoryCommand("pnpm typecheck"));
+  await run.exec("lint", repositoryCommand("pnpm lint"));
+  await finishRepository(run);
 });
 ```
 
-The exact public syntax—including whether adapters ever appear in workflow configuration—should
-remain undecided until the internal seam is exercised. The important outcome is that cache
-transport, lock verification, trust scope, repository preparation, and restoration disappear from
-repository workflow code.
+The foundation public syntax is now flat `run.do/exec/cache/sleep`. This repository's helper is an
+ordinary consumer, not a foundation preset: it may contain Node and pnpm details while cache
+transport, trust scope, capability handling, validation, and atomic restore stay internal. Future
+adapters should be introduced only when a second real consumer proves a reusable seam.
