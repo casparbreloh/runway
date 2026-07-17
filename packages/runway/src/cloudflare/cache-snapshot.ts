@@ -487,6 +487,26 @@ const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
   }
   fs.closeSync(destinationDescriptor);
 };
+const prepareParent = (targetValue) => {
+  const target = Buffer.from(targetValue);
+  const components = parts(target);
+  if (
+    target[0] !== 47 ||
+    components.length < 3 ||
+    components[0].length !== 0 ||
+    !(same(components[1], Buffer.from("cache")) || same(components[1], Buffer.from("workspace")))
+  ) fail("unsafe target parent");
+  let current = Buffer.from("/");
+  for (const component of components.slice(1, -1)) {
+    if (component.length === 0 || component.length > MAX_COMPONENT || same(component, dot) || same(component, dotdot)) fail("unsafe target parent");
+    const next = current.length === 1 ? Buffer.concat([current, component]) : join(current, component);
+    try { fs.mkdirSync(next, { mode: 0o700 }); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+    const info = fs.lstatSync(next);
+    if (!info.isDirectory() || info.isSymbolicLink()) fail("unsafe target parent");
+    current = next;
+  }
+};
 const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
   const { groups } = preflight(archive, maxBytes, true);
   fs.mkdirSync(mount, { mode: 0o700 });
@@ -500,6 +520,7 @@ const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
     if (staging === undefined) return scanTree(mount, maxBytes, false, groups);
     const scanned = scanTree(mount, maxBytes, true, groups);
     if (!sameTree(scanned.summary, expected)) fail("tree evidence");
+    prepareParent(staging);
     try { copyTree(scanned.rootDescriptor, scanned.root, scanned.records, staging, maxBytes); }
     finally { fs.closeSync(scanned.rootDescriptor); }
     const restored = scanTree(staging, maxBytes);
@@ -854,7 +875,7 @@ export class CloudflareCacheSnapshot {
     if (request.budget?.maxBytes === 0 || request.budget?.maxDurationMs === 0) {
       return { state: "miss" as const, reason: "budget" as const };
     }
-    const archivePath = `${request.path}.sqsh`;
+    const archivePath = `/tmp/.runway-cache-${crypto.randomUUID()}.sqsh`;
     const expected = { bytes: request.object.archiveBytes, digest: request.object.archiveDigest };
     try {
       const downloaded = await this.#transfer.get({

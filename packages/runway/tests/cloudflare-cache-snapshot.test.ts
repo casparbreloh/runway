@@ -308,7 +308,7 @@ fs.linkSync(rawOne, rawTwo);
 
       const restored = await snapshots.stage({
         object: object(),
-        path: "/tmp/restored",
+        path: "/cache/nested/restored",
         budget,
       });
       expect(restored).toMatchObject({ state: "ready", treeDigest: captured.treeDigest });
@@ -317,7 +317,7 @@ fs.linkSync(rawOne, rawTwo);
           container,
           String.raw`
 const fs = require("node:fs");
-const root = "/tmp/restored";
+const root = "/cache/nested/restored";
 const inode = (path) => fs.lstatSync(path).ino;
 if (inode(root + "/nested/one") !== inode(root + "/one-alias")) throw new Error("group one lost");
 if (inode(root + "/two") !== inode(root + "/two-alias-a") || inode(root + "/two") !== inode(root + "/two-alias-b")) throw new Error("group two lost");

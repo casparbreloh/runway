@@ -400,13 +400,13 @@ export class RunwaySandboxBinding
       refs: {
         get: async (key) => {
           const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
-          return object ? { etag: object.httpEtag, text: async () => await object.text() } : null;
+          return object ? { etag: object.etag, text: async () => await object.text() } : null;
         },
         put: async (key, text, options) => {
           const object = await this.env[ARTIFACT_BUCKET_BINDING].put(key, text, {
             onlyIf: options.onlyIf,
           });
-          return object ? { etag: object.httpEtag } : null;
+          return object ? { etag: object.etag } : null;
         },
       },
       files: {
@@ -427,6 +427,7 @@ export class RunwaySandboxBinding
         if (!namespace) throw new Error("GitHub coordinator is not configured");
         return await namespace.getByName(String(source.check.repository.id)).current(source);
       },
+      diagnose: (diagnostic) => console.log({ type: "runway-cache", diagnostic }),
       meter,
       ...(snapshots ? { restore: snapshots, snapshots } : {}),
     });
