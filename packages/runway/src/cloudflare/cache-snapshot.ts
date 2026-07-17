@@ -4,9 +4,10 @@ import { CACHE_LIMITS } from "../sandbox-config.ts";
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_ENTRIES = 1_000_000;
 const MAX_DEPTH = 256;
-const HELPER_MEMORY_BYTES = 1024 * 1024 * 1024;
+const HELPER_MEMORY_BYTES = 4 * 1024 * 1024 * 1024;
 const HELPER_CPU_SECONDS = 120;
 const HELPER_FILE_DESCRIPTORS = 64;
+const SNAPSHOT_PROCESSORS = 2;
 const HELPER_TIMEOUT_SECONDS = CACHE_LIMITS.helperDurationMs / 1000;
 
 const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/local/bin/node
@@ -541,7 +542,7 @@ const main = () => {
     const groups = hardlinkGroups(source.records);
     fs.closeSync(source.rootDescriptor);
     try { fs.unlinkSync(archive); } catch (error) { if (error.code !== "ENOENT") throw error; }
-    run(["mksquashfs", target, archive, "-comp", "zstd", "-noappend", "-no-progress", "-all-root", "-no-xattrs", "-no-exports", "-mkfs-time", "0", "-all-time", "0"]);
+    run(["mksquashfs", target, archive, "-comp", "zstd", "-processors", "${SNAPSHOT_PROCESSORS}", "-noappend", "-no-progress", "-all-root", "-no-xattrs", "-no-exports", "-mkfs-time", "0", "-all-time", "0"]);
     appendTrailer(archive, groups, maxBytes);
     const proof = preflight(archive, maxBytes);
     const after = scanTree(target, maxBytes);

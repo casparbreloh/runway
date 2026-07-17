@@ -257,16 +257,6 @@ test.runIf(env.RUNWAY_EXACT_IMAGE_CACHE_SNAPSHOT === "1")(
         container,
         String.raw`
 const fs = require("node:fs");
-fs.mkdirSync("/tmp/runway-test-bin");
-fs.writeFileSync(
-  "/tmp/runway-test-bin/prlimit",
-  "#!/usr/local/bin/node\n" +
-    "const child = require(\"node:child_process\");\n" +
-    "const args = process.argv.slice(2).filter((argument) => !argument.startsWith(\"--as=\"));\n" +
-    "const result = child.spawnSync(\"/usr/bin/prlimit\", args, { stdio: \"inherit\" });\n" +
-    "process.exit(result.status ?? 1);\n",
-);
-fs.chmodSync("/tmp/runway-test-bin/prlimit", 0o755);
 const source = "/tmp/source";
 fs.mkdirSync(source + "/nested", { recursive: true });
 fs.writeFileSync(source + "/nested/one", "one");
