@@ -13,6 +13,7 @@ export default defineConfig({
       "tests/github.test.ts",
       "tests/meter.test.ts",
       "tests/sandbox.test.ts",
+      "tests/stack.test.ts",
       "tests/terminal.test.ts",
       "tests/workflow.test.ts",
     ],
