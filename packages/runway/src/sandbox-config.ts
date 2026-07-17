@@ -12,6 +12,7 @@ export const SANDBOX_CONTAINER = {
   image: SANDBOX_IMAGE,
   instance_type: "standard-4",
 } as const;
+export const SANDBOX_IMAGE_DIGEST = SANDBOX_IMAGE.slice(SANDBOX_IMAGE.indexOf("@") + 1);
 
 export const SANDBOX_CAPACITY = {
   vcpu: 4,

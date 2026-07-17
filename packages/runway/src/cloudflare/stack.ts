@@ -13,6 +13,7 @@ import {
   SANDBOX_BINDING,
   SANDBOX_CLASS,
   SANDBOX_CONTAINER,
+  SANDBOX_IMAGE_DIGEST,
 } from "../sandbox-config.ts";
 import {
   stackIdOf,
@@ -139,7 +140,7 @@ export const cloudflareStackManifest = (opts: {
   readonly artifactBucket: string;
   readonly stateBucket: string;
 }): StackManifest => {
-  const imageDigest = SANDBOX_CONTAINER.image.slice(SANDBOX_CONTAINER.image.indexOf("@") + 1);
+  const imageDigest = SANDBOX_IMAGE_DIGEST;
   const moduleDigest = `sha256:${sha256(opts.deployment.host)}`;
   const artifacts = opts.deployment.artifacts
     .map(({ artifactVersion }) => ({

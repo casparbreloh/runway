@@ -90,6 +90,7 @@ export const RepositoryProbeDynamic: typeof WorkflowEntrypoint<unknown, unknown>
   createDynamicWorkflow({
     accountId: "repository-probe-account",
     cacheBucket: "runway-repository-probe-account",
+    imageDigest: `sha256:${"1".repeat(64)}`,
     scriptName: "generated-runway-host",
     deploymentId: "repository-probe-deployment",
     secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",

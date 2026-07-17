@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type { GitHubRepository } from "./github.ts";
 import type { RegisteredWorkflow, Registry } from "./registry.ts";
+import { SANDBOX_IMAGE_DIGEST } from "./sandbox-config.ts";
 import { validateRegistry } from "./validate.ts";
 import { DYNAMIC_WORKFLOW_CLASS, RUNWAY_WORKFLOW_CLASS } from "./worker-contract.ts";
 
@@ -74,6 +75,7 @@ export const generateHost = (
   const config = JSON.stringify({
     accountId: opts.accountId,
     cacheBucket: `runway-${opts.accountId}`,
+    imageDigest: SANDBOX_IMAGE_DIGEST,
     scriptName: opts.scriptName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,

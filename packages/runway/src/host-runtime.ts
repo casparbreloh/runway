@@ -155,6 +155,7 @@ type HostRoute =
 export interface HostConfig {
   readonly accountId: string;
   readonly cacheBucket: string;
+  readonly imageDigest: string;
   readonly scriptName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
@@ -729,6 +730,7 @@ const loadWorker = async (
             accountId: config.accountId,
             admission,
             bucket: config.cacheBucket,
+            imageDigest: config.imageDigest,
             repositoryId: cacheRepositoryId,
             workflowId: artifact.workflowId,
             generation: metadata.source?.generation ?? 1,
