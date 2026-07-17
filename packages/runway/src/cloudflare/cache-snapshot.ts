@@ -23,6 +23,9 @@ const MAX_LINK = 4096;
 const MAX_METADATA = 67_108_864;
 const MAX_PHYSICAL = 1_099_511_627_776;
 const UINT64 = 0xffff_ffff_ffff_ffffn;
+const TRAILER_MAGIC = Buffer.from("52554e574159484c494e4b4d41500000", "hex");
+const TRAILER_SCHEMA = 2;
+const TRAILER_FOOTER_BYTES = 60;
 const slash = Buffer.from("/");
 const dot = Buffer.from(".");
 const dotdot = Buffer.from("..");
@@ -46,6 +49,83 @@ const field = (hasher, value) => {
   length.writeBigUInt64BE(BigInt(value.length));
   hasher.update(length);
   hasher.update(value);
+};
+const validPath = (path) => {
+  if (path.length === 0 || path.length > MAX_PATH || path.includes(0)) fail("hardlink path");
+  const components = parts(path);
+  if (components.length > MAX_DEPTH || components.some((part) => part.length === 0 || part.length > MAX_COMPONENT || same(part, dot) || same(part, dotdot))) fail("hardlink path");
+};
+const encodeHardlinks = (groups) => {
+  const header = Buffer.alloc(4);
+  header.writeUInt32BE(groups.length);
+  const fields = [header];
+  for (const group of groups) {
+    const count = Buffer.alloc(4);
+    count.writeUInt32BE(group.length);
+    fields.push(count);
+    for (const path of group) {
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(path.length);
+      fields.push(length, path);
+    }
+  }
+  const encoded = Buffer.concat(fields);
+  if (encoded.length > MAX_METADATA) fail("hardlink map quota");
+  return encoded;
+};
+const hardlinkGroups = (records) => {
+  const aliases = new Map();
+  for (const record of records) {
+    if (!same(record.kind, Buffer.from("f"))) continue;
+    const identity = record.device + ":" + record.inode;
+    const group = aliases.get(identity) ?? [];
+    group.push(record.path);
+    aliases.set(identity, group);
+  }
+  return [...aliases.values()]
+    .filter((group) => group.length >= 2)
+    .map((group) => group.sort(Buffer.compare))
+    .sort((left, right) => Buffer.compare(left[0], right[0]));
+};
+const parseHardlinks = (encoded) => {
+  if (encoded.length < 4 || encoded.length > MAX_METADATA) fail("hardlink map quota");
+  let offset = 0;
+  const take32 = () => {
+    if (offset > encoded.length - 4) fail("hardlink map");
+    const value = encoded.readUInt32BE(offset);
+    offset += 4;
+    return value;
+  };
+  const groupCount = take32();
+  if (groupCount > Math.floor(MAX_ENTRIES / 2)) fail("hardlink map quota");
+  const groups = [];
+  const seen = [];
+  for (let groupIndex = 0; groupIndex < groupCount; groupIndex += 1) {
+    const count = take32();
+    if (count < 2 || count > MAX_ENTRIES) fail("hardlink map");
+    const group = [];
+    for (let pathIndex = 0; pathIndex < count; pathIndex += 1) {
+      const length = take32();
+      if (length === 0 || length > MAX_PATH || offset > encoded.length - length) fail("hardlink path");
+      const path = Buffer.from(encoded.subarray(offset, offset + length));
+      offset += length;
+      validPath(path);
+      if (group.length > 0 && Buffer.compare(group.at(-1), path) >= 0) fail("noncanonical hardlink map");
+      group.push(path);
+      seen.push(path);
+      if (seen.length > MAX_ENTRIES) fail("hardlink map quota");
+    }
+    if (groups.length > 0 && Buffer.compare(groups.at(-1)[0], group[0]) >= 0) fail("noncanonical hardlink map");
+    groups.push(group);
+  }
+  if (offset !== encoded.length || !same(encodeHardlinks(groups), encoded)) fail("noncanonical hardlink map");
+  seen.sort(Buffer.compare);
+  for (let index = 1; index < seen.length; index += 1) {
+    const previous = seen[index - 1];
+    const current = seen[index];
+    if (same(previous, current) || (current.length > previous.length && current[previous.length] === 47 && same(current.subarray(0, previous.length), previous))) fail("hardlink path overlap");
+  }
+  return groups;
 };
 const safeLink = (path, target) => {
   if (target[0] === 47 || target.includes(0) || target.length > MAX_LINK) fail("unsafe link");
@@ -111,7 +191,7 @@ const parentRelative = (rootDescriptor, root, path) => {
     path: join(root, parent),
   };
 };
-const scanTree = (rootValue, maxBytes, includeRecords = false) => {
+const scanTree = (rootValue, maxBytes, includeRecords = false, hardlinks = null) => {
   const root = Buffer.from(rootValue);
   const rootDescriptor = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   const pending = [[Buffer.alloc(0), 0]];
@@ -146,22 +226,43 @@ const scanTree = (rootValue, maxBytes, includeRecords = false) => {
           } else fail("special file");
           metadata += path.length + (target?.length ?? 0) + 96;
           if (metadata > MAX_METADATA) fail("metadata quota");
-          found.push({ path, kind, device: info.dev, inode: info.ino, size: info.size, blocks: info.blocks, target, mode: info.mode });
+          found.push({ path, kind, device: info.dev, inode: info.ino, nlink: info.nlink, size: info.size, blocks: info.blocks, target, mode: info.mode });
           if (found.length > MAX_ENTRIES) fail("entry quota");
           if (same(kind, Buffer.from("d"))) pending.push([path, childDepth]);
         }
       } finally { fs.closeSync(directory); }
     }
     found.sort((left, right) => Buffer.compare(left.path, right.path));
+    const mapped = new Map();
+    if (hardlinks !== null) {
+      const foundPaths = new Set(found.map((record) => record.path.toString("hex")));
+      for (const [groupIndex, group] of hardlinks.entries()) {
+        for (const path of group) mapped.set(path.toString("hex"), { groupIndex, count: group.length });
+      }
+      for (const record of found) {
+        const entry = mapped.get(record.path.toString("hex"));
+        if (entry) {
+          if (!same(record.kind, Buffer.from("f")) || (record.nlink !== 1n && record.nlink !== BigInt(entry.count))) fail("hardlink membership");
+        } else if (same(record.kind, Buffer.from("f")) && record.nlink !== 1n) fail("unlisted hardlink");
+      }
+      if ([...mapped.keys()].some((path) => !foundPaths.has(path))) fail("hardlink membership");
+    }
     const identities = new Map();
     const uniqueFiles = new Set();
+    const mappedContent = new Map();
     const hasher = crypto.createHash("sha256");
     let byteCount = 0;
     let diskBytes = 0;
     let files = 0;
     let maxDepth = 0;
     for (const record of found) {
-      const identity = record.device + ":" + record.inode;
+      const mapping = mapped.get(record.path.toString("hex"));
+      const identity = hardlinks === null
+        ? record.device + ":" + record.inode
+        : mapping
+          ? "hardlink:" + mapping.groupIndex
+          : "path:" + record.path.toString("hex");
+      record.identity = identity;
       if (!identities.has(identity)) {
         if (identities.size >= MAX_INODES) fail("inode quota");
         identities.set(identity, identities.size);
@@ -177,10 +278,13 @@ const scanTree = (rootValue, maxBytes, includeRecords = false) => {
         files += 1;
         const size = Number(record.size);
         field(hasher, Buffer.from(String(size)));
-        if (!uniqueFiles.has(identity)) {
+        const firstFile = !uniqueFiles.has(identity);
+        if (firstFile) {
           if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes - byteCount) fail("expanded byte quota");
           uniqueFiles.add(identity);
           byteCount += size;
+        }
+        if (firstFile || mapping) {
           const descriptor = openRelative(rootDescriptor, root, record.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
           const content = crypto.createHash("sha256");
           const buffer = Buffer.allocUnsafe(1_048_576);
@@ -195,12 +299,19 @@ const scanTree = (rootValue, maxBytes, includeRecords = false) => {
             }
           } finally { fs.closeSync(descriptor); }
           if (actual !== size) fail("file changed");
-          field(hasher, content.digest());
+          const digest = content.digest();
+          if (mapping) {
+            const previous = mappedContent.get(mapping.groupIndex);
+            if (previous && (previous.size !== size || !same(previous.digest, digest))) fail("hardlink content");
+            if (!previous) mappedContent.set(mapping.groupIndex, { size, digest });
+          }
+          if (firstFile) field(hasher, digest);
+          else field(hasher, Buffer.from("hardlink"));
         } else field(hasher, Buffer.from("hardlink"));
       } else if (same(record.kind, Buffer.from("l"))) field(hasher, record.target);
     }
     if (diskBytes > maxBytes) fail("disk quota");
-    const summary = { byteCount, diskBytes, entryCount: found.length, fileCount: files, maxDepth, schema: 1, treeDigest: hasher.digest("hex"), uniqueInodes: identities.size };
+    const summary = { byteCount, diskBytes, entryCount: found.length, fileCount: files, maxDepth, schema: 2, treeDigest: hasher.digest("hex"), uniqueInodes: identities.size };
     if (includeRecords) return { summary, records: found, rootDescriptor, root };
     fs.closeSync(rootDescriptor);
     return summary;
@@ -209,7 +320,7 @@ const scanTree = (rootValue, maxBytes, includeRecords = false) => {
     throw error;
   }
 };
-const evidence = (path) => {
+const evidence = (path, maximum = MAX_PHYSICAL) => {
   const descriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const digest = crypto.createHash("sha256");
   const buffer = Buffer.allocUnsafe(1_048_576);
@@ -219,15 +330,13 @@ const evidence = (path) => {
       const bytes = fs.readSync(descriptor, buffer, 0, buffer.length, null);
       if (bytes === 0) break;
       size += bytes;
-      if (size > MAX_PHYSICAL) fail("physical quota");
+      if (size > maximum || size > MAX_PHYSICAL) fail("physical quota");
       digest.update(buffer.subarray(0, bytes));
     }
   } finally { fs.closeSync(descriptor); }
   return { bytes: size, digest: digest.digest("hex") };
 };
-const preflight = (path, maxBytes) => {
-  const proof = evidence(path);
-  if (proof.bytes < 96 || proof.bytes > maxBytes) fail("archive size");
+const superblock = (path, maximum) => {
   const descriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const block = Buffer.alloc(96);
   try { if (fs.readSync(descriptor, block, 0, 96, 0) !== 96) fail("archive format"); }
@@ -252,14 +361,52 @@ const preflight = (path, maxBytes) => {
   if (magic !== 0x73717368 || major !== 4 || minor !== 0 || compression !== 6) fail("archive format");
   if (blockSize < 4096 || blockSize > 1_048_576 || (blockSize & (blockSize - 1)) !== 0 || blockLog !== Math.log2(blockSize)) fail("block geometry");
   if (inodes < 1 || inodes > MAX_INODES || noIds < 1 || noIds > 65_535 || fragments > MAX_INODES) fail("archive counts");
-  if (bytesUsed < 96n || bytesUsed > BigInt(proof.bytes)) fail("bytes used");
+  if (bytesUsed < 96n || bytesUsed > BigInt(maximum)) fail("bytes used");
   if ([idStart, inodeStart, directoryStart].some((value) => value < 96n || value >= bytesUsed)) fail("table bounds");
   if ([xattrStart, fragmentStart, lookupStart].some((value) => value !== UINT64 && (value < 96n || value >= bytesUsed))) fail("table bounds");
   if (fragments && fragmentStart === UINT64) fail("fragment table");
   const rootBlock = rootInode >> 16n;
   const rootOffset = rootInode & 65_535n;
   if (rootOffset >= 8192n || inodeStart + rootBlock < inodeStart || inodeStart + rootBlock >= directoryStart) fail("root inode");
-  return proof;
+  return Number(bytesUsed);
+};
+const appendTrailer = (path, groups, maxBytes) => {
+  const physical = evidence(path, maxBytes);
+  const squashfsBytes = superblock(path, physical.bytes);
+  const map = encodeHardlinks(groups);
+  const objectBytes = squashfsBytes + map.length + TRAILER_FOOTER_BYTES;
+  if (objectBytes > maxBytes) fail("archive size");
+  fs.truncateSync(path, squashfsBytes);
+  const footer = Buffer.alloc(TRAILER_FOOTER_BYTES);
+  TRAILER_MAGIC.copy(footer, 0);
+  footer.writeUInt32BE(TRAILER_SCHEMA, 16);
+  footer.writeBigUInt64BE(BigInt(map.length), 20);
+  crypto.createHash("sha256").update(map).digest().copy(footer, 28);
+  fs.appendFileSync(path, map);
+  fs.appendFileSync(path, footer);
+};
+const preflight = (path, maxBytes, includeHardlinks = false) => {
+  const proof = evidence(path, maxBytes);
+  if (proof.bytes < 96 + TRAILER_FOOTER_BYTES || proof.bytes > maxBytes) fail("archive size");
+  const descriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const footer = Buffer.alloc(TRAILER_FOOTER_BYTES);
+  try {
+    if (fs.readSync(descriptor, footer, 0, footer.length, proof.bytes - footer.length) !== footer.length) fail("hardlink trailer");
+  } finally { fs.closeSync(descriptor); }
+  if (!same(footer.subarray(0, 16), TRAILER_MAGIC) || footer.readUInt32BE(16) !== TRAILER_SCHEMA) fail("hardlink trailer");
+  const mapLengthValue = footer.readBigUInt64BE(20);
+  if (mapLengthValue > BigInt(MAX_METADATA) || mapLengthValue > BigInt(proof.bytes - 96 - TRAILER_FOOTER_BYTES)) fail("hardlink map quota");
+  const mapLength = Number(mapLengthValue);
+  const mapStart = proof.bytes - TRAILER_FOOTER_BYTES - mapLength;
+  if (superblock(path, mapStart) !== mapStart) fail("bytes used");
+  const map = Buffer.alloc(mapLength);
+  const mapDescriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    if (fs.readSync(mapDescriptor, map, 0, map.length, mapStart) !== map.length) fail("hardlink map");
+  } finally { fs.closeSync(mapDescriptor); }
+  if (!same(crypto.createHash("sha256").update(map).digest(), footer.subarray(28))) fail("hardlink map digest");
+  const groups = parseHardlinks(map);
+  return includeHardlinks ? { proof, groups } : proof;
 };
 const run = (command, capture = false) => {
   const result = child.spawnSync(command[0], command.slice(1), { encoding: capture ? "utf8" : undefined, stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore", timeout: 180_000 });
@@ -292,7 +439,7 @@ const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
     }
     for (const record of records) {
       if (!same(record.kind, Buffer.from("f"))) continue;
-      const identity = record.device + ":" + record.inode;
+      const identity = record.identity;
       const destinationParent = parentRelative(destinationDescriptor, destinationRoot, record.path);
       const destination = join(rootPath(destinationParent.descriptor, destinationParent.path), destinationParent.name);
       try {
@@ -340,7 +487,7 @@ const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
   fs.closeSync(destinationDescriptor);
 };
 const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
-  preflight(archive, maxBytes);
+  const { groups } = preflight(archive, maxBytes, true);
   fs.mkdirSync(mount, { mode: 0o700 });
   const process = child.spawn("squashfuse", ["-f", "-o", "ro,nodev,nosuid,noexec", archive, mount], { stdio: "ignore" });
   try {
@@ -349,8 +496,8 @@ const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
       if (process.exitCode !== null || Date.now() > deadline) fail("mount unavailable");
       sleep(20);
     }
-    if (staging === undefined) return scanTree(mount, maxBytes);
-    const scanned = scanTree(mount, maxBytes, true);
+    if (staging === undefined) return scanTree(mount, maxBytes, false, groups);
+    const scanned = scanTree(mount, maxBytes, true, groups);
     if (!sameTree(scanned.summary, expected)) fail("tree evidence");
     try { copyTree(scanned.rootDescriptor, scanned.root, scanned.records, staging, maxBytes); }
     finally { fs.closeSync(scanned.rootDescriptor); }
@@ -389,9 +536,13 @@ const main = () => {
     if (!sameTree(result, scanned.summary)) fail("copied evidence");
   } else if (mode === "capture") {
     const [target, archive, mount, maxBytes] = [process.argv[3], process.argv[4], process.argv[5], Number(process.argv[6])];
-    const before = scanTree(target, maxBytes);
+    const source = scanTree(target, maxBytes, true);
+    const before = source.summary;
+    const groups = hardlinkGroups(source.records);
+    fs.closeSync(source.rootDescriptor);
     try { fs.unlinkSync(archive); } catch (error) { if (error.code !== "ENOENT") throw error; }
     run(["mksquashfs", target, archive, "-comp", "zstd", "-noappend", "-no-progress", "-all-root", "-no-xattrs", "-no-exports", "-mkfs-time", "0", "-all-time", "0"]);
+    appendTrailer(archive, groups, maxBytes);
     const proof = preflight(archive, maxBytes);
     const after = scanTree(target, maxBytes);
     if (JSON.stringify(before) !== JSON.stringify(after)) fail("source changed");
@@ -414,7 +565,7 @@ const reason = (error) => {
   const message = String(error?.message ?? error);
   if (["unsafe", "escaping", "special file", "component", "tree depth"].some((word) => message.includes(word))) return "unsafe";
   if (["quota", "archive size"].some((word) => message.includes(word))) return "budget";
-  if (["archive format", "block geometry", "archive counts", "bytes used", "table bounds", "fragment table", "root inode", "archive evidence", "tree evidence", "restored evidence"].some((word) => message.includes(word))) return "corrupt";
+  if (["archive format", "block geometry", "archive counts", "bytes used", "table bounds", "fragment table", "root inode", "archive evidence", "tree evidence", "restored evidence", "hardlink"].some((word) => message.includes(word))) return "corrupt";
   return "unavailable";
 };
 try { main(); }
@@ -432,7 +583,7 @@ interface ArchiveEvidence {
 }
 
 interface TreeSummary {
-  readonly schema: 1;
+  readonly schema: 2;
   readonly treeDigest: string;
   readonly entryCount: number;
   readonly uniqueInodes: number;
@@ -484,7 +635,7 @@ const parseSummary = (value: unknown): TreeSummary => {
   if (
     Object.keys(summary).sort().join(",") !==
       "byteCount,diskBytes,entryCount,fileCount,maxDepth,schema,treeDigest,uniqueInodes" ||
-    summary.schema !== 1 ||
+    summary.schema !== 2 ||
     typeof summary.treeDigest !== "string" ||
     !SHA256.test(summary.treeDigest) ||
     !integer(summary.entryCount, MAX_ENTRIES) ||
@@ -715,7 +866,7 @@ export class CloudflareCacheSnapshot {
         throw new Error();
       return await this.#withProcess(async (process, helper) => {
         const summary: TreeSummary = {
-          schema: 1,
+          schema: 2,
           treeDigest: request.object.treeDigest,
           entryCount: request.object.entryCount,
           uniqueInodes: request.object.uniqueInodes,

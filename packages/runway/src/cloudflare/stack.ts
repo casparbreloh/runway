@@ -5,6 +5,7 @@ import { toFile } from "cloudflare";
 import { collectResultItems, resultOf, type CloudflareApi } from "../cloudflare-api.ts";
 import type { PreparedDeployment } from "../deploy-build.ts";
 import {
+  SANDBOX_RUNNER_ABI,
   GITHUB_COORDINATOR_BINDING,
   GITHUB_COORDINATOR_CLASS,
   SANDBOX_APPLICATION,
@@ -145,7 +146,7 @@ export const cloudflareStackManifest = (opts: {
       image: SANDBOX_CONTAINER.image,
       imageDigest,
       platform: { os: "linux", architecture: "amd64" },
-      runnerAbi: "runway-sandbox-v1",
+      runnerAbi: SANDBOX_RUNNER_ABI,
       instanceType: SANDBOX_CONTAINER.instance_type,
       maxInstances: SANDBOX_APPLICATION.max_instances,
       tiers: SANDBOX_APPLICATION.constraints.tiers.map(String),
@@ -683,7 +684,7 @@ export class CloudflareStackControl implements StackControl {
         image: containerImage,
         imageDigest: containerImage.slice(containerImage.indexOf("@") + 1),
         platform: { os: "linux", architecture: "amd64" },
-        runnerAbi: "runway-sandbox-v1",
+        runnerAbi: SANDBOX_RUNNER_ABI,
         instanceType: required(configuration?.instance_type, "container instance type"),
         maxInstances: application.max_instances,
         tiers: constraints.tiers.map(String),

@@ -221,11 +221,11 @@ const context = {
     defaultRef: "refs/heads/main",
   },
   platform: {
-    schema: 1,
+    schema: 2,
     os: "linux",
     architecture: "x86_64",
     imageDigest: `sha256:${"1".repeat(64)}`,
-    runnerAbi: "runway-1",
+    runnerAbi: "runway-sandbox-v2",
   },
 };
 
@@ -802,11 +802,11 @@ test("every platform identity dimension independently misses an otherwise matchi
     revision: { etag: "version-1" },
   });
   const variants = [
-    { ...context.platform, schema: 2 },
+    { ...context.platform, schema: 3 },
     { ...context.platform, os: "freebsd" },
     { ...context.platform, architecture: "aarch64" },
     { ...context.platform, imageDigest: `sha256:${"2".repeat(64)}` },
-    { ...context.platform, runnerAbi: "runway-2" },
+    { ...context.platform, runnerAbi: "runway-sandbox-v3" },
   ];
   for (const platform of variants) {
     await expect(create(platform).lookup("tools", declaration)).resolves.toMatchObject({

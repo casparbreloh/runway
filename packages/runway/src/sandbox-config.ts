@@ -4,6 +4,8 @@ export const SANDBOX_IMAGE =
   "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042";
 export const GITHUB_COORDINATOR_BINDING = "RUNWAY_GITHUB_COORDINATOR";
 export const GITHUB_COORDINATOR_CLASS = "RunwayGitHubCoordinator";
+export const CACHE_SCHEMA = 2;
+export const SANDBOX_RUNNER_ABI = "runway-sandbox-v2";
 
 export const SANDBOX_INSTANCE_TYPES = {
   lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },

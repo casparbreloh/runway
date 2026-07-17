@@ -34,10 +34,12 @@ import {
 import type { ExecResult } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import {
+  CACHE_SCHEMA,
   CACHE_LIMITS,
   GITHUB_COORDINATOR_BINDING,
   SANDBOX_BINDING,
   SANDBOX_CAPACITY,
+  SANDBOX_RUNNER_ABI,
 } from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
@@ -377,11 +379,11 @@ export class RunwaySandboxBinding
         generation: config.generation,
         admission: config.admission,
         platform: {
-          schema: 1,
+          schema: CACHE_SCHEMA,
           os: "linux",
           architecture: "x86_64",
           ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
-          runnerAbi: "runway-1",
+          runnerAbi: SANDBOX_RUNNER_ABI,
         },
       },
       refs: {

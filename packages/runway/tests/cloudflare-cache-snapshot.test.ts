@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execPath, platform } from "node:process";
+import { env, execPath, platform } from "node:process";
 import { promisify } from "node:util";
 
 import { expect, test } from "vitest";
@@ -34,7 +34,7 @@ const summary = JSON.stringify({
   entryCount: 3,
   fileCount: 2,
   maxDepth: 2,
-  schema: 1,
+  schema: 2,
   treeDigest,
   uniqueInodes: 2,
 });
@@ -112,7 +112,7 @@ test("the owned helper scans raw-byte trees deterministically and retains hardli
     const second = await scan(helper, root);
     expect(second).toEqual(first);
     expect(first).toMatchObject({
-      schema: 1,
+      schema: 2,
       byteCount: 10,
       entryCount: 5,
       fileCount: 3,
@@ -159,14 +159,21 @@ test("the owned helper preflights fixed v4 zstd geometry, physical bytes, and ta
     valid.writeBigUInt64LE(160n, 72);
     valid.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 80);
     valid.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 88);
+    const map = Buffer.alloc(4);
+    const footer = Buffer.alloc(60);
+    Buffer.from("52554e574159484c494e4b4d41500000", "hex").copy(footer);
+    footer.writeUInt32BE(2, 16);
+    footer.writeBigUInt64BE(BigInt(map.length), 20);
+    createHash("sha256").update(map).digest().copy(footer, 28);
+    const encoded = Buffer.concat([valid.subarray(0, 224), map, footer]);
     const archive = join(directory, "archive.sqsh");
-    await writeFile(archive, valid);
+    await writeFile(archive, encoded);
     const { stdout } = await execute(execPath, [helper, "preflight", archive, "1000"], {
       encoding: "utf8",
     });
     expect(JSON.parse(stdout)).toEqual({
-      bytes: valid.byteLength,
-      digest: createHash("sha256").update(valid).digest("hex"),
+      bytes: encoded.byteLength,
+      digest: createHash("sha256").update(encoded).digest("hex"),
     });
 
     for (const [name, mutate] of [
@@ -175,11 +182,80 @@ test("the owned helper preflights fixed v4 zstd geometry, physical bytes, and ta
       ["table bounds", (bytes: Buffer) => bytes.writeBigUInt64LE(225n, 48)],
       ["root inode", (bytes: Buffer) => bytes.writeBigUInt64LE(8192n, 32)],
     ] as const) {
-      const hostile = Buffer.from(valid);
+      const hostile = Buffer.from(encoded);
       mutate(hostile);
       const path = join(directory, `${name}.sqsh`);
       await writeFile(path, hostile);
       await expect(execute(execPath, [helper, "preflight", path, "1000"]), name).rejects.toThrow();
+    }
+  });
+});
+
+test("the owned helper requires one canonical authenticated hardlink trailer at exact EOF", async () => {
+  await withHelper(async (directory, helper) => {
+    const base = Buffer.alloc(224);
+    base.writeUInt32LE(0x73717368, 0);
+    base.writeUInt32LE(1, 4);
+    base.writeUInt32LE(131_072, 12);
+    base.writeUInt16LE(6, 20);
+    base.writeUInt16LE(17, 22);
+    base.writeUInt16LE(1, 26);
+    base.writeUInt16LE(4, 28);
+    base.writeBigUInt64LE(224n, 40);
+    base.writeBigUInt64LE(192n, 48);
+    base.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 56);
+    base.writeBigUInt64LE(128n, 64);
+    base.writeBigUInt64LE(160n, 72);
+    base.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 80);
+    base.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 88);
+    const path = Buffer.from("a");
+    const other = Buffer.from("b");
+    const map = Buffer.alloc(4 + 4 + 4 + path.length + 4 + other.length);
+    let offset = 0;
+    map.writeUInt32BE(1, offset);
+    offset += 4;
+    map.writeUInt32BE(2, offset);
+    offset += 4;
+    map.writeUInt32BE(path.length, offset);
+    offset += 4;
+    path.copy(map, offset);
+    offset += path.length;
+    map.writeUInt32BE(other.length, offset);
+    offset += 4;
+    other.copy(map, offset);
+    const footer = Buffer.alloc(60);
+    Buffer.from("52554e574159484c494e4b4d41500000", "hex").copy(footer);
+    footer.writeUInt32BE(2, 16);
+    footer.writeBigUInt64BE(BigInt(map.length), 20);
+    createHash("sha256").update(map).digest().copy(footer, 28);
+    const valid = Buffer.concat([base, map, footer]);
+
+    const cases = new Map<string, Buffer>([
+      ["missing", base],
+      ["trailing", Buffer.concat([valid, Buffer.from([0])])],
+      ["digest", Buffer.from(valid)],
+      ["length", Buffer.from(valid)],
+      ["duplicate", Buffer.from(valid)],
+    ]);
+    const badDigest = cases.get("digest")!;
+    badDigest.writeUInt8(badDigest.readUInt8(valid.length - 1) ^ 1, valid.length - 1);
+    cases.get("length")!.writeBigUInt64BE(BigInt(map.length + 1), valid.length - 40);
+    const duplicateMap = Buffer.from(map);
+    duplicateMap[duplicateMap.length - 1] = 0x61;
+    const duplicate = cases.get("duplicate")!;
+    duplicateMap.copy(duplicate, base.length);
+    createHash("sha256")
+      .update(duplicateMap)
+      .digest()
+      .copy(duplicate, duplicate.length - 32);
+
+    for (const [name, bytes] of cases) {
+      const archive = join(directory, `${name}.sqsh`);
+      await writeFile(archive, bytes);
+      await expect(
+        execute(execPath, [helper, "preflight", archive, "1000"]),
+        name,
+      ).rejects.toThrow();
     }
   });
 });
@@ -334,3 +410,106 @@ test("restore verifies the archive before its isolated copy and cleans every fai
   expect(process.timeouts).toEqual([20_000]);
   expect(process.files).toEqual(new Set());
 });
+
+test.runIf(env.RUNWAY_EXACT_IMAGE_CACHE_SNAPSHOT === "1")(
+  "the exact pinned privileged image captures and restores arbitrary hardlink groups",
+  async () => {
+    await withHelper(async (directory) => {
+      const script = String.raw`
+const child = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const helper = "/evidence/helper.cjs";
+const source = "/tmp/source";
+const archive = "/tmp/cache.sqsh";
+const mount = "/tmp/mount";
+const staging = "/tmp/staging";
+fs.mkdirSync(source + "/nested", { recursive: true });
+fs.writeFileSync(source + "/nested/one", "one");
+fs.linkSync(source + "/nested/one", source + "/one-alias");
+fs.writeFileSync(source + "/two", "two");
+fs.linkSync(source + "/two", source + "/two-alias-a");
+fs.linkSync(source + "/two", source + "/two-alias-b");
+fs.writeFileSync(source + "/duplicate-content-nonlink", "one");
+const rawOne = Buffer.concat([Buffer.from(source + "/"), Buffer.from([255])]);
+const rawTwo = Buffer.concat([Buffer.from(source + "/"), Buffer.from([254])]);
+fs.writeFileSync(rawOne, "raw");
+fs.linkSync(rawOne, rawTwo);
+const run = (args) => {
+  const result = child.spawnSync("/usr/local/bin/node", [helper, ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr || "helper failed");
+  return JSON.parse(result.stdout);
+};
+const captured = run(["capture", source, archive, mount, "1000000"]);
+if (!captured.archive) throw new Error("capture failed: " + JSON.stringify(captured));
+const restored = run(["restore", archive, mount, staging, "1000000", JSON.stringify({ ...captured, diskBytes: 0, archive: undefined }), String(captured.archive.bytes), captured.archive.digest]);
+const inode = (path) => fs.lstatSync(path).ino;
+if (restored.treeDigest !== captured.treeDigest) throw new Error("evidence mismatch");
+if (inode(staging + "/nested/one") !== inode(staging + "/one-alias")) throw new Error("group one lost");
+if (inode(staging + "/two") !== inode(staging + "/two-alias-a") || inode(staging + "/two") !== inode(staging + "/two-alias-b")) throw new Error("group two lost");
+if (inode(staging + "/nested/one") === inode(staging + "/duplicate-content-nonlink")) throw new Error("nonlink collapsed");
+if (fs.lstatSync(Buffer.concat([Buffer.from(staging + "/"), Buffer.from([255])])).ino !== fs.lstatSync(Buffer.concat([Buffer.from(staging + "/"), Buffer.from([254])])).ino) throw new Error("raw group lost");
+const original = fs.readFileSync(archive);
+const squashfsBytes = Number(original.readBigUInt64LE(40));
+const encodeMap = (groups) => {
+  const fields = [];
+  const count = Buffer.alloc(4);
+  count.writeUInt32BE(groups.length);
+  fields.push(count);
+  for (const group of groups.map((paths) => paths.map(Buffer.from).sort(Buffer.compare)).sort((left, right) => Buffer.compare(left[0], right[0]))) {
+    const members = Buffer.alloc(4);
+    members.writeUInt32BE(group.length);
+    fields.push(members);
+    for (const path of group) {
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(path.length);
+      fields.push(length, path);
+    }
+  }
+  return Buffer.concat(fields);
+};
+const hostile = [
+  [],
+  [["missing-one", "nested/one"]],
+  [["nested", "one-alias"]],
+  [["duplicate-content-nonlink", "two"]],
+];
+for (const [index, groups] of hostile.entries()) {
+  const map = encodeMap(groups);
+  const footer = Buffer.alloc(60);
+  Buffer.from("52554e574159484c494e4b4d41500000", "hex").copy(footer);
+  footer.writeUInt32BE(2, 16);
+  footer.writeBigUInt64BE(BigInt(map.length), 20);
+  crypto.createHash("sha256").update(map).digest().copy(footer, 28);
+  const hostileArchive = "/tmp/hostile-" + index + ".sqsh";
+  fs.writeFileSync(hostileArchive, Buffer.concat([original.subarray(0, squashfsBytes), map, footer]));
+  const hostileMount = "/tmp/hostile-mount-" + index;
+  const result = child.spawnSync("/usr/local/bin/node", [helper, "mounted-scan", hostileArchive, hostileMount, "1000000"]);
+  if (result.status === 0) throw new Error("hostile map accepted: " + index);
+  if (fs.existsSync(hostileMount)) throw new Error("hostile mount retained: " + index);
+}
+process.stdout.write(JSON.stringify({ archiveBytes: captured.archive.bytes, entryCount: captured.entryCount }));
+`;
+      const { stdout } = await execute(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--privileged",
+          "--platform",
+          "linux/amd64",
+          "--entrypoint",
+          "/usr/local/bin/node",
+          "--volume",
+          `${directory}:/evidence:ro`,
+          "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
+          "-e",
+          script,
+        ],
+        { encoding: "utf8", timeout: 180_000 },
+      );
+      expect(JSON.parse(stdout)).toMatchObject({ entryCount: 9 });
+    });
+  },
+  180_000,
+);
