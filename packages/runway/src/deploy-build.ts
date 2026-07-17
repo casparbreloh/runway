@@ -7,8 +7,10 @@ import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
 
 import { generateDynamicWorker, generateHost } from "./codegen.ts";
+import type { ProgressEvent } from "./deploy.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { RegisteredWorkflow, Registry } from "./registry.ts";
 import type { RepositorySource } from "./repository-source.ts";
-import type { GitHubRepository, ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 import { SECRET_SNAPSHOT_KEY_BINDING, secretSnapshotBackupBinding } from "./worker-contract.ts";
 import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
 

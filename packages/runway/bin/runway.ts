@@ -6,10 +6,10 @@ import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
 import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
+import type { ProgressEvent } from "../src/deploy.ts";
 import { resolveScriptName } from "../src/naming.ts";
 import { loadRegistry } from "../src/registry.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
-import type { ProgressEvent } from "../src/types.ts";
 import { COMPATIBILITY_DATE, isSecretSnapshotKeyBinding } from "../src/worker-contract.ts";
 import { validateSecrets } from "../src/workflow.ts";
 

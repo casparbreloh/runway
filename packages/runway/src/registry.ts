@@ -3,8 +3,15 @@ import { join, matchesGlob, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { validateTrigger } from "./trigger.ts";
-import type { Registry, WorkflowDefinition } from "./types.ts";
-import { validateSecrets } from "./workflow.ts";
+import { validateSecrets, type WorkflowDefinition } from "./workflow.ts";
+
+export interface RegisteredWorkflow {
+  readonly path: string;
+  readonly exportName: string;
+  readonly def: WorkflowDefinition;
+}
+
+export type Registry = ReadonlyArray<RegisteredWorkflow>;
 
 export interface RegistryOptions {
   readonly include?: ReadonlyArray<string>;

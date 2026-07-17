@@ -15,8 +15,8 @@ import { source } from "./source.ts";
 import type { SourceIdentity } from "./source.ts";
 import { Terminal, TerminalError } from "./terminal.ts";
 import type { Finalization, TerminalRecord, TerminalState } from "./terminal.ts";
-import type { WorkflowDefinition } from "./types.ts";
 import { RUNTIME_BINDING } from "./worker-contract.ts";
+import type { WorkflowDefinition } from "./workflow.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
 const CACHE_PREPARE_STEP = "runway:cache-prepare";

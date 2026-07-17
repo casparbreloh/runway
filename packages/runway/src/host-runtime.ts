@@ -22,6 +22,8 @@ import {
   matchGitHubDelivery,
   normalizeGitHubDelivery,
   type GitHubAcceptedDelivery,
+  type GitHubEventFilter,
+  type GitHubRepository,
 } from "./github.ts";
 import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import {
@@ -44,7 +46,6 @@ import {
 import { createSecretSnapshots } from "./secret-snapshot.ts";
 import type { PreparedSource, SourceIdentity } from "./source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
-import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   CACHE_R2_ACCESS_KEY_ID_BINDING,

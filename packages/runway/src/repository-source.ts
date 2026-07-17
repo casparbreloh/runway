@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import type { GitHubRepository } from "./github.ts";
 import type { SourceIdentity } from "./source.ts";
-import type { GitHubRepository } from "./types.ts";
 
 interface PublicRepositoryAuthentication {
   readonly type: "public";

@@ -6,9 +6,9 @@ import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
 import { buildDeployment } from "./src/deploy-build.ts";
+import type { Registry } from "./src/registry.ts";
 import { secretRef } from "./src/secrets.ts";
 import { cron, github, webhook } from "./src/trigger.ts";
-import type { Registry } from "./src/types.ts";
 import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
 import { repositoryFixture } from "./tests/repository-fixture.ts";
 

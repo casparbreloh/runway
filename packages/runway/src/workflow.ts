@@ -1,7 +1,22 @@
+import type { GitHubTrigger } from "./github.ts";
 import type { Run } from "./run.ts";
-import { secretNameOf, secretRef } from "./secrets.ts";
+import { secretNameOf, secretRef, type SecretRef } from "./secrets.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type { Trigger, TriggerContext, WorkflowDefinition, WorkflowTrigger } from "./types.ts";
+import type { CronTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
+
+export type TriggerContext<S extends string> = {
+  readonly secrets: { readonly [K in S]: SecretRef<K> };
+};
+
+export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger | GitHubTrigger<unknown>;
+
+export interface WorkflowDefinition {
+  readonly __kind: "workflow";
+  readonly id: string;
+  readonly trigger: WorkflowTrigger;
+  readonly secrets: ReadonlyArray<string>;
+  readonly run: (run: Run, event: unknown) => void | Promise<void>;
+}
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 

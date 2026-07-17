@@ -10,10 +10,10 @@ import {
   type GitHubAcceptedDelivery,
   type GitHubCheckOutput,
   type GitHubProvider,
+  type GitHubRepository,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
 import type { Finalization, TerminalRecord } from "./terminal.ts";
-import type { GitHubRepository } from "./types.ts";
 
 type GitHubLifecycleState = "in_progress";
 

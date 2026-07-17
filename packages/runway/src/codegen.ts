@@ -1,6 +1,7 @@
 import path from "node:path";
 
-import type { GitHubRepository, RegisteredWorkflow, Registry } from "./types.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { RegisteredWorkflow, Registry } from "./registry.ts";
 import { validateRegistry } from "./validate.ts";
 import { DYNAMIC_WORKFLOW_CLASS, RUNWAY_WORKFLOW_CLASS } from "./worker-contract.ts";
 

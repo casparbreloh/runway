@@ -15,10 +15,11 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 ## Layout
 
 - `packages/runway/` — SDK and `runway` CLI.
-  - `src/types.ts` — public contracts.
   - `src/secrets.ts` — secret references.
-  - `src/workflow.ts` — `workflow()`.
-  - `src/trigger.ts` — webhook and cron triggers.
+  - `src/workflow.ts` — `workflow()` and workflow contracts.
+  - `src/trigger.ts` — webhook and cron triggers and contracts.
+  - `src/github.ts` — GitHub trigger contracts and delivery normalization.
+  - `src/registry.ts` — discovered workflow registry contracts and loading.
   - `src/run.ts` — public `Run`, command contracts, and durable operation wiring.
   - `src/cache.ts` — private generic cache identity, policy, refs, and publication.
   - `src/source.ts` — exact credential-free source identity and preparation evidence.

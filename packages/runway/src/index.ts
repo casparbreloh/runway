@@ -6,6 +6,20 @@ export { workflow } from "./workflow.ts";
 
 export type { SecretRef } from "./secrets.ts";
 export type {
+  GitHubEventFilter,
+  GitHubEventOf,
+  GitHubOptions,
+  GitHubPullRequestAction,
+  GitHubPullRequestEvent,
+  GitHubPullRequestFilter,
+  GitHubPushEvent,
+  GitHubPushFilter,
+  GitHubRepository,
+  GitHubTrigger,
+} from "./github.ts";
+export type { ProgressEvent } from "./deploy.ts";
+export type { RegisteredWorkflow, Registry } from "./registry.ts";
+export type {
   Budget,
   CacheDeclaration,
   CacheKey,
@@ -17,24 +31,9 @@ export type {
 export type {
   CronParams,
   CronTrigger,
-  GitHubEventFilter,
-  GitHubEventOf,
-  GitHubOptions,
-  GitHubPullRequestAction,
-  GitHubPullRequestEvent,
-  GitHubPullRequestFilter,
-  GitHubPushEvent,
-  GitHubPushFilter,
-  GitHubRepository,
-  GitHubTrigger,
-  ProgressEvent,
-  RegisteredWorkflow,
-  Registry,
   Trigger,
-  TriggerContext,
   WebhookOptions,
   WebhookTimestamp,
   WebhookTrigger,
-  WorkflowDefinition,
-  WorkflowTrigger,
-} from "./types.ts";
+} from "./trigger.ts";
+export type { TriggerContext, WorkflowDefinition, WorkflowTrigger } from "./workflow.ts";

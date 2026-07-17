@@ -13,7 +13,7 @@ import { resolveAuth } from "./deploy-auth.ts";
 import { buildDeployment } from "./deploy-build.ts";
 import { createGitHubProvider, type GitHubProvider } from "./github.ts";
 import { resolveScriptName } from "./naming.ts";
-import { cronsOf, secretNamesOf } from "./registry.ts";
+import { cronsOf, secretNamesOf, type Registry } from "./registry.ts";
 import {
   assertRepositorySourceReachable,
   resolveRepositorySource,
@@ -21,7 +21,6 @@ import {
 } from "./repository-source.ts";
 import { listScriptSecrets } from "./secret-store.ts";
 import { Stack, type StackControl, type StackManifest } from "./stack.ts";
-import type { ProgressEvent, Registry } from "./types.ts";
 import {
   GITHUB_APP_ID_BINDING,
   GITHUB_PRIVATE_KEY_BINDING,
@@ -31,6 +30,11 @@ import {
 
 export type { CloudflareApi } from "./cloudflare-api.ts";
 export { resolveAuth } from "./deploy-auth.ts";
+
+export interface ProgressEvent {
+  readonly step: "load" | "build" | "deploy";
+  readonly status: "start" | "done";
+}
 
 interface DeployContext {
   readonly cwd: string;

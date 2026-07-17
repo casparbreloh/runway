@@ -4,6 +4,7 @@ import { toFile } from "cloudflare";
 
 import { collectResultItems, resultOf, type CloudflareApi } from "../cloudflare-api.ts";
 import type { PreparedDeployment } from "../deploy-build.ts";
+import type { Registry } from "../registry.ts";
 import {
   SANDBOX_RUNNER_ABI,
   GITHUB_COORDINATOR_BINDING,
@@ -21,7 +22,6 @@ import {
   type StackReceipt,
   type StackResource,
 } from "../stack.ts";
-import type { Registry } from "../types.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   CACHE_SECRET_BINDINGS,
