@@ -213,6 +213,7 @@ const receiptOf = (manifest: StackManifest, suffix = "1"): StackReceipt => ({
     zoneId: `zone-${suffix}`,
     id: `route-${suffix}`,
     pattern,
+    scriptName: manifest.worker.name,
   })),
 });
 
@@ -234,6 +235,7 @@ test("Stack captures every exact owned field, persists canonical refs, and rerea
   expect(persisted).toContain('"imageDigest":"sha256:4444');
   expect(persisted).toContain('"architecture":"amd64","os":"linux"');
   expect(persisted).toContain('"name":"runway-Sandbox"');
+  expect(persisted).toContain('"pattern":"ci.example.com/*","scriptName":"runway"');
   expect(persisted).toContain(
     '"binding":"RUNWAY_SECRET_SNAPSHOT_KEY","ownedKeyBindings":["RUNWAY_SECRET_SNAPSHOT_KEY_11111111111111111111111111111111"]',
   );
@@ -322,6 +324,19 @@ test("inventory mismatches, unknown receipt fields, and tag-only images never be
   await expect(new Stack(manifest, extra).capture()).rejects.toThrow("invalid Stack receipt");
   expect(extra.values()).toEqual([]);
 
+  const reassignedRoute = new MemoryControl();
+  reassignedRoute.inventoryAs(manifest, {
+    ...receiptOf(manifest),
+    routes: receiptOf(manifest).routes.map((route) => ({
+      ...route,
+      scriptName: "replacement-worker",
+    })),
+  });
+  await expect(new Stack(manifest, reassignedRoute).capture()).rejects.toThrow(
+    "route belongs to another Worker",
+  );
+  expect(reassignedRoute.values()).toEqual([]);
+
   expect(
     () =>
       new Stack(
@@ -409,11 +424,12 @@ const resourcesOf = (receipt: StackReceipt): readonly StackResource[] => [
     className,
     scriptName,
   })),
-  ...receipt.routes.map(({ zoneId, id, pattern }) => ({
+  ...receipt.routes.map(({ zoneId, id, pattern, scriptName }) => ({
     type: "route" as const,
     zoneId,
     id,
     pattern,
+    scriptName,
   })),
   ...receipt.buckets.flatMap((bucket) => [
     ...(bucket.shared

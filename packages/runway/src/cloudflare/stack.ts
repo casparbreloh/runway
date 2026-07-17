@@ -551,7 +551,12 @@ export class CloudflareStackControl implements StackControl {
     }
     const routes = providerRoutes.routes
       .filter(({ script }) => script === manifest.worker.name)
-      .map(({ zoneId, id, pattern }) => ({ zoneId, id, pattern }))
+      .map(({ zoneId, id, pattern, script }) => ({
+        zoneId,
+        id,
+        pattern,
+        scriptName: required(script, "Worker route script"),
+      }))
       .sort((left, right) => left.pattern.localeCompare(right.pattern));
     if (JSON.stringify(routes.map(({ pattern }) => pattern)) !== JSON.stringify(manifest.routes)) {
       throw new Error("Cloudflare Worker routes do not match Stack manifest");
@@ -1020,9 +1025,13 @@ export class CloudflareStackControl implements StackControl {
         case "route": {
           const route = resultOf(
             await this.#opts.cf.workers.routes.get(resource.id, { zone_id: resource.zoneId }),
-          ) as { id?: unknown; pattern?: unknown } | undefined;
+          ) as { id?: unknown; pattern?: unknown; script?: unknown } | undefined;
           if (!route) return false;
-          if (route.id !== resource.id || route.pattern !== resource.pattern) {
+          if (
+            route.id !== resource.id ||
+            route.pattern !== resource.pattern ||
+            route.script !== resource.scriptName
+          ) {
             throw new Error("Cloudflare route deletion evidence changed");
           }
           return true;

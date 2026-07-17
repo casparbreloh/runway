@@ -107,6 +107,7 @@ export interface StackReceipt {
     readonly zoneId: string;
     readonly id: string;
     readonly pattern: string;
+    readonly scriptName: string;
   }[];
 }
 
@@ -154,6 +155,7 @@ export type StackResource =
       readonly zoneId: string;
       readonly id: string;
       readonly pattern: string;
+      readonly scriptName: string;
     }
   | {
       readonly type: "bucket";
@@ -612,10 +614,14 @@ const assertReceipt = (receipt: StackReceipt): void => {
   assertBuckets(receipt.buckets, true);
   if (!Array.isArray(receipt.routes)) throw new Error("invalid Stack receipt routes");
   for (const route of receipt.routes) {
-    assertKeys(route, ["zoneId", "id", "pattern"], "receipt route");
+    assertKeys(route, ["zoneId", "id", "pattern", "scriptName"], "receipt route");
     required(route.zoneId, "route zone id", 512);
     required(route.id, "route id", 512);
     required(route.pattern, "route pattern", 512);
+    required(route.scriptName, "route Worker script", 128);
+    if (route.scriptName !== receipt.worker.name) {
+      throw new Error("Stack route belongs to another Worker");
+    }
   }
   assertSorted(
     receipt.routes.map(({ pattern }) => pattern),
@@ -850,11 +856,12 @@ const resourcesOf = (receipt: StackReceipt): readonly StackResource[] => [
     className,
     scriptName,
   })),
-  ...receipt.routes.map(({ zoneId, id, pattern }) => ({
+  ...receipt.routes.map(({ zoneId, id, pattern, scriptName }) => ({
     type: "route" as const,
     zoneId,
     id,
     pattern,
+    scriptName,
   })),
   ...receipt.buckets.flatMap((bucket) => [
     ...(bucket.shared

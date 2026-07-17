@@ -72,6 +72,8 @@ interface ProviderOverrides {
   readonly deletions?: string[];
   readonly absent?: StackResource["type"];
   readonly routePattern?: string;
+  readonly routeScript?: string;
+  readonly routeGets?: unknown[];
 }
 
 const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
@@ -80,11 +82,16 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
       routes: {
         create: async () => ({ id: "created-route" }),
         list: async () => overrides.routes ?? [],
-        get: async () => {
+        get: async (id: string, params: unknown) => {
+          overrides.routeGets?.push({ id, params });
           if (overrides.absent === "route") {
             throw Object.assign(new Error("not found"), { status: 404 });
           }
-          return { id: "route-id", pattern: overrides.routePattern ?? "example.com/*" };
+          return {
+            id: "route-id",
+            pattern: overrides.routePattern ?? "example.com/*",
+            script: overrides.routeScript ?? "runway",
+          };
         },
         delete: async (id: string) => {
           overrides.deletions?.push(`route:${id}`);
@@ -501,21 +508,41 @@ test("absent resources are distinct from drift and deletion stays idempotent", a
 });
 
 test("route deletion uses exact zone-scoped evidence", async () => {
+  const routeGets: unknown[] = [];
   const route: StackResource = {
     type: "route",
     zoneId: "zone-id",
     id: "route-id",
     pattern: "example.com/*",
+    scriptName: "runway",
   };
-  await expect(control(api()).hasResource(route)).resolves.toBe(true);
+  await expect(control(api({ routeGets })).hasResource(route)).resolves.toBe(true);
+  expect(routeGets).toEqual([{ id: "route-id", params: { zone_id: "zone-id" } }]);
   await expect(
     control(api({ routePattern: "replacement.example.com/*" })).hasResource(route),
+  ).rejects.toThrow("route deletion evidence changed");
+  await expect(
+    control(api({ routeScript: "replacement-worker" })).hasResource(route),
   ).rejects.toThrow("route deletion evidence changed");
   await expect(control(api({ absent: "route" })).hasResource(route)).resolves.toBe(false);
 
   const deletions: string[] = [];
   await control(api({ deletions })).deleteResource(route);
   expect(deletions).toEqual(["route:route-id"]);
+});
+
+test("route reassignment after capture blocks deletion", async () => {
+  const routed = { ...manifest, routes: ["example.com/*"] };
+  const receipt = await control(
+    api({ routes: [{ id: "route-id", pattern: "example.com/*", script: "runway" }] }),
+  ).inventory(routed);
+  const route: StackResource = { type: "route", ...receipt.routes[0]! };
+  const deletions: string[] = [];
+
+  await expect(
+    control(api({ routeScript: "replacement-worker", deletions })).deleteResource(route),
+  ).rejects.toThrow("route deletion evidence changed");
+  expect(deletions).toEqual([]);
 });
 
 interface ApplyCalls {
@@ -821,7 +848,14 @@ test("apply and inventory own exact non-empty zone-scoped routes", async () => {
       }),
     ).inventory(routed),
   ).resolves.toMatchObject({
-    routes: [{ zoneId: "zone-id", id: "route-id", pattern: "ci.example.com/*" }],
+    routes: [
+      {
+        zoneId: "zone-id",
+        id: "route-id",
+        pattern: "ci.example.com/*",
+        scriptName: "runway",
+      },
+    ],
   });
 
   const takeover = applyCalls();
