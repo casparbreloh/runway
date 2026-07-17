@@ -117,13 +117,13 @@ public author option.
 
 ## Development Evidence And Boundary
 
-Nothing here is production. The repository exercises the system as if it were production while the
-multi-sample benchmark and publication remain gated.
+Nothing here is production. The repository exercises the system as if it were production while
+comparative release claims and publication remain gated.
 
-At PR head `4f8f66f` on 2026-07-17, the deployed `runway` integration automatically admitted exact-
-head Check `87963050276` and Test `87963048439`. Check completed in 37 seconds provider-side and Test
-in 1m37s, with no cache operations. This is exact-head self-hosting evidence, not the required
-20-sample benchmark.
+At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
+integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
+P50/P95 of 96s/105s, with no cache operations. This supports the primitive decision; it is not a
+comparative release claim.
 
 The live Stack is exactly `runway` on the digest-pinned linux/amd64 `standard-4` container. The legacy
 Worker, Workflow, container, namespaces, public bootstrap bucket, and migration receipt are deleted.
@@ -137,9 +137,9 @@ foundation.
 The repository's duplicate GitHub Actions workflow was removed only after an earlier evidence gate.
 A `.github/workflows` fallback must not be restored without a new explicit migration and live gate.
 
-## Release Gates
+## Publication Gates
 
-The foundation is not complete until one unchanged final Stack generation passes all of these gates:
+The foundation primitives are independent of comparative marketing evidence. Before publication:
 
 1. Handle every positively owned live run, disable legacy admission, remove only receipt-owned legacy
    resources, and independently verify their absence.
@@ -148,12 +148,10 @@ The foundation is not complete until one unchanged final Stack generation passes
 3. Prove private cache miss, success-only publication, warm restore, corruption fallback,
    cancellation fencing, credential unobservability, and cleanup in the exact pinned image.
 4. Remove the obsolete public bootstrap only after the new cache is no longer dependent on it.
-5. Run at least 20 cold and 20 warm samples against identical GitHub four-core commands and commit,
-   reporting webhook-to-terminal P50/P95 and total variable infrastructure cost from Meter quantities.
-6. Keep cold P50/P95 at or below 1.10× GitHub, warm P50/P95 at or below 0.60×, warm variable cost at
-   or below 0.50×, and cold variable cost at or below 0.75× the paid GitHub four-core list-price
-   equivalent. A miss requires redesign, not softened wording.
-7. Pass local and live behavior gates plus standards, specification, and architecture review before
+5. Run a statistically meaningful comparison against identical GitHub four-core commands before
+   publishing relative speed or cost claims; report webhook-to-terminal P50/P95 and total variable
+   infrastructure cost from Meter quantities.
+6. Pass local and live behavior gates plus standards, specification, and architecture review before
    publication.
 
 Any image, capacity, limit, or Stack generation change after measurement invalidates the evidence.

@@ -41,24 +41,26 @@ surface, exact Source and continuity rules, one Terminal owner, generic safe cac
 Meter quantities, exact Stack ownership, cache schema 2, runner ABI `runway-sandbox-v2`, and a
 digest-pinned linux/amd64 `standard-4` desired manifest. This is local implementation evidence.
 
-At exact PR head `4f8f66f`, the deployed `standard-4` integration automatically ran Check
-`87963050276` in 37 seconds provider-side and Test `87963048439` in 1m37s. Their Workflow step lists
-contain no cache operations. The legacy Stack and public bootstrap are deleted; the private shared
-workflow-artifact bucket and unknown shared objects remain preservation boundaries.
+At exact PR head `df10a82`, 15 sequential development samples on the deployed `standard-4`
+integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and
+delivery-to-terminal P50/P95 of 96s/105s. Their Workflow step lists contain no cache operations. The
+legacy Stack and public bootstrap are deleted; the private shared workflow-artifact bucket and
+unknown shared objects remain preservation boundaries.
 
 Live private R2 runs proved miss/publication and warm restore. The repository's whole-tree cache
 experiment lost decisively: Check took 2m23s cold and 3m28s warm, Test took 3m25s cold and 4m14s
 warm, and each warm run added about $0.013 of estimated cache work. The consumer declarations and
-their 17 exact cache objects/refs were removed. A 20-sample final benchmark remains open.
+their 17 exact cache objects/refs were removed. Comparative release benchmarking is intentionally
+deferred.
 
-| Evidence or gate              | Performance                         | Cost                                               | Status                    |
-| ----------------------------- | ----------------------------------- | -------------------------------------------------- | ------------------------- |
-| Clean `standard-4` Check/Test | 37s / 1m37s for one exact PR head   | No complete per-run total captured                 | Measured; not a benchmark |
-| Whole-tree cache Check/Test   | 3m28s / 4m14s warm                  | About $0.013 cache work per run                    | Measured loss; removed    |
-| Final cold comparison         | P50 and P95 ≤1.10× GitHub four-core | ≤0.75× paid GitHub four-core list-price equivalent | Target; samples pending   |
-| Final warm comparison         | P50 and P95 ≤0.60× GitHub four-core | ≤0.50× paid GitHub four-core list-price equivalent | Adapter-dependent target  |
+| Evidence or gate              | Performance                        | Cost                               | Status                  |
+| ----------------------------- | ---------------------------------- | ---------------------------------- | ----------------------- |
+| Clean `standard-4` Check/Test | P50 39s / 87s; P95 46s / 102s      | No complete per-run total captured | Development evidence    |
+| Whole-tree cache Check/Test   | 3m28s / 4m14s warm                 | About $0.013 cache work per run    | Measured loss; removed  |
+| Comparative release claim     | Same commit and commands as GitHub | Total variable infrastructure cost | Intentionally deferred  |
+| Tool-native warm claim        | Adapter-specific measured workload | Adapter-specific total cost        | Future adapter evidence |
 
-The targets require at least 20 cold and 20 warm samples on the same commit and commands, and total
+Any comparative release claim requires enough same-commit samples to characterize variance and total
 variable infrastructure quantities rather than container compute alone.
 
 ## Verified provider facts

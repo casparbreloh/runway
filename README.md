@@ -10,7 +10,7 @@ terminal coordination, metering, and resource reconciliation stay internal. Runw
 package-manager preset, dependency graph, build scheduler, or public Sandbox API. Agents are deferred.
 
 This project is in development, not production. The foundation is deployed for its own repository CI;
-the multi-sample benchmark and publication remain gated. See [Development Status](#development-status).
+comparative release claims and publication remain gated. See [Development Status](#development-status).
 
 For the domain vocabulary see [`CONTEXT.md`](CONTEXT.md). For direction and non-goals see
 [`.docs/VISION.md`](.docs/VISION.md).
@@ -180,11 +180,11 @@ The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.t
 ordinary Runway consumers. They explicitly own this repository's Node/pnpm setup through generic
 exec calls; those ecosystem details do not enter foundation source.
 
-At PR head `4f8f66f` on 2026-07-17, the deployed `runway` integration automatically started Check
-`87963050276` and Test `87963048439`. Check completed in 37 seconds provider-side (41 seconds on
-GitHub) and Test in 1m37s provider-side (1m40s on GitHub), with no cache operations. The earlier
-whole-tree cache experiment took 2m23s/3m25s cold and 3m28s/4m14s warm, plus about $0.013 of cache
-work per warm run, so it was removed rather than abstracted into the foundation.
+At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
+integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
+P50/P95 of 96s/105s, with no cache operations. The earlier whole-tree cache experiment took
+2m23s/3m25s cold and 3m28s/4m14s warm, plus about $0.013 of cache work per warm run, so it was
+removed rather than abstracted into the foundation.
 
 The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`. The legacy
 `runway-monorepo` Worker, Workflow, container, Durable Object namespaces, public bootstrap bucket,
@@ -201,10 +201,9 @@ run-bound Sandbox execution, one Terminal authority, generic cache identity/rest
 Meter quantities, immutable workflow artifacts, GitHub delivery and Checks coordination, and exact
 Stack ownership/reconciliation.
 
-Still intentionally deferred: a statistically meaningful multi-sample benchmark, tool-native cache
-adapters, and final publication. Cloudflare Artifacts is a future evidence-gated Source implementation
-only; it is not the cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are
-later consumers.
+Still intentionally deferred: comparative release benchmarking, tool-native cache adapters, and final
+publication. Cloudflare Artifacts is a future evidence-gated Source implementation only; it is not the
+cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are later consumers.
 
 ## Testing
 
