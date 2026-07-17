@@ -17,7 +17,7 @@ export const SANDBOX_INSTANCE_TYPES = {
 export const SANDBOX_CONTAINER = {
   class_name: SANDBOX_CLASS,
   image: SANDBOX_IMAGE,
-  instance_type: "standard-1",
+  instance_type: "standard-4",
 } as const;
 
 const capacity = SANDBOX_INSTANCE_TYPES[SANDBOX_CONTAINER.instance_type];

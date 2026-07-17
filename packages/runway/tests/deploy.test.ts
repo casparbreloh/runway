@@ -217,7 +217,7 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
           "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
         imageDigest: "sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
         platform: { os: "linux", architecture: "amd64" },
-        instanceType: "standard-1",
+        instanceType: "standard-4",
       },
       schedules: ["0 9 * * *"],
     });

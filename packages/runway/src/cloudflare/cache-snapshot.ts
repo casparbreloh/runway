@@ -9,326 +9,373 @@ const HELPER_CPU_SECONDS = 120;
 const HELPER_FILE_DESCRIPTORS = 64;
 const HELPER_TIMEOUT_SECONDS = CACHE_LIMITS.helperDurationMs / 1000;
 
-export const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/bin/env python3
-import hashlib, json, math, os, resource, shutil, stat, struct, subprocess, sys, time
+export const CACHE_SNAPSHOT_HELPER = String.raw`#!/usr/local/bin/node
+const child = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 
-MAX_ENTRIES=1000000
-MAX_INODES=1000000
-MAX_DEPTH=256
-MAX_COMPONENT=255
-MAX_PATH=4096
-MAX_LINK=4096
-MAX_METADATA=67108864
-MAX_PHYSICAL=1099511627776
-UINT64=(1<<64)-1
+const MAX_ENTRIES = 1_000_000;
+const MAX_INODES = 1_000_000;
+const MAX_DEPTH = 256;
+const MAX_COMPONENT = 255;
+const MAX_PATH = 4096;
+const MAX_LINK = 4096;
+const MAX_METADATA = 67_108_864;
+const MAX_PHYSICAL = 1_099_511_627_776;
+const UINT64 = 0xffff_ffff_ffff_ffffn;
+const slash = Buffer.from("/");
+const dot = Buffer.from(".");
+const dotdot = Buffer.from("..");
 
-def fail(message):
-    raise RuntimeError(message)
-
-def field(hasher, value):
-    hasher.update(struct.pack(">Q", len(value)))
-    hasher.update(value)
-
-def safe_link(path, target):
-    if target.startswith(b"/") or b"\x00" in target or len(target)>MAX_LINK:
-        fail("unsafe link")
-    parts=path.split(b"/")[:-1]
-    for part in target.split(b"/"):
-        if part in (b"", b"."):
-            continue
-        if part==b"..":
-            if not parts: fail("escaping link")
-            parts.pop()
-        else:
-            if len(part)>MAX_COMPONENT: fail("link component")
-            parts.append(part)
-
-def scan_tree(root, max_bytes, records=False):
-    root=os.fsencode(root)
-    root_fd=os.open(root, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    pending=[(root,b"",0)]
-    found=[]
-    metadata=0
-    try:
-        while pending:
-            absolute, prefix, depth=pending.pop()
-            directory=os.dup(root_fd) if not prefix else open_relative(root_fd,prefix,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-            try:
-                proc_path=b"/proc/self/fd/"+str(directory).encode()
-                if os.path.exists(proc_path): scan_path=proc_path
-                elif sys.platform=="darwin": scan_path=absolute
-                else: fail("fd enumeration unavailable")
-                entries=sorted(os.scandir(scan_path), key=lambda entry: entry.name)
-                for entry in entries:
-                    name=entry.name
-                    if not isinstance(name,bytes): fail("non-byte name")
-                    if not name or name in (b".",b"..") or len(name)>MAX_COMPONENT or b"/" in name or b"\x00" in name:
-                        fail("unsafe name")
-                    path=name if not prefix else prefix+b"/"+name
-                    child_depth=depth+1
-                    if child_depth>MAX_DEPTH or len(path)>MAX_PATH: fail("tree depth")
-                    info=os.stat(name, dir_fd=directory, follow_symlinks=False)
-                    mode=info.st_mode
-                    target=None
-                    if stat.S_ISDIR(mode): kind=b"d"
-                    elif stat.S_ISREG(mode): kind=b"f"
-                    elif stat.S_ISLNK(mode):
-                        kind=b"l"
-                        target=os.readlink(name, dir_fd=directory)
-                        if isinstance(target,str): target=os.fsencode(target)
-                        safe_link(path,target)
-                    else: fail("special file")
-                    metadata+=len(path)+(len(target) if target else 0)+96
-                    if metadata>MAX_METADATA: fail("metadata quota")
-                    found.append((path,kind,info.st_dev,info.st_ino,info.st_size,info.st_blocks,target,mode))
-                    if len(found)>MAX_ENTRIES: fail("entry quota")
-                    if kind==b"d":
-                        pending.append((absolute+b"/"+name,path,child_depth))
-            finally:
-                os.close(directory)
-    except:
-        raise
-    found.sort(key=lambda item:item[0])
-    identities={}
-    unique_files=set()
-    hasher=hashlib.sha256()
-    byte_count=0
-    disk_bytes=0
-    files=0
-    max_depth=0
-    for path,kind,device,inode,size,blocks,target,mode in found:
-        identity=(device,inode)
-        if identity not in identities:
-            if len(identities)>=MAX_INODES: fail("inode quota")
-            identities[identity]=len(identities)
-            disk_bytes+=blocks*512
-        canonical_inode=identities[identity]
-        max_depth=max(max_depth,path.count(b"/")+1)
-        field(hasher,kind); field(hasher,path); field(hasher,str(canonical_inode).encode())
-        field(hasher,b"1" if kind==b"f" and mode&0o111 else b"0")
-        if kind==b"f":
-            files+=1
-            field(hasher,str(size).encode())
-            if identity not in unique_files:
-                if size<0 or size>max_bytes-byte_count: fail("expanded byte quota")
-                unique_files.add(identity); byte_count+=size
-                descriptor=open_relative(root_fd,path,os.O_RDONLY|os.O_NOFOLLOW)
-                content=hashlib.sha256(); actual=0
-                try:
-                    while True:
-                        chunk=os.read(descriptor,1048576)
-                        if not chunk: break
-                        actual+=len(chunk)
-                        if actual>size or actual>max_bytes: fail("file changed")
-                        content.update(chunk)
-                finally: os.close(descriptor)
-                if actual!=size: fail("file changed")
-                field(hasher,content.digest())
-            else: field(hasher,b"hardlink")
-        elif kind==b"l": field(hasher,target)
-    if disk_bytes>max_bytes: fail("disk quota")
-    summary={"byteCount":byte_count,"diskBytes":disk_bytes,"entryCount":len(found),"fileCount":files,"maxDepth":max_depth,"schema":1,"treeDigest":hasher.hexdigest(),"uniqueInodes":len(identities)}
-    if records: return summary,found,root_fd
-    os.close(root_fd)
-    return summary
-
-def open_relative(root_fd,path,flags):
-    parts=path.split(b"/")
-    current=os.dup(root_fd)
-    try:
-        for part in parts[:-1]:
-            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
-            os.close(current); current=child
-        result=os.open(parts[-1],flags,dir_fd=current)
-        os.close(current)
-        return result
-    except:
-        os.close(current); raise
-
-def parent_fd(root_fd,path):
-    parts=path.split(b"/")
-    current=os.dup(root_fd)
-    try:
-        for part in parts[:-1]:
-            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
-            os.close(current); current=child
-        return current,parts[-1]
-    except:
-        os.close(current); raise
-
-def limits():
-    resource.setrlimit(resource.RLIMIT_AS,(1073741824,1073741824))
-    resource.setrlimit(resource.RLIMIT_CPU,(120,120))
-    resource.setrlimit(resource.RLIMIT_NOFILE,(64,64))
-
-def evidence(path):
-    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-    digest=hashlib.sha256(); size=0
-    try:
-        while True:
-            chunk=os.read(descriptor,1048576)
-            if not chunk: break
-            size+=len(chunk)
-            if size>MAX_PHYSICAL: fail("physical quota")
-            digest.update(chunk)
-    finally: os.close(descriptor)
-    return {"bytes":size,"digest":digest.hexdigest()}
-
-def preflight(path,max_bytes):
-    proof=evidence(path)
-    if proof["bytes"]<96 or proof["bytes"]>max_bytes: fail("archive size")
-    with open(path,"rb",buffering=0) as archive: block=archive.read(96)
-    values=struct.unpack("<5I6H8Q",block)
-    magic,inodes,_,block_size,fragments,compression,block_log,_,no_ids,major,minor,*words=values
-    root_inode,bytes_used,id_start,xattr_start,inode_start,directory_start,fragment_start,lookup_start=words
-    if magic!=0x73717368 or major!=4 or minor!=0 or compression!=6: fail("archive format")
-    if block_size<4096 or block_size>1048576 or block_size&(block_size-1) or block_log!=int(math.log2(block_size)): fail("block geometry")
-    if inodes<1 or inodes>MAX_INODES or no_ids<1 or no_ids>65535 or fragments>MAX_INODES: fail("archive counts")
-    if bytes_used<96 or bytes_used>proof["bytes"]: fail("bytes used")
-    required=(id_start,inode_start,directory_start)
-    optional=(xattr_start,fragment_start,lookup_start)
-    if any(value<96 or value>=bytes_used for value in required): fail("table bounds")
-    if any(value!=UINT64 and (value<96 or value>=bytes_used) for value in optional): fail("table bounds")
-    if fragments and fragment_start==UINT64: fail("fragment table")
-    root_block=root_inode>>16
-    root_offset=root_inode&65535
-    if root_offset>=8192 or inode_start+root_block<inode_start or inode_start+root_block>=directory_start: fail("root inode")
-    return proof
-
-def run(command,timeout=180,capture=False):
-    return subprocess.run(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if capture else subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=timeout,preexec_fn=limits)
-
-def same_tree(left,right):
-    fields=("schema","treeDigest","entryCount","uniqueInodes","fileCount","byteCount","maxDepth")
-    return all(left.get(field)==right.get(field) for field in fields)
-
-def mount_scan(helper,archive,mount,max_bytes,mode,staging=None,expected=None):
-    command=["unshare","--mount","--propagation","private","--fork","python3",helper,mode,archive,mount,str(max_bytes)]
-    if staging is not None: command.extend([staging,json.dumps(expected,separators=(",",":"),sort_keys=True)])
-    result=run(command,capture=True)
-    return json.loads(result.stdout)
-
-def mounted(helper,archive,mount,max_bytes,staging=None,expected=None):
-    preflight(archive,max_bytes)
-    os.makedirs(mount,mode=0o700,exist_ok=False)
-    process=subprocess.Popen(["squashfuse","-f","-o","ro,nodev,nosuid,noexec",archive,mount],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,preexec_fn=limits)
-    try:
-        deadline=time.monotonic()+10
-        while not os.path.ismount(mount):
-            if process.poll() is not None or time.monotonic()>deadline: fail("mount unavailable")
-            time.sleep(.02)
-        if staging is None: return scan_tree(mount,max_bytes)
-        actual,records,source_fd=scan_tree(mount,max_bytes,True)
-        if not same_tree(actual,expected): fail("tree evidence")
-        try: copy_tree(source_fd,records,staging,max_bytes)
-        finally: os.close(source_fd)
-        restored=scan_tree(staging,max_bytes)
-        if not same_tree(restored,expected): fail("restored evidence")
-        return restored
-    finally:
-        for tool in ("fusermount3","fusermount"):
-            if not os.path.ismount(mount): break
-            try: subprocess.run([tool,"-u",mount],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False,timeout=10)
-            except (FileNotFoundError,subprocess.TimeoutExpired): pass
-        if process.poll() is None: process.kill()
-        try: process.wait(timeout=10)
-        except: pass
-        if os.path.ismount(mount): fail("mount cleanup")
-        shutil.rmtree(mount,ignore_errors=True)
-
-def copy_tree(source_fd,records,staging,max_bytes):
-    os.mkdir(staging,0o700)
-    destination_fd=os.open(staging,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    first={}; actual=0
-    try:
-        for path,kind,device,inode,_,_,_,_ in records:
-            if kind!=b"d": continue
-            parent,name=parent_fd(destination_fd,path)
-            try: os.mkdir(name,0o755,dir_fd=parent)
-            finally: os.close(parent)
-        for path,kind,device,inode,_,_,_,mode in records:
-            if kind!=b"f": continue
-            identity=(device,inode); parent,name=parent_fd(destination_fd,path)
-            try:
-                if identity in first:
-                    old_parent,old_name=parent_fd(destination_fd,first[identity])
-                    try: os.link(old_name,name,src_dir_fd=old_parent,dst_dir_fd=parent,follow_symlinks=False)
-                    finally: os.close(old_parent)
-                else:
-                    source=open_relative(source_fd,path,os.O_RDONLY|os.O_NOFOLLOW)
-                    target=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o755 if mode&0o111 else 0o644,dir_fd=parent)
-                    try:
-                        while True:
-                            chunk=os.read(source,1048576)
-                            if not chunk: break
-                            actual+=len(chunk)
-                            if actual>max_bytes: fail("copy byte quota")
-                            view=memoryview(chunk)
-                            while view: view=view[os.write(target,view):]
-                    finally: os.close(source); os.close(target)
-                    first[identity]=path
-            finally: os.close(parent)
-        for path,kind,_,_,_,_,target,_ in records:
-            if kind!=b"l": continue
-            parent,name=parent_fd(destination_fd,path)
-            try: os.symlink(target,name,dir_fd=parent)
-            finally: os.close(parent)
-    except:
-        os.close(destination_fd); shutil.rmtree(staging,ignore_errors=True); raise
-    os.close(destination_fd)
-
-def main():
-    mode=sys.argv[1]
-    if mode=="scan": result=scan_tree(sys.argv[2],int(sys.argv[3]))
-    elif mode=="inspect":
-        path=sys.argv[2]
-        if not os.path.lexists(path): result={"state":"absent"}
-        elif not os.path.isdir(path) or os.path.islink(path): fail("unsafe target")
-        else: result={"state":"empty" if not os.listdir(path) else "nonempty"}
-    elif mode=="preflight": result=preflight(sys.argv[2],int(sys.argv[3]))
-    elif mode=="copy":
-        source,staging,max_bytes=sys.argv[2],sys.argv[3],int(sys.argv[4])
-        expected,records,source_fd=scan_tree(source,max_bytes,True)
-        try: copy_tree(source_fd,records,staging,max_bytes)
-        finally: os.close(source_fd)
-        result=scan_tree(staging,max_bytes)
-        if not same_tree(result,expected): fail("copied evidence")
-    elif mode=="capture":
-        target,archive,mount,max_bytes=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])
-        before=scan_tree(target,max_bytes)
-        try: os.unlink(archive)
-        except FileNotFoundError: pass
-        run(["mksquashfs",target,archive,"-comp","zstd","-noappend","-no-progress","-all-root","-no-xattrs","-no-exports","-mkfs-time","0","-all-time","0"])
-        proof=preflight(archive,max_bytes)
-        after=scan_tree(target,max_bytes)
-        if before!=after: fail("source changed")
-        mounted_summary=mount_scan(sys.argv[0],archive,mount,max_bytes,"mounted-scan")
-        if not same_tree(before,mounted_summary): fail("archive tree changed")
-        before["diskBytes"]=max(before["diskBytes"],mounted_summary["diskBytes"])
-        result={**before,"archive":proof}
-    elif mode=="mounted-scan": result=mounted(sys.argv[0],sys.argv[2],sys.argv[3],int(sys.argv[4]))
-    elif mode=="restore":
-        archive,mount,staging,max_bytes=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])
-        expected=json.loads(sys.argv[6]); proof=preflight(archive,max_bytes)
-        if proof!={"bytes":int(sys.argv[7]),"digest":sys.argv[8]}: fail("archive evidence")
-        result=mount_scan(sys.argv[0],archive,mount,max_bytes,"mounted-restore",staging,expected)
-    elif mode=="mounted-restore": result=mounted(sys.argv[0],sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[5],json.loads(sys.argv[6]))
-    else: fail("invalid mode")
-    print(json.dumps(result,separators=(",",":"),sort_keys=True))
-
-def reason(error):
-    message=str(error)
-    if any(word in message for word in ("unsafe","escaping","special file","component","tree depth")): return "unsafe"
-    if any(word in message for word in ("quota","archive size")): return "budget"
-    if any(word in message for word in ("archive format","block geometry","archive counts","bytes used","table bounds","fragment table","root inode","archive evidence","tree evidence","restored evidence")): return "corrupt"
-    return "unavailable"
-
-try: main()
-except Exception as error:
-    mode=sys.argv[1] if len(sys.argv)>1 else ""
-    if mode=="capture": print(json.dumps({"reason":reason(error),"state":"skipped"},separators=(",",":"),sort_keys=True))
-    elif mode=="restore": print(json.dumps({"reason":reason(error),"state":"miss"},separators=(",",":"),sort_keys=True))
-    else: sys.exit(1)
+const fail = (message) => { throw new Error(message); };
+const same = (left, right) => Buffer.compare(left, right) === 0;
+const join = (left, right) => Buffer.concat([left, slash, right]);
+const parts = (value) => {
+  const result = [];
+  let start = 0;
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index === value.length || value[index] === 47) {
+      result.push(value.subarray(start, index));
+      start = index + 1;
+    }
+  }
+  return result;
+};
+const field = (hasher, value) => {
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(value.length));
+  hasher.update(length);
+  hasher.update(value);
+};
+const safeLink = (path, target) => {
+  if (target[0] === 47 || target.includes(0) || target.length > MAX_LINK) fail("unsafe link");
+  const resolved = parts(path).slice(0, -1);
+  for (const part of parts(target)) {
+    if (part.length === 0 || same(part, dot)) continue;
+    if (same(part, dotdot)) {
+      if (resolved.length === 0) fail("escaping link");
+      resolved.pop();
+    } else {
+      if (part.length > MAX_COMPONENT) fail("link component");
+      resolved.push(part);
+    }
+  }
+};
+const procPath = (descriptor) => Buffer.from("/proc/self/fd/" + descriptor);
+const rootPath = (descriptor, root) => fs.existsSync(procPath(descriptor)) ? procPath(descriptor) : root;
+const duplicateDirectory = (descriptor, fallback) => {
+  const proc = procPath(descriptor);
+  return fs.existsSync(proc)
+    ? fs.openSync(proc, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+    : fs.openSync(fallback, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+};
+const openRelative = (rootDescriptor, root, path, flags) => {
+  let current = duplicateDirectory(rootDescriptor, root);
+  let currentPath = root;
+  try {
+    const components = parts(path);
+    for (const component of components.slice(0, -1)) {
+      const nextPath = join(currentPath, component);
+      const next = fs.openSync(join(rootPath(current, currentPath), component), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      fs.closeSync(current);
+      current = next;
+      currentPath = nextPath;
+    }
+    const result = fs.openSync(join(rootPath(current, currentPath), components.at(-1)), flags);
+    fs.closeSync(current);
+    return result;
+  } catch (error) {
+    fs.closeSync(current);
+    throw error;
+  }
+};
+const pathAt = (descriptor, root, path) => join(rootPath(descriptor, root), path);
+const scanTree = (rootValue, maxBytes, includeRecords = false) => {
+  const root = Buffer.from(rootValue);
+  const rootDescriptor = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  const pending = [[Buffer.alloc(0), 0]];
+  const found = [];
+  let metadata = 0;
+  try {
+    while (pending.length > 0) {
+      const [prefix, depth] = pending.pop();
+      const directory = prefix.length === 0
+        ? duplicateDirectory(rootDescriptor, root)
+        : openRelative(rootDescriptor, root, prefix, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      try {
+        const directoryPath = prefix.length === 0 ? root : join(root, prefix);
+        const entries = fs.readdirSync(rootPath(directory, directoryPath), { encoding: "buffer", withFileTypes: true })
+          .sort((left, right) => Buffer.compare(left.name, right.name));
+        for (const entry of entries) {
+          const name = entry.name;
+          if (!Buffer.isBuffer(name) || name.length === 0 || same(name, dot) || same(name, dotdot) || name.length > MAX_COMPONENT || name.includes(47) || name.includes(0)) fail("unsafe name");
+          const path = prefix.length === 0 ? name : join(prefix, name);
+          const childDepth = depth + 1;
+          if (childDepth > MAX_DEPTH || path.length > MAX_PATH) fail("tree depth");
+          const absolute = pathAt(rootDescriptor, root, path);
+          const info = fs.lstatSync(absolute, { bigint: true });
+          let kind;
+          let target = null;
+          if (info.isDirectory()) kind = Buffer.from("d");
+          else if (info.isFile()) kind = Buffer.from("f");
+          else if (info.isSymbolicLink()) {
+            kind = Buffer.from("l");
+            target = fs.readlinkSync(absolute, { encoding: "buffer" });
+            safeLink(path, target);
+          } else fail("special file");
+          metadata += path.length + (target?.length ?? 0) + 96;
+          if (metadata > MAX_METADATA) fail("metadata quota");
+          found.push({ path, kind, device: info.dev, inode: info.ino, size: info.size, blocks: info.blocks, target, mode: info.mode });
+          if (found.length > MAX_ENTRIES) fail("entry quota");
+          if (same(kind, Buffer.from("d"))) pending.push([path, childDepth]);
+        }
+      } finally { fs.closeSync(directory); }
+    }
+    found.sort((left, right) => Buffer.compare(left.path, right.path));
+    const identities = new Map();
+    const uniqueFiles = new Set();
+    const hasher = crypto.createHash("sha256");
+    let byteCount = 0;
+    let diskBytes = 0;
+    let files = 0;
+    let maxDepth = 0;
+    for (const record of found) {
+      const identity = record.device + ":" + record.inode;
+      if (!identities.has(identity)) {
+        if (identities.size >= MAX_INODES) fail("inode quota");
+        identities.set(identity, identities.size);
+        diskBytes += Number(record.blocks * 512n);
+      }
+      const canonicalInode = identities.get(identity);
+      maxDepth = Math.max(maxDepth, parts(record.path).length);
+      field(hasher, record.kind);
+      field(hasher, record.path);
+      field(hasher, Buffer.from(String(canonicalInode)));
+      field(hasher, Buffer.from(same(record.kind, Buffer.from("f")) && (record.mode & 73n) !== 0n ? "1" : "0"));
+      if (same(record.kind, Buffer.from("f"))) {
+        files += 1;
+        const size = Number(record.size);
+        field(hasher, Buffer.from(String(size)));
+        if (!uniqueFiles.has(identity)) {
+          if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes - byteCount) fail("expanded byte quota");
+          uniqueFiles.add(identity);
+          byteCount += size;
+          const descriptor = openRelative(rootDescriptor, root, record.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+          const content = crypto.createHash("sha256");
+          const buffer = Buffer.allocUnsafe(1_048_576);
+          let actual = 0;
+          try {
+            for (;;) {
+              const bytes = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+              if (bytes === 0) break;
+              actual += bytes;
+              if (actual > size || actual > maxBytes) fail("file changed");
+              content.update(buffer.subarray(0, bytes));
+            }
+          } finally { fs.closeSync(descriptor); }
+          if (actual !== size) fail("file changed");
+          field(hasher, content.digest());
+        } else field(hasher, Buffer.from("hardlink"));
+      } else if (same(record.kind, Buffer.from("l"))) field(hasher, record.target);
+    }
+    if (diskBytes > maxBytes) fail("disk quota");
+    const summary = { byteCount, diskBytes, entryCount: found.length, fileCount: files, maxDepth, schema: 1, treeDigest: hasher.digest("hex"), uniqueInodes: identities.size };
+    if (includeRecords) return { summary, records: found, rootDescriptor, root };
+    fs.closeSync(rootDescriptor);
+    return summary;
+  } catch (error) {
+    fs.closeSync(rootDescriptor);
+    throw error;
+  }
+};
+const evidence = (path) => {
+  const descriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const digest = crypto.createHash("sha256");
+  const buffer = Buffer.allocUnsafe(1_048_576);
+  let size = 0;
+  try {
+    for (;;) {
+      const bytes = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      size += bytes;
+      if (size > MAX_PHYSICAL) fail("physical quota");
+      digest.update(buffer.subarray(0, bytes));
+    }
+  } finally { fs.closeSync(descriptor); }
+  return { bytes: size, digest: digest.digest("hex") };
+};
+const preflight = (path, maxBytes) => {
+  const proof = evidence(path);
+  if (proof.bytes < 96 || proof.bytes > maxBytes) fail("archive size");
+  const descriptor = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const block = Buffer.alloc(96);
+  try { if (fs.readSync(descriptor, block, 0, 96, 0) !== 96) fail("archive format"); }
+  finally { fs.closeSync(descriptor); }
+  const magic = block.readUInt32LE(0);
+  const inodes = block.readUInt32LE(4);
+  const blockSize = block.readUInt32LE(12);
+  const fragments = block.readUInt32LE(16);
+  const compression = block.readUInt16LE(20);
+  const blockLog = block.readUInt16LE(22);
+  const noIds = block.readUInt16LE(26);
+  const major = block.readUInt16LE(28);
+  const minor = block.readUInt16LE(30);
+  const rootInode = block.readBigUInt64LE(32);
+  const bytesUsed = block.readBigUInt64LE(40);
+  const idStart = block.readBigUInt64LE(48);
+  const xattrStart = block.readBigUInt64LE(56);
+  const inodeStart = block.readBigUInt64LE(64);
+  const directoryStart = block.readBigUInt64LE(72);
+  const fragmentStart = block.readBigUInt64LE(80);
+  const lookupStart = block.readBigUInt64LE(88);
+  if (magic !== 0x73717368 || major !== 4 || minor !== 0 || compression !== 6) fail("archive format");
+  if (blockSize < 4096 || blockSize > 1_048_576 || (blockSize & (blockSize - 1)) !== 0 || blockLog !== Math.log2(blockSize)) fail("block geometry");
+  if (inodes < 1 || inodes > MAX_INODES || noIds < 1 || noIds > 65_535 || fragments > MAX_INODES) fail("archive counts");
+  if (bytesUsed < 96n || bytesUsed > BigInt(proof.bytes)) fail("bytes used");
+  if ([idStart, inodeStart, directoryStart].some((value) => value < 96n || value >= bytesUsed)) fail("table bounds");
+  if ([xattrStart, fragmentStart, lookupStart].some((value) => value !== UINT64 && (value < 96n || value >= bytesUsed))) fail("table bounds");
+  if (fragments && fragmentStart === UINT64) fail("fragment table");
+  const rootBlock = rootInode >> 16n;
+  const rootOffset = rootInode & 65_535n;
+  if (rootOffset >= 8192n || inodeStart + rootBlock < inodeStart || inodeStart + rootBlock >= directoryStart) fail("root inode");
+  return proof;
+};
+const run = (command, capture = false) => {
+  const result = child.spawnSync(command[0], command.slice(1), { encoding: capture ? "utf8" : undefined, stdio: capture ? ["ignore", "pipe", "ignore"] : "ignore", timeout: 180_000 });
+  if (result.error || result.status !== 0) throw result.error ?? new Error("helper command failed");
+  return result;
+};
+const sameTree = (left, right) => ["schema", "treeDigest", "entryCount", "uniqueInodes", "fileCount", "byteCount", "maxDepth"].every((field) => left[field] === right[field]);
+const mountScan = (helper, archive, mount, maxBytes, mode, staging, expected) => {
+  const command = ["unshare", "--mount", "--propagation", "private", "--fork", "/usr/local/bin/node", helper, mode, archive, mount, String(maxBytes)];
+  if (staging !== undefined) command.push(staging, JSON.stringify(expected));
+  return JSON.parse(run(command, true).stdout);
+};
+const isMounted = (mount) => fs.readFileSync("/proc/self/mountinfo", "utf8").split("\n").some((line) => line.split(" ")[4] === mount);
+const sleep = (milliseconds) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+const copyTree = (sourceDescriptor, sourceRoot, records, staging, maxBytes) => {
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const destinationRoot = Buffer.from(staging);
+  const destinationDescriptor = fs.openSync(destinationRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  const first = new Map();
+  let actual = 0;
+  try {
+    for (const record of records) if (same(record.kind, Buffer.from("d"))) fs.mkdirSync(pathAt(destinationDescriptor, destinationRoot, record.path), { mode: 0o755 });
+    for (const record of records) {
+      if (!same(record.kind, Buffer.from("f"))) continue;
+      const identity = record.device + ":" + record.inode;
+      const destination = pathAt(destinationDescriptor, destinationRoot, record.path);
+      if (first.has(identity)) fs.linkSync(pathAt(destinationDescriptor, destinationRoot, first.get(identity)), destination);
+      else {
+        const source = openRelative(sourceDescriptor, sourceRoot, record.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+        const target = fs.openSync(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, (record.mode & 73n) !== 0n ? 0o755 : 0o644);
+        const buffer = Buffer.allocUnsafe(1_048_576);
+        try {
+          for (;;) {
+            const bytes = fs.readSync(source, buffer, 0, buffer.length, null);
+            if (bytes === 0) break;
+            actual += bytes;
+            if (actual > maxBytes) fail("copy byte quota");
+            let offset = 0;
+            while (offset < bytes) offset += fs.writeSync(target, buffer, offset, bytes - offset);
+          }
+        } finally { fs.closeSync(source); fs.closeSync(target); }
+        first.set(identity, record.path);
+      }
+    }
+    for (const record of records) if (same(record.kind, Buffer.from("l"))) fs.symlinkSync(record.target, pathAt(destinationDescriptor, destinationRoot, record.path));
+  } catch (error) {
+    fs.closeSync(destinationDescriptor);
+    fs.rmSync(staging, { force: true, recursive: true });
+    throw error;
+  }
+  fs.closeSync(destinationDescriptor);
+};
+const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
+  preflight(archive, maxBytes);
+  fs.mkdirSync(mount, { mode: 0o700 });
+  const process = child.spawn("squashfuse", ["-f", "-o", "ro,nodev,nosuid,noexec", archive, mount], { stdio: "ignore" });
+  try {
+    const deadline = Date.now() + 10_000;
+    while (!isMounted(mount)) {
+      if (process.exitCode !== null || Date.now() > deadline) fail("mount unavailable");
+      sleep(20);
+    }
+    if (staging === undefined) return scanTree(mount, maxBytes);
+    const scanned = scanTree(mount, maxBytes, true);
+    if (!sameTree(scanned.summary, expected)) fail("tree evidence");
+    try { copyTree(scanned.rootDescriptor, scanned.root, scanned.records, staging, maxBytes); }
+    finally { fs.closeSync(scanned.rootDescriptor); }
+    const restored = scanTree(staging, maxBytes);
+    if (!sameTree(restored, expected)) fail("restored evidence");
+    return restored;
+  } finally {
+    for (const tool of ["fusermount3", "fusermount"]) {
+      if (!isMounted(mount)) break;
+      child.spawnSync(tool, ["-u", mount], { stdio: "ignore", timeout: 10_000 });
+    }
+    if (process.exitCode === null) process.kill("SIGKILL");
+    if (isMounted(mount)) fail("mount cleanup");
+    fs.rmSync(mount, { force: true, recursive: true });
+  }
+};
+const main = () => {
+  const mode = process.argv[2];
+  let result;
+  if (mode === "scan") result = scanTree(process.argv[3], Number(process.argv[4]));
+  else if (mode === "inspect") {
+    const path = process.argv[3];
+    if (!fs.existsSync(path)) result = { state: "absent" };
+    else {
+      const info = fs.lstatSync(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) fail("unsafe target");
+      result = { state: fs.readdirSync(path).length === 0 ? "empty" : "nonempty" };
+    }
+  } else if (mode === "preflight") result = preflight(process.argv[3], Number(process.argv[4]));
+  else if (mode === "copy") {
+    const [source, staging, maxBytes] = [process.argv[3], process.argv[4], Number(process.argv[5])];
+    const scanned = scanTree(source, maxBytes, true);
+    try { copyTree(scanned.rootDescriptor, scanned.root, scanned.records, staging, maxBytes); }
+    finally { fs.closeSync(scanned.rootDescriptor); }
+    result = scanTree(staging, maxBytes);
+    if (!sameTree(result, scanned.summary)) fail("copied evidence");
+  } else if (mode === "capture") {
+    const [target, archive, mount, maxBytes] = [process.argv[3], process.argv[4], process.argv[5], Number(process.argv[6])];
+    const before = scanTree(target, maxBytes);
+    try { fs.unlinkSync(archive); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    run(["mksquashfs", target, archive, "-comp", "zstd", "-noappend", "-no-progress", "-all-root", "-no-xattrs", "-no-exports", "-mkfs-time", "0", "-all-time", "0"]);
+    const proof = preflight(archive, maxBytes);
+    const after = scanTree(target, maxBytes);
+    if (JSON.stringify(before) !== JSON.stringify(after)) fail("source changed");
+    const mountedSummary = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-scan");
+    if (!sameTree(before, mountedSummary)) fail("archive tree changed");
+    before.diskBytes = Math.max(before.diskBytes, mountedSummary.diskBytes);
+    result = { ...before, archive: proof };
+  } else if (mode === "mounted-scan") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]));
+  else if (mode === "restore") {
+    const [archive, mount, staging, maxBytes] = [process.argv[3], process.argv[4], process.argv[5], Number(process.argv[6])];
+    const expected = JSON.parse(process.argv[7]);
+    const proof = preflight(archive, maxBytes);
+    if (proof.bytes !== Number(process.argv[8]) || proof.digest !== process.argv[9]) fail("archive evidence");
+    result = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-restore", staging, expected);
+  } else if (mode === "mounted-restore") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]), process.argv[6], JSON.parse(process.argv[7]));
+  else fail("invalid mode");
+  process.stdout.write(JSON.stringify(result));
+};
+const reason = (error) => {
+  const message = String(error?.message ?? error);
+  if (["unsafe", "escaping", "special file", "component", "tree depth"].some((word) => message.includes(word))) return "unsafe";
+  if (["quota", "archive size"].some((word) => message.includes(word))) return "budget";
+  if (["archive format", "block geometry", "archive counts", "bytes used", "table bounds", "fragment table", "root inode", "archive evidence", "tree evidence", "restored evidence"].some((word) => message.includes(word))) return "corrupt";
+  return "unavailable";
+};
+try { main(); }
+catch (error) {
+  const mode = process.argv[2] ?? "";
+  if (mode === "capture") process.stdout.write(JSON.stringify({ reason: reason(error), state: "skipped" }));
+  else if (mode === "restore") process.stdout.write(JSON.stringify({ reason: reason(error), state: "miss" }));
+  else process.exitCode = 1;
+}
 `;
 
 interface ArchiveEvidence {
@@ -451,7 +498,7 @@ const command = (
 ): string => {
   const timeoutSeconds = Math.min(HELPER_TIMEOUT_SECONDS, Math.max(0.001, durationMs / 1000));
   const cpuSeconds = Math.min(HELPER_CPU_SECONDS, Math.max(1, Math.ceil(timeoutSeconds)));
-  return `timeout --signal=KILL ${timeoutSeconds}s prlimit --as=${HELPER_MEMORY_BYTES} --cpu=${cpuSeconds} --nofile=${HELPER_FILE_DESCRIPTORS} -- python3 ${shellQuote(helper)} ${mode} ${fields.map((field) => shellQuote(String(field))).join(" ")}`;
+  return `timeout --signal=KILL ${timeoutSeconds}s prlimit --as=${HELPER_MEMORY_BYTES} --cpu=${cpuSeconds} --nofile=${HELPER_FILE_DESCRIPTORS} -- /usr/local/bin/node ${shellQuote(helper)} ${mode} ${fields.map((field) => shellQuote(String(field))).join(" ")}`;
 };
 
 const duration = (budget: SnapshotBudget): number =>
@@ -477,7 +524,7 @@ export class CloudflareCacheSnapshot {
     work: (process: CacheSnapshotProcess, helper: string) => Promise<T>,
   ): Promise<T> {
     const process = await this.#process();
-    const helper = `/tmp/.runway-cache-helper-${crypto.randomUUID()}.py`;
+    const helper = `/tmp/.runway-cache-helper-${crypto.randomUUID()}.cjs`;
     let outcome:
       | { readonly state: "done"; readonly value: T }
       | { readonly state: "failed"; readonly error: unknown };

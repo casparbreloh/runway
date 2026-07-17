@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { platform } from "node:process";
+import { execPath, platform } from "node:process";
 import { promisify } from "node:util";
 
 import { expect, test } from "vitest";
@@ -40,6 +40,7 @@ const summary = JSON.stringify({
 });
 
 class Process implements CacheSnapshotProcess {
+  readonly commands: string[] = [];
   readonly events: string[] = [];
   readonly files = new Set<string>();
   readonly timeouts: number[] = [];
@@ -50,7 +51,8 @@ class Process implements CacheSnapshotProcess {
     this.events.push("write");
   }
 
-  async execute(_command: string, timeoutMs: number): Promise<{ readonly stdout: string }> {
+  async execute(command: string, timeoutMs: number): Promise<{ readonly stdout: string }> {
+    this.commands.push(command);
     this.events.push("execute");
     this.timeouts.push(timeoutMs);
     return { stdout: this.outputs.shift() ?? "" };
@@ -76,7 +78,7 @@ const withHelper = async <T>(
   work: (directory: string, helper: string) => Promise<T>,
 ): Promise<T> => {
   const directory = await mkdtemp(join(tmpdir(), "runway-cache-helper-"));
-  const helper = join(directory, "helper.py");
+  const helper = join(directory, "helper.cjs");
   try {
     await writeFile(helper, CACHE_SNAPSHOT_HELPER, { mode: 0o700 });
     return await work(directory, helper);
@@ -86,7 +88,7 @@ const withHelper = async <T>(
 };
 
 const scan = async (helper: string, path: string, maxBytes = 1_000_000): Promise<unknown> => {
-  const { stdout } = await execute("python3", [helper, "scan", path, String(maxBytes)], {
+  const { stdout } = await execute(execPath, [helper, "scan", path, String(maxBytes)], {
     encoding: "utf8",
   });
   return JSON.parse(stdout);
@@ -101,11 +103,7 @@ test("the owned helper scans raw-byte trees deterministically and retains hardli
     await link(content, join(root, "hardlink"));
     await symlink("nested/content", join(root, "internal-link"));
     if (platform === "linux") {
-      await execute("python3", [
-        "-c",
-        "import os,sys; p=os.fsencode(sys.argv[1])+b'/\\xff'; f=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(f,b'raw'); os.close(f)",
-        root,
-      ]);
+      await writeFile(Buffer.concat([Buffer.from(root), Buffer.from([47, 255])]), "raw");
     } else {
       await writeFile(join(root, "raw\nname"), "raw");
     }
@@ -130,17 +128,17 @@ test("the owned helper rejects escaping links, special files, and expanded-byte 
     const escaping = join(directory, "escaping");
     await mkdir(escaping);
     await symlink("../outside", join(escaping, "link"));
-    await expect(execute("python3", [helper, "scan", escaping, "1000"])).rejects.toThrow();
+    await expect(execute(execPath, [helper, "scan", escaping, "1000"])).rejects.toThrow();
 
     const special = join(directory, "special");
     await mkdir(special);
     await execute("mkfifo", [join(special, "fifo")]);
-    await expect(execute("python3", [helper, "scan", special, "1000"])).rejects.toThrow();
+    await expect(execute(execPath, [helper, "scan", special, "1000"])).rejects.toThrow();
 
     const oversized = join(directory, "oversized");
     await mkdir(oversized);
     await writeFile(join(oversized, "payload"), "too large");
-    await expect(execute("python3", [helper, "scan", oversized, "2"])).rejects.toThrow();
+    await expect(execute(execPath, [helper, "scan", oversized, "2"])).rejects.toThrow();
   });
 });
 
@@ -163,7 +161,7 @@ test("the owned helper preflights fixed v4 zstd geometry, physical bytes, and ta
     valid.writeBigUInt64LE(0xffff_ffff_ffff_ffffn, 88);
     const archive = join(directory, "archive.sqsh");
     await writeFile(archive, valid);
-    const { stdout } = await execute("python3", [helper, "preflight", archive, "1000"], {
+    const { stdout } = await execute(execPath, [helper, "preflight", archive, "1000"], {
       encoding: "utf8",
     });
     expect(JSON.parse(stdout)).toEqual({
@@ -181,7 +179,7 @@ test("the owned helper preflights fixed v4 zstd geometry, physical bytes, and ta
       mutate(hostile);
       const path = join(directory, `${name}.sqsh`);
       await writeFile(path, hostile);
-      await expect(execute("python3", [helper, "preflight", path, "1000"]), name).rejects.toThrow();
+      await expect(execute(execPath, [helper, "preflight", path, "1000"]), name).rejects.toThrow();
     }
   });
 });
@@ -197,7 +195,7 @@ test("the owned helper copies fd-relative into absent staging, preserves hardlin
     await symlink("nested/content", join(source, "internal-link"));
 
     const sourceSummary = await scan(helper, source);
-    const { stdout } = await execute("python3", [helper, "copy", source, staging, "1000000"], {
+    const { stdout } = await execute(execPath, [helper, "copy", source, staging, "1000000"], {
       encoding: "utf8",
     });
     expect(JSON.parse(stdout)).toMatchObject({
@@ -218,11 +216,9 @@ test("the owned helper copies fd-relative into absent staging, preserves hardlin
       byteCount: 7,
     });
 
-    await expect(
-      execute("python3", [helper, "copy", source, staging, "1000000"]),
-    ).rejects.toThrow();
+    await expect(execute(execPath, [helper, "copy", source, staging, "1000000"])).rejects.toThrow();
     const limited = join(directory, "limited");
-    await expect(execute("python3", [helper, "copy", source, limited, "2"])).rejects.toThrow();
+    await expect(execute(execPath, [helper, "copy", source, limited, "2"])).rejects.toThrow();
     await expect(lstat(limited)).rejects.toThrow();
 
     const escaping = join(directory, "escaping-source");
@@ -230,7 +226,7 @@ test("the owned helper copies fd-relative into absent staging, preserves hardlin
     await mkdir(escaping);
     await symlink("../outside", join(escaping, "link"));
     await expect(
-      execute("python3", [helper, "copy", escaping, escapedStaging, "1000"]),
+      execute(execPath, [helper, "copy", escaping, escapedStaging, "1000"]),
     ).rejects.toThrow();
     await expect(lstat(escapedStaging)).rejects.toThrow();
   });
@@ -263,6 +259,8 @@ test("capture accepts only a fixed summary and removes its private helper on suc
     byteCount: 7,
   });
   expect(process.events).toEqual(["write", "execute", "remove", "close"]);
+  expect(process.commands[0]).toContain("-- /usr/local/bin/node ");
+  expect(process.commands[0]).not.toContain("python");
   expect(process.timeouts).toEqual([20_000]);
   expect(process.files).toEqual(new Set());
 });
