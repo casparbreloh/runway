@@ -8,6 +8,9 @@ interface LegacyObject {
 }
 
 interface LegacyBucketState {
+  readonly location: string;
+  readonly storageClass: string;
+  readonly jurisdiction: string;
   readonly lifecycle: string;
   readonly publicAccess: boolean;
   readonly managedDomain: string;
@@ -30,7 +33,14 @@ export interface LegacyStackReceipt {
     readonly retainedVersionIds: readonly string[];
     readonly retainedDeploymentIds: readonly string[];
   };
-  readonly workflow: { readonly name: string; readonly id: string };
+  readonly workflow: {
+    readonly name: string;
+    readonly id: string;
+    readonly className: string;
+    readonly scriptName: string;
+    readonly versionId: string;
+    readonly retainedVersionIds: readonly string[];
+  };
   readonly container: {
     readonly name: string;
     readonly id: string;
@@ -38,6 +48,30 @@ export interface LegacyStackReceipt {
     readonly imageTag: string;
     readonly resolvedImageDigest: string;
     readonly platform: { readonly os: "linux"; readonly architecture: "amd64" };
+    readonly version: number;
+    readonly schedulingPolicy: string;
+    readonly maxInstances: number;
+    readonly rolloutActiveGracePeriod: number;
+    readonly tiers: readonly string[];
+    readonly namespaceId: string;
+    readonly configuration: {
+      readonly vcpu: number;
+      readonly memoryMiB: number;
+      readonly diskSizeMb: number;
+      readonly runtime: string;
+      readonly networkMode: string;
+      readonly assignIpv4: string;
+      readonly assignIpv6: string;
+      readonly bandwidthLimitMbps: number;
+      readonly command: readonly string[];
+      readonly entrypoint: readonly string[];
+    };
+    readonly rollouts: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly currentVersion: number;
+      readonly targetVersion: number;
+    }[];
   };
   readonly namespaces: readonly {
     readonly binding: string;
@@ -93,7 +127,8 @@ const canonical = (value: unknown): string => {
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return JSON.stringify(value);
   }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && !Object.is(value, -0))
+    return String(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value)
@@ -131,10 +166,24 @@ const assertReceipt = (receipt: LegacyStackReceipt): void => {
     receipt.worker.deploymentId,
     receipt.workflow.name,
     receipt.workflow.id,
+    receipt.workflow.className,
+    receipt.workflow.scriptName,
+    receipt.workflow.versionId,
+    ...receipt.workflow.retainedVersionIds,
     receipt.container.name,
     receipt.container.id,
     receipt.container.rolloutId,
     receipt.container.imageTag,
+    receipt.container.schedulingPolicy,
+    receipt.container.namespaceId,
+    receipt.container.configuration.runtime,
+    receipt.container.configuration.networkMode,
+    receipt.container.configuration.assignIpv4,
+    receipt.container.configuration.assignIpv6,
+    ...receipt.container.tiers,
+    ...receipt.container.configuration.command,
+    ...receipt.container.configuration.entrypoint,
+    ...receipt.container.rollouts.flatMap(({ id, status }) => [id, status]),
     ...receipt.worker.retainedVersionIds,
     ...receipt.worker.retainedDeploymentIds,
     ...receipt.namespaces.flatMap(({ binding, name, className, id, scriptName }) => [
@@ -155,6 +204,9 @@ const assertReceipt = (receipt: LegacyStackReceipt): void => {
     ...receipt.secretSnapshot.ownedKeyBindings,
     ...receipt.buckets.flatMap((bucket) => [
       bucket.name,
+      bucket.location,
+      bucket.storageClass,
+      bucket.jurisdiction,
       bucket.lifecycle,
       bucket.managedDomain,
       ...bucket.customDomains,
@@ -169,6 +221,42 @@ const assertReceipt = (receipt: LegacyStackReceipt): void => {
   if (
     !sortedUnique(receipt.worker.retainedVersionIds) ||
     !sortedUnique(receipt.worker.retainedDeploymentIds) ||
+    receipt.worker.retainedVersionIds.includes(receipt.worker.versionId) ||
+    receipt.worker.retainedDeploymentIds.includes(receipt.worker.deploymentId) ||
+    !sortedUnique(receipt.workflow.retainedVersionIds) ||
+    receipt.workflow.retainedVersionIds.includes(receipt.workflow.versionId) ||
+    receipt.workflow.scriptName !== receipt.worker.name ||
+    !Number.isSafeInteger(receipt.container.version) ||
+    receipt.container.version < 1 ||
+    !Number.isSafeInteger(receipt.container.maxInstances) ||
+    receipt.container.maxInstances < 1 ||
+    !Number.isSafeInteger(receipt.container.rolloutActiveGracePeriod) ||
+    receipt.container.rolloutActiveGracePeriod < 0 ||
+    !Number.isFinite(receipt.container.configuration.vcpu) ||
+    receipt.container.configuration.vcpu < 0 ||
+    Object.is(receipt.container.configuration.vcpu, -0) ||
+    !Number.isSafeInteger(receipt.container.configuration.memoryMiB) ||
+    receipt.container.configuration.memoryMiB < 0 ||
+    !Number.isSafeInteger(receipt.container.configuration.diskSizeMb) ||
+    receipt.container.configuration.diskSizeMb < 0 ||
+    !Number.isSafeInteger(receipt.container.configuration.bandwidthLimitMbps) ||
+    receipt.container.configuration.bandwidthLimitMbps < 0 ||
+    !sortedUnique(receipt.container.tiers) ||
+    !sortedUnique(receipt.container.rollouts.map(({ id }) => id)) ||
+    !receipt.container.rollouts.some(
+      ({ id, status, targetVersion }) =>
+        id === receipt.container.rolloutId &&
+        status === "completed" &&
+        targetVersion === receipt.container.version,
+    ) ||
+    !receipt.namespaces.some(({ id }) => id === receipt.container.namespaceId) ||
+    receipt.container.rollouts.some(
+      ({ currentVersion, targetVersion }) =>
+        !Number.isSafeInteger(currentVersion) ||
+        !Number.isSafeInteger(targetVersion) ||
+        currentVersion < 1 ||
+        targetVersion < 1,
+    ) ||
     !sortedUnique(receipt.namespaces.map(({ binding }) => binding)) ||
     !sortedUnique(receipt.bindings.map(({ name }) => name)) ||
     !sortedUnique(receipt.secretNames) ||
@@ -225,6 +313,16 @@ export class LegacyStack {
   }
 
   async capture(): Promise<LegacyStackReceipt> {
+    const inventory = await this.check();
+    await this.#control.writeOnce(canonical(inventory));
+    const reread = await this.read();
+    if (!reread || canonical(reread) !== canonical(inventory)) {
+      throw new Error("legacy Stack receipt persistence failed");
+    }
+    return reread;
+  }
+
+  async check(): Promise<LegacyStackReceipt> {
     const inventory = await this.#control.inventory();
     assertReceipt(inventory);
     if (canonical(inventory) !== canonical(this.#expected)) {
@@ -237,11 +335,6 @@ export class LegacyStack {
     if (digest !== inventory.container.resolvedImageDigest) {
       throw new Error("legacy Stack image digest does not match independent resolution");
     }
-    await this.#control.writeOnce(canonical(inventory));
-    const reread = await this.read();
-    if (!reread || canonical(reread) !== canonical(inventory)) {
-      throw new Error("legacy Stack receipt persistence failed");
-    }
-    return reread;
+    return inventory;
   }
 }

@@ -24,7 +24,14 @@ const receipt: LegacyStackReceipt = {
     retainedVersionIds: ["worker-version-old"],
     retainedDeploymentIds: ["worker-deployment-old"],
   },
-  workflow: { name: "runway-monorepo", id: "workflow-id" },
+  workflow: {
+    name: "runway-monorepo",
+    id: "workflow-id",
+    className: "DynamicWorkflow",
+    scriptName: "runway-monorepo",
+    versionId: "workflow-version-current",
+    retainedVersionIds: ["workflow-version-old"],
+  },
   container: {
     name: "runway-monorepo-Sandbox",
     id: "container-id",
@@ -32,6 +39,25 @@ const receipt: LegacyStackReceipt = {
     imageTag: "docker.io/cloudflare/sandbox:0.12.3",
     resolvedImageDigest: digest("2"),
     platform: { os: "linux", architecture: "amd64" },
+    version: 3,
+    schedulingPolicy: "default",
+    maxInstances: 20,
+    rolloutActiveGracePeriod: 0,
+    tiers: ["1", "2"],
+    namespaceId: "sandbox-namespace-id",
+    configuration: {
+      vcpu: 0.5,
+      memoryMiB: 4096,
+      diskSizeMb: 8000,
+      runtime: "firecracker",
+      networkMode: "private",
+      assignIpv4: "none",
+      assignIpv6: "none",
+      bandwidthLimitMbps: 500,
+      command: [],
+      entrypoint: [],
+    },
+    rollouts: [{ id: "rollout-id", status: "completed", currentVersion: 2, targetVersion: 3 }],
   },
   namespaces: [
     {
@@ -71,6 +97,9 @@ const receipt: LegacyStackReceipt = {
       name: "runway-account-1",
       authority: "preserve-only",
       objectCount: 46,
+      location: "EEUR",
+      storageClass: "Standard",
+      jurisdiction: "default",
       lifecycle: "default-multipart-abort-7-days",
       publicAccess: false,
       managedDomain: "pub-artifacts.r2.dev",
@@ -81,6 +110,9 @@ const receipt: LegacyStackReceipt = {
       name: "runway-cache-account-1",
       authority: "delete-after-replacement",
       objects: [{ key: "caches/one.tar.gz", size: 10, etag: "etag-one" }],
+      location: "EEUR",
+      storageClass: "Standard",
+      jurisdiction: "default",
       lifecycle: "default-multipart-abort-7-days",
       publicAccess: true,
       managedDomain: "pub-cache.r2.dev",
@@ -150,4 +182,21 @@ test("LegacyStack fails closed on inventory, independently resolved digest, or s
   await expect(new LegacyStack(receipt, snapshot).capture()).rejects.toThrow(
     "legacy Stack inventory",
   );
+});
+
+test("LegacyStack canonicalizes finite provider decimals and rejects negative zero", async () => {
+  await expect(new LegacyStack(receipt, new MemoryControl()).check()).resolves.toEqual(receipt);
+  expect(
+    () =>
+      new LegacyStack(
+        {
+          ...receipt,
+          container: {
+            ...receipt.container,
+            configuration: { ...receipt.container.configuration, vcpu: -0 },
+          },
+        },
+        new MemoryControl(),
+      ),
+  ).toThrow("invalid legacy Stack receipt");
 });

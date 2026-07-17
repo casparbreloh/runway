@@ -10,6 +10,7 @@ export type CloudflareApi = {
   };
   workers: {
     routes: {
+      list(params: { zone_id: string }): Promise<unknown>;
       get(routeId: string, params: { zone_id: string }): Promise<unknown>;
       delete(routeId: string, params: { zone_id: string }): Promise<unknown>;
     };
@@ -60,6 +61,12 @@ export type CloudflareApi = {
     update: AsyncMethod<Cloudflare["workflows"]["update"]>;
     list(params: { account_id: string }): Promise<unknown>;
     delete: AsyncMethod<Cloudflare["workflows"]["delete"]>;
+    versions: {
+      list(workflowName: string, params: { account_id: string }): Promise<unknown>;
+    };
+  };
+  zones: {
+    list(params: { account: { id: string }; per_page?: number }): Promise<unknown>;
   };
   containers: {
     applications: {
@@ -91,6 +98,9 @@ export type CloudflareApi = {
       create(params: { account_id: string; name: string }): Promise<unknown>;
       delete(bucketName: string, params: { account_id: string }): Promise<unknown>;
       lifecycle: {
+        get(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      cors: {
         get(bucketName: string, params: { account_id: string }): Promise<unknown>;
       };
       domains: {
@@ -150,6 +160,7 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
     accounts: cf.accounts,
     workers: cf.workers,
     workflows: cf.workflows,
+    zones: cf.zones,
     durableObjects: cf.durableObjects,
     containers: {
       applications: {
