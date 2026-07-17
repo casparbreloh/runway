@@ -1,6 +1,5 @@
 export { ExecError } from "./exec-error.ts";
 
-export { secretNameOf } from "./secrets.ts";
 export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
 
@@ -17,8 +16,6 @@ export type {
   GitHubRepository,
   GitHubTrigger,
 } from "./github.ts";
-export type { ProgressEvent } from "./deploy.ts";
-export type { RegisteredWorkflow, Registry } from "./registry.ts";
 export type {
   Budget,
   CacheDeclaration,

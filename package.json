@@ -8,8 +8,6 @@
     "format-check": "oxfmt --check",
     "fallow": "fallow --ci --no-cache",
     "lint": "oxlint",
-    "legacy:capture": "node packages/runway/tests/live-legacy-stack.ts --capture",
-    "legacy:dry-run": "node packages/runway/tests/live-legacy-stack.ts --dry-run",
     "test": "vitest run",
     "test:live": "node packages/runway/tests/live-cache-transfer-smoke.ts && node packages/runway/tests/live-workflow-artifact-smoke.ts && node packages/runway/tests/live-repository-recovery-smoke.ts && node packages/runway/tests/live-github-recovery-smoke.ts",
     "typecheck": "tsgo --build"

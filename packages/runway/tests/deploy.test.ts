@@ -4,11 +4,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { cron, github, webhook, workflow } from "runway";
-import type { ProgressEvent, Registry, WorkflowDefinition } from "runway";
+import type { WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
 
 import { deployWithAdapters } from "../src/deploy.ts";
-import type { CloudflareApi } from "../src/deploy.ts";
+import type { CloudflareApi, ProgressEvent } from "../src/deploy.ts";
+import type { Registry } from "../src/registry.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
 import { assertRepositorySourceReachable } from "../src/repository-source.ts";
 import type { StackControl, StackManifest, StackReceipt, StackResource } from "../src/stack.ts";

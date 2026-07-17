@@ -7,12 +7,12 @@ import { promisify } from "node:util";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
-import type { Registry } from "runway";
 
 import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
 import { deploy } from "../src/deploy.ts";
 import { createGitHubProvider } from "../src/github.ts";
+import type { Registry } from "../src/registry.ts";
 import { githubRepositoryRemote, resolveRepositorySource } from "../src/repository-source.ts";
 import type { RepositorySource } from "../src/repository-source.ts";
 import { GITHUB_COORDINATOR_CLASS, SANDBOX_CLASS } from "../src/sandbox-config.ts";

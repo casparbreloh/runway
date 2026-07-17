@@ -55,8 +55,8 @@ _Avoid_: Deploy helpers, account inventory
 - Cache payloads are private content-addressed SquashFS objects. Cache schema 2 and runner ABI
   `runway-sandbox-v2` include a bounded canonical private hardlink trailer so regular-file identity is
   preserved even though the pinned image exposes only high-level `squashfuse`.
-- The desired Stack uses the exact application/resource name `runway`, a digest-pinned linux/amd64
-  image, and `standard-4`. The live legacy `runway-monorepo`/`standard-1` stack is not the desired Stack.
+- The deployed Stack uses the exact application/resource name `runway`, a digest-pinned linux/amd64
+  image, and `standard-4`. The legacy `runway-monorepo` Stack is deleted.
 - Cloudflare Artifacts may become a Source implementation only after repeated exact-revision latency
   and total-cost evidence wins. It is not the Cache store.
 - Agents are deferred until the runner, cache, and deployment foundation is proven.

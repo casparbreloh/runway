@@ -26,13 +26,12 @@ For Runway, this implies:
 4. Investigate a digest-pinned OCI runner profile as the language-neutral environment primitive.
    Publish it only if a default/Python/Rust spike proves the compatible Sandbox control server,
    entrypoint, image identity, and safe rollout/versioning strategy.
-5. Replace the root repository’s custom public archive/chunk bootstrap only after the new
-   primitives are proven by Runway’s own CI.
+5. Keep the removed public archive/chunk bootstrap deleted; repository cache consumers must prove a
+   net latency and total-cost win before they are retained.
 6. Benchmark before claiming Runway is faster than GitHub. The desired foundation manifest now uses
    `standard-4` at 4 vCPU and 12 GiB, while GitHub gives this public repository 4 vCPU and 16 GiB.
-   The still-live legacy `runway-monorepo` stack remains on `standard-1` at 0.5 vCPU and 4 GiB;
-   it is not the final benchmark configuration. Caching can beat GitHub on warm paths, but it cannot
-   hide weak cold compute. [Cloudflare instance types](https://developers.cloudflare.com/containers/platform-details/limits/),
+   The deployed Stack uses `standard-4`; the legacy `standard-1` Stack is deleted. Caching can beat
+   GitHub on warm paths, but it cannot hide transfer and capture overhead. [Cloudflare instance types](https://developers.cloudflare.com/containers/platform-details/limits/),
    [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 
 ### Evidence status on 2026-07-17
@@ -42,21 +41,22 @@ surface, exact Source and continuity rules, one Terminal owner, generic safe cac
 Meter quantities, exact Stack ownership, cache schema 2, runner ABI `runway-sandbox-v2`, and a
 digest-pinned linux/amd64 `standard-4` desired manifest. This is local implementation evidence.
 
-At exact PR head `90a34ae`, the existing installed integration automatically ran Check
-`87800799473` successfully in 2m46s and Test `87800798140` successfully in 3m14s. Those two durations
-are **measured legacy-stack exact-head evidence**, not cold/warm cache samples and not a comparison
-with GitHub Actions.
+At exact PR head `4f8f66f`, the deployed `standard-4` integration automatically ran Check
+`87963050276` in 37 seconds provider-side and Test `87963048439` in 1m37s. Their Workflow step lists
+contain no cache operations. The legacy Stack and public bootstrap are deleted; the private shared
+workflow-artifact bucket and unknown shared objects remain preservation boundaries.
 
-No private-cache warm hit, repeatable live miss/corrupt/cancel set, 20-sample benchmark, cost win,
-fresh `runway` Stack cutover, or legacy/bootstrap deletion has been proven. The live legacy stack is
-still `runway-monorepo`/`standard-1`; the desired fresh stack is `runway`/`standard-4`. The private
-shared workflow-artifact bucket and unknown shared objects remain preservation boundaries.
+Live private R2 runs proved miss/publication and warm restore. The repository's whole-tree cache
+experiment lost decisively: Check took 2m23s cold and 3m28s warm, Test took 3m25s cold and 4m14s
+warm, and each warm run added about $0.013 of estimated cache work. The consumer declarations and
+their 17 exact cache objects/refs were removed. A 20-sample final benchmark remains open.
 
-| Evidence or gate                     | Performance                         | Cost                                               | Status                         |
-| ------------------------------------ | ----------------------------------- | -------------------------------------------------- | ------------------------------ |
-| Legacy exact-head Check/Test         | 2m46s / 3m14s for one PR head       | No complete per-run Meter cost captured            | Measured; not a benchmark      |
-| Desired `standard-4` cold comparison | P50 and P95 ≤1.10× GitHub four-core | ≤0.75× paid GitHub four-core list-price equivalent | Target; no samples yet         |
-| Desired `standard-4` warm comparison | P50 and P95 ≤0.60× GitHub four-core | ≤0.50× paid GitHub four-core list-price equivalent | Target; no live warm proof yet |
+| Evidence or gate              | Performance                         | Cost                                               | Status                    |
+| ----------------------------- | ----------------------------------- | -------------------------------------------------- | ------------------------- |
+| Clean `standard-4` Check/Test | 37s / 1m37s for one exact PR head   | No complete per-run total captured                 | Measured; not a benchmark |
+| Whole-tree cache Check/Test   | 3m28s / 4m14s warm                  | About $0.013 cache work per run                    | Measured loss; removed    |
+| Final cold comparison         | P50 and P95 ≤1.10× GitHub four-core | ≤0.75× paid GitHub four-core list-price equivalent | Target; samples pending   |
+| Final warm comparison         | P50 and P95 ≤0.60× GitHub four-core | ≤0.50× paid GitHub four-core list-price equivalent | Adapter-dependent target  |
 
 The targets require at least 20 cold and 20 warm samples on the same commit and commands, and total
 variable infrastructure quantities rather than container compute alone.

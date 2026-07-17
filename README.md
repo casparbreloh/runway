@@ -9,8 +9,8 @@ Repository execution and managed CI/CD come first. Cloudflare Sandbox, cache tra
 terminal coordination, metering, and resource reconciliation stay internal. Runway does not own a
 package-manager preset, dependency graph, build scheduler, or public Sandbox API. Agents are deferred.
 
-This project is in development, not production. The desired foundation is implemented locally, but
-the live legacy stack has not yet been replaced; see [Development Status](#development-status).
+This project is in development, not production. The foundation is deployed for its own repository CI;
+the multi-sample benchmark and publication remain gated. See [Development Status](#development-status).
 
 For the domain vocabulary see [`CONTEXT.md`](CONTEXT.md). For direction and non-goals see
 [`.docs/VISION.md`](.docs/VISION.md).
@@ -111,9 +111,9 @@ sibling staging tree before an atomic rename. Cache schema 2 and runner ABI
 identity with the pinned image's high-level `squashfuse`. This is private encoding, not a public
 snapshot or content-store API.
 
-The local foundation includes safe restore and success-only publication behavior. Repeatable live
-private-R2 miss, warm hit, corruption, cancellation, timing, and cost proof has not yet passed, so
-the legacy public bootstrap remains in place and no performance or cost win is claimed.
+The foundation includes safe restore and success-only publication behavior. Live private-R2 runs
+proved miss, publication, warm restore, and corrupt-input handling. Runway keeps cache use
+evidence-driven: its own repository removed whole-tree caches after they lost on both latency and cost.
 
 ## Triggers And Secrets
 
@@ -147,9 +147,9 @@ objects. Sync and removal re-inventory the provider and fail closed on drift. Un
 objects are preserved.
 
 The account artifact bucket is private and shared; Stack removal must preserve it and any object not
-claimed by exact ownership evidence. The desired developer app and Worker/Workflow resource name is
-exactly `runway`, not `runway-ci` or `runway-monorepo`. Its desired digest-pinned linux/amd64 Sandbox
-uses `standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
+claimed by exact ownership evidence. The developer app and Worker/Workflow resource name is exactly
+`runway`, not `runway-ci` or `runway-monorepo`. Its deployed digest-pinned linux/amd64 Sandbox uses
+`standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
 
 ```sh
 wrangler login
@@ -177,19 +177,18 @@ runway deploy
 ## Development Status
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows are
-ordinary Runway consumers. They explicitly own this repository's Node/pnpm setup and declare three
-generic trees: toolchain, package store, and installed dependencies. Those ecosystem details do not
-enter foundation source.
+ordinary Runway consumers. They explicitly own this repository's Node/pnpm setup through generic
+exec calls; those ecosystem details do not enter foundation source.
 
-At PR head `90a34ae` on 2026-07-17, the already-installed Runway integration automatically started
-Check `87800799473` and Test `87800798140`; they completed successfully in 2m46s and 3m14s. This is
-exact-head self-hosting evidence, not a cold/warm cache benchmark.
+At PR head `4f8f66f` on 2026-07-17, the deployed `runway` integration automatically started Check
+`87963050276` and Test `87963048439`. Check completed in 37 seconds provider-side (41 seconds on
+GitHub) and Test in 1m37s provider-side (1m40s on GitHub), with no cache operations. The earlier
+whole-tree cache experiment took 2m23s/3m25s cold and 3m28s/4m14s warm, plus about $0.013 of cache
+work per warm run, so it was removed rather than abstracted into the foundation.
 
-The live checks still run on the legacy `runway-monorepo` stack and its `standard-1` container. The
-fresh `runway` Stack with desired `standard-4` capacity has not been cut over, the legacy resources
-have not been deleted, and the public bootstrap bucket remains. The private shared artifact bucket
-is explicitly preserved. The final cutover requires private cache evidence, exact owned-run handling,
-fresh Stack verification, and repeated benchmark gates before cleanup.
+The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`. The legacy
+`runway-monorepo` Worker, Workflow, container, Durable Object namespaces, public bootstrap bucket,
+and migration receipt are deleted. The private shared artifact bucket and unclaimed objects remain.
 
 Runway's Check/Test cutover removed the duplicate GitHub Actions workflow only after an earlier live
 evidence gate. Do not restore a `.github/workflows` fallback without a new explicit migration and
@@ -202,10 +201,10 @@ run-bound Sandbox execution, one Terminal authority, generic cache identity/rest
 Meter quantities, immutable workflow artifacts, GitHub delivery and Checks coordination, and exact
 Stack ownership/reconciliation.
 
-Not yet proven complete: live private-cache behavior, benchmark wins, the fresh `runway` Stack
-cutover, legacy/bootstrap deletion, and final publication. Cloudflare Artifacts is a future
-evidence-gated Source implementation only; it is not the cache store. Tool-native protocols,
-BuildKit, run artifacts, deployment workflows, AI, and agents are later consumers.
+Still intentionally deferred: a statistically meaningful multi-sample benchmark, tool-native cache
+adapters, and final publication. Cloudflare Artifacts is a future evidence-gated Source implementation
+only; it is not the cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are
+later consumers.
 
 ## Testing
 

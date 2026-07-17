@@ -1,9 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, github, secretNameOf, webhook, workflow } from "runway";
+import { cron, github, webhook, workflow } from "runway";
 import type { CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
 import { makeRun } from "../src/run.ts";
+import { secretNameOf } from "../src/secrets.ts";
 
 const secretRef = <N extends string>(name: N): SecretRef<N> => {
   let ref: SecretRef<N> | undefined;

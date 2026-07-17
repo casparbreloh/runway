@@ -110,30 +110,29 @@ rollout, Durable Object namespaces, workers.dev, routes, schedules, bindings, se
 buckets, lifecycle, and exact owned objects. Apply and remove re-inventory provider state, fail closed
 on replacement drift, and preserve unknown or shared state.
 
-The developer app and desired Worker/Workflow resource name are exactly **Runway** / `runway`, not
-Runway CI or `runway-ci`. The desired fresh Stack uses a digest-pinned linux/amd64 Sandbox image,
+The developer app and Worker/Workflow resource name are exactly **Runway** / `runway`, not Runway CI
+or `runway-ci`. The deployed Stack uses a digest-pinned linux/amd64 Sandbox image,
 runner ABI `runway-sandbox-v2`, cache schema 2, and internal `standard-4` capacity. Capacity is not a
 public author option.
 
 ## Development Evidence And Boundary
 
-Nothing here is production. The repository is exercising the system as if it were production while
-the replacement remains deliberately gated.
+Nothing here is production. The repository exercises the system as if it were production while the
+multi-sample benchmark and publication remain gated.
 
-At PR head `90a34ae` on 2026-07-17, the installed Runway integration automatically admitted exact-
-head Check `87800799473` and Test `87800798140`. Check completed successfully in 2m46s; Test completed
-successfully in 3m14s. This establishes exact-head GitHub self-hosting on the existing live stack.
-It is not a cache warm-path measurement, cost proof, or final benchmark.
+At PR head `4f8f66f` on 2026-07-17, the deployed `runway` integration automatically admitted exact-
+head Check `87963050276` and Test `87963048439`. Check completed in 37 seconds provider-side and Test
+in 1m37s, with no cache operations. This is exact-head self-hosting evidence, not the required
+20-sample benchmark.
 
-The live stack is still the legacy `runway-monorepo` Worker/Workflow and `standard-1` container. The
-desired fresh `runway`/`standard-4` Stack exists in code but has not been cut over. No legacy Worker,
-Workflow, container, or namespace has been deleted by this milestone work. A private immutable
-deletion-only receipt records the exact legacy allowlist; it grants no sync or admission authority.
+The live Stack is exactly `runway` on the digest-pinned linux/amd64 `standard-4` container. The legacy
+Worker, Workflow, container, namespaces, public bootstrap bucket, and migration receipt are deleted.
+The private shared workflow-artifact bucket and unclaimed objects survived the cutover.
 
-The account workflow-artifact bucket is private and shared and must survive cutover. Runway's own
-workflows now express their Node/pnpm setup only in root consumer code through three generic caches,
-but the old verified public bootstrap files, objects, and access remain until repeatable private-R2
-miss/publish/warm/corrupt/cancel evidence succeeds. No live cache hit or benchmark win is claimed.
+Private R2 miss, publication, warm restore, and corrupt-input behavior passed live. Runway's own
+whole-tree Node/pnpm caches were then removed because they regressed both latency and estimated cost.
+Future ecosystem adapters must prove a net win rather than adding package-manager semantics to the
+foundation.
 
 The repository's duplicate GitHub Actions workflow was removed only after an earlier evidence gate.
 A `.github/workflows` fallback must not be restored without a new explicit migration and live gate.

@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
-import type { Registry } from "runway";
 
 import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
 import { deploy } from "../src/deploy.ts";
+import type { Registry } from "../src/registry.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";

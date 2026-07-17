@@ -41,9 +41,7 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
   - `src/validate.ts` — registry validation.
   - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
 - `.runway/workflows/` — Runway's own GitHub-triggered `Check` and `Test` workflows.
-- `.runway/repository.ts` — repository-only Node/pnpm consumer built from generic cache and exec calls.
-- `.runway/ci.ts` and `.runway/cache/Dockerfile` — legacy verified public bootstrap retained only
-  until repeatable live private-cache evidence closes its deletion gate.
+- `.runway/repository.ts` — repository-only Node/pnpm consumer built from generic exec calls.
 
 ## Commands
 
@@ -134,24 +132,21 @@ export default workflow({
 - Cache schema 2 and runner ABI `runway-sandbox-v2` use private content-addressed SquashFS objects
   with a bounded canonical hardlink trailer. Restore is staged and integrity-checked; only the
   durable winning success may publish. Cache is not Source, a checkpoint, or a public content store.
-- The desired fresh Stack is named exactly `runway` and uses a digest-pinned linux/amd64 image on
-  `standard-4`. The live legacy `runway-monorepo` stack still serves development checks on
-  `standard-1`; do not describe the desired configuration as deployed until the hard cutover and
-  inventory verification succeed.
-- Runway's root workflows are ordinary generic-cache consumers. The old public bootstrap files and
-  bucket remain only because live private-R2 miss/hit/corrupt/cancel evidence has not passed. Preserve
-  the private shared artifact bucket and every object not claimed by exact ownership evidence.
+- The deployed Stack is named exactly `runway` and uses the digest-pinned linux/amd64 image on
+  `standard-4`. The legacy `runway-monorepo` Stack and public bootstrap bucket are deleted.
+- Runway's root workflows intentionally use plain generic exec calls. Live evidence showed that
+  transporting their whole toolchain, pnpm store, and `node_modules` trees costs more and runs slower
+  than a clean install. The generic cache foundation remains available for consumers that prove a win.
 - Cloudflare Artifacts is a possible future `Source` implementation only after repeated exact-revision
   latency and total-cost evidence wins. It is not the cache store.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
   returns webhook URLs, including one shared `/.runway/github` ingress when configured.
 - Keep Sandbox and container deployment resources internal to the managed command implementation.
-- Runway's own `Check` and `Test` workflows are the repository CI. At exact PR head `90a34ae`, Check
-  `87800799473` and Test `87800798140` completed successfully in 2m46s and 3m14s. This proves exact-
-  head admission on the legacy live stack, not live cache warmth, benchmark wins, or final cutover.
-  The earlier evidence-gated cutover deleted the duplicate GitHub Actions workflow; do not restore a
-  `.github/workflows` fallback without a new explicit migration and evidence gate.
+- Runway's own `Check` and `Test` workflows are the repository CI. At exact PR head `4f8f66f`, Check
+  `87963050276` completed in 37 seconds provider-side and Test `87963048439` in 1m37s, with no cache
+  operations. The duplicate GitHub Actions workflow is deleted; do not restore a fallback without a
+  new explicit migration and evidence gate.
 
 ## Conventions
 
