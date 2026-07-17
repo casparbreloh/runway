@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
-import type { Registry } from "runway";
 
+import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
-import { artifactBucketName, ensureArtifactBucket } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
+import type { Registry } from "../src/registry.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
@@ -52,7 +52,7 @@ const smokeDefinition = workflow({
       secret: ctx.secrets.HOOK_SECRET,
       signatureHeader: "x-smoke-signature",
     }),
-}).handler(async () => {});
+}).run(async () => {});
 
 const registry = (cwd: string): Registry => [
   {
@@ -85,19 +85,19 @@ export default workflow({
     secret: ctx.secrets.HOOK_SECRET,
     signatureHeader: "x-smoke-signature",
   }),
-}).handler(async (ctx, event) => {
-  await ctx.step.do("version-before", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)}, scriptName: ${JSON.stringify(scriptName)} }));
-  if (event.sleepMs > 0) await ctx.step.sleep("hold-v1", event.sleepMs);
-  await ctx.step.do("version-after", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)} }));
-  const actualSecretHash = await hash(ctx.secrets.SMOKE_SECRET);
-  await ctx.step.do("secret-state", () => ({
+}).run(async (run, event) => {
+  await run.do("version-before", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)}, scriptName: ${JSON.stringify(scriptName)} }));
+  if (event.sleepMs > 0) await run.sleep("hold-v1", event.sleepMs);
+  await run.do("version-after", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)} }));
+  const actualSecretHash = await hash(run.secrets.SMOKE_SECRET);
+  await run.do("secret-state", () => ({
     matchesExpected: actualSecretHash === event.expectedSecretHash,
     matchesRejected: actualSecretHash === event.rejectedSecretHash,
   }));
   if (event.printSecret) {
-    await ctx.step.exec("secret-output", {
+    await run.exec("secret-output", {
       command: ${JSON.stringify(`printf '%s\\n' "$RUNWAY_SMOKE_SECRET"`)},
-      env: { RUNWAY_SMOKE_SECRET: ctx.secrets.SMOKE_SECRET },
+      env: { RUNWAY_SMOKE_SECRET: run.secrets.SMOKE_SECRET },
     });
   }
 });
@@ -139,6 +139,16 @@ const bucketExists = async (
     if (isStatus(error, 404)) return false;
     throw error;
   }
+};
+
+const ensureArtifactBucket = async (
+  cf: Cloudflare,
+  accountId: string,
+  bucketName: string,
+): Promise<boolean> => {
+  if (await bucketExists(cf, accountId, bucketName)) return false;
+  await cf.r2.buckets.create({ account_id: accountId, name: bucketName });
+  return true;
 };
 
 const objectKeys = async (
@@ -357,7 +367,7 @@ const run = async (): Promise<void> => {
   const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-artifact-smoke-${suffix}`;
   const containerName = `${scriptName}-Sandbox`;
   const token = await tokenOf();
-  const cf = new Cloudflare({ apiToken: token });
+  const cf = new Cloudflare({ apiToken: token, timeout: 15_000 });
   const accountId = await oneAccountId(cf);
   const bucketName = artifactBucketName(accountId);
   const collisions = [
@@ -414,6 +424,7 @@ const run = async (): Promise<void> => {
     console.log(JSON.stringify({ phase: "start", accountId, scriptName, bucketName }));
     await writeFile(workflowPath, workflowSource("v1", scriptName));
     const preparedV1 = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,
@@ -481,6 +492,7 @@ const run = async (): Promise<void> => {
 
     await writeFile(workflowPath, workflowSource("v2", scriptName));
     const preparedV2 = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,
@@ -579,15 +591,17 @@ const run = async (): Promise<void> => {
         throw new Error("A raw secret appeared in managed command step output");
       }
       const exec = JSON.parse(execOutput) as {
-        stdout?: unknown;
-        stderr?: unknown;
-        exitCode?: unknown;
+        result?: {
+          stdout?: unknown;
+          stderr?: unknown;
+          exitCode?: unknown;
+        };
       };
       if (
-        typeof exec.stdout !== "string" ||
-        exec.stdout.trimEnd() !== "***" ||
-        exec.stderr !== "" ||
-        exec.exitCode !== 0
+        typeof exec.result?.stdout !== "string" ||
+        exec.result.stdout.trimEnd() !== "***" ||
+        exec.result.stderr !== "" ||
+        exec.result.exitCode !== 0
       ) {
         throw new Error(`Unexpected redacted command output: ${JSON.stringify(exec)}`);
       }

@@ -1,4 +1,6 @@
-import type { ExecResult } from "./types.ts";
+import type { ExecResult } from "./run.ts";
+
+const trusted = new WeakSet<ExecError>();
 
 export class ExecError extends Error {
   override readonly name = "ExecError";
@@ -13,3 +15,12 @@ export class ExecError extends Error {
     this.result = result;
   }
 }
+
+export const trustedExecError = (id: string, command: string, result: ExecResult): ExecError => {
+  const error = new ExecError(id, command, result);
+  trusted.add(error);
+  return error;
+};
+
+export const isTrustedExecError = (error: unknown): error is ExecError =>
+  error instanceof ExecError && trusted.has(error);

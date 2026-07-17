@@ -1,17 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { builtinModules } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
 
 import { generateDynamicWorker, generateHost } from "./codegen.ts";
+import type { ProgressEvent } from "./deploy.ts";
+import type { GitHubRepository } from "./github.ts";
+import type { RegisteredWorkflow, Registry } from "./registry.ts";
 import type { RepositorySource } from "./repository-source.ts";
-import type { GitHubRepository, ProgressEvent, RegisteredWorkflow, Registry } from "./types.ts";
 import { SECRET_SNAPSHOT_KEY_BINDING, secretSnapshotBackupBinding } from "./worker-contract.ts";
 import { encodeWorkflowArtifact } from "./workflow-artifact.ts";
 
 interface BuildContext {
+  readonly accountId: string;
   readonly cwd: string;
   readonly scriptName: string;
   readonly repository: RepositorySource;
@@ -32,13 +36,10 @@ const runtimeDependencyResolver: Plugin = {
   name: "runway-runtime-dependencies",
   setup(build) {
     build.onResolve({ filter: /^@cloudflare\/dynamic-workflows$/ }, () => ({
-      path: path.resolve(
-        import.meta.dirname,
-        "../node_modules/@cloudflare/dynamic-workflows/dist/index.js",
-      ),
+      path: fileURLToPath(import.meta.resolve("@cloudflare/dynamic-workflows")),
     }));
     build.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
-      path: path.resolve(import.meta.dirname, "../node_modules/@cloudflare/sandbox/dist/index.js"),
+      path: fileURLToPath(import.meta.resolve("@cloudflare/sandbox")),
     }));
     build.onResolve({ filter: /^runway:host-runtime$/ }, () => ({
       path: path.resolve(import.meta.dirname, "host-runtime.ts"),
@@ -126,6 +127,7 @@ export const buildDeployment = async (
   );
   const entry = path.join(opts.cwd, "worker.gen.ts");
   const host = generateHost(registry, {
+    accountId: opts.accountId,
     scriptName: opts.scriptName,
     workflowArtifacts,
     deploymentId,

@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
-import type { Registry } from "runway";
 
+import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
-import { artifactBucketName } from "../src/deploy-storage.ts";
 import { deploy } from "../src/deploy.ts";
+import type { Registry } from "../src/registry.ts";
 import { resolveRepositorySource } from "../src/repository-source.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
@@ -64,7 +64,7 @@ const smokeDefinition = workflow({
       secret: ctx.secrets.HOOK_SECRET,
       signatureHeader: SIGNATURE_HEADER,
     }),
-}).handler(async () => {});
+}).run(async () => {});
 
 const registry = (cwd: string): Registry => [
   {
@@ -102,32 +102,34 @@ export default workflow({
     secret: ctx.secrets.HOOK_SECRET,
     signatureHeader: ${JSON.stringify(SIGNATURE_HEADER)},
   }),
-}).handler(async (ctx, event) => {
-  const coldStartedAtMs = await ctx.step.do("cold-started", () => Date.now());
-  const cold = observe((await ctx.step.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("cold-report", () => ({ coldStartedAtMs, cold }));
-  await ctx.step.do("force-destroy", async () => {
+}).run(async (run, event) => {
+  const coldStartedAtMs = await run.do("cold-started", () => Date.now());
+  const cold = observe((await run.exec("cold", ${JSON.stringify(measurementCommand())})).stdout);
+  await run.do("cold-report", () => ({ coldStartedAtMs, cold }));
+  await run.do("force-destroy", async () => {
     const response = await fetch(event.destroyUrl, {
       method: "POST",
       headers: {
-        authorization: \`Bearer \${ctx.secrets.DRIVER_TOKEN}\`,
+        authorization: \`Bearer \${run.secrets.DRIVER_TOKEN}\`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ runId: ctx.runId }),
+      body: JSON.stringify({ runId: run.runId }),
     });
     if (!response.ok) throw new Error(\`destroy driver returned \${response.status}\`);
     return await response.json();
   });
-  const recoveryStartedAtMs = await ctx.step.do("recovery-started", () => Date.now());
-  const recovered = observe((await ctx.step.exec("recovered", ${JSON.stringify(measurementCommand())})).stdout);
-  const reusedStartedAtMs = await ctx.step.do("reused-started", () => Date.now());
-  const reused = observe((await ctx.step.exec("reused", ${JSON.stringify(measurementCommand())})).stdout);
-  await ctx.step.do("recovery-report", () => ({
-    recoveryStartedAtMs,
-    reusedStartedAtMs,
-    recovered,
-    reused,
-  }));
+  const recoveryStartedAtMs = await run.do("recovery-started", () => Date.now());
+  let loss;
+  try {
+    await run.exec("recovered", ${JSON.stringify(measurementCommand())});
+    throw new Error("destroyed placement unexpectedly replayed a user command");
+  } catch (error) {
+    loss = {
+      name: error instanceof Error ? error.name : "unknown",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  await run.do("loss-report", () => ({ recoveryStartedAtMs, loss }));
 });
 `;
 
@@ -136,7 +138,7 @@ const hex = (bytes) => [...new Uint8Array(bytes)]
   .map((byte) => byte.toString(16).padStart(2, "0"))
   .join("");
 
-const runnerId = async (runId) => {
+const sandboxId = async (runId) => {
   const bytes = new TextEncoder().encode(runId);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return \`runway-\${hex(digest).slice(0, 32)}\`;
@@ -152,7 +154,7 @@ export default {
     if (!body || typeof body.runId !== "string") {
       return new Response("invalid run id", { status: 400 });
     }
-    const id = env.RUNWAY_SANDBOX.idFromName(await runnerId(body.runId));
+    const id = env.RUNWAY_SANDBOX.idFromName(await sandboxId(body.runId));
     await env.RUNWAY_SANDBOX.get(id).destroy();
     return Response.json({ destroyed: true });
   },
@@ -419,6 +421,7 @@ const run = async (): Promise<void> => {
     await writeFile(workflowPath, workflowSource());
     const repository = await resolveRepositorySource(project);
     const prepared = await buildDeployment(registry(project), {
+      accountId,
       cwd: project,
       scriptName,
       repository,
@@ -458,41 +461,31 @@ const run = async (): Promise<void> => {
       coldStartedAtMs?: unknown;
       cold?: unknown;
     };
-    const recoveryReport = JSON.parse(stepOutput(completed, "recovery-report")) as {
+    const lossReport = JSON.parse(stepOutput(completed, "loss-report")) as {
       recoveryStartedAtMs?: unknown;
-      reusedStartedAtMs?: unknown;
-      recovered?: unknown;
-      reused?: unknown;
+      loss?: { name?: unknown; message?: unknown };
     };
     if (
       typeof coldReport.coldStartedAtMs !== "number" ||
-      typeof recoveryReport.recoveryStartedAtMs !== "number" ||
-      typeof recoveryReport.reusedStartedAtMs !== "number"
+      typeof lossReport.recoveryStartedAtMs !== "number" ||
+      lossReport.loss?.name !== "RunLostError" ||
+      typeof lossReport.loss.message !== "string" ||
+      !lossReport.loss.message.includes("continuity was lost")
     ) {
-      throw new Error("Smoke report omitted phase timestamps");
+      throw new Error(`Smoke did not report honest placement loss: ${JSON.stringify(lossReport)}`);
     }
     const cold = observationOf(coldReport.cold);
-    const recovered = observationOf(recoveryReport.recovered);
-    const reused = observationOf(recoveryReport.reused);
-    for (const observation of [cold, recovered, reused]) {
-      if (observation.head !== observation.metrics.commit) {
-        throw new Error("A command observed a checkout other than the pinned commit");
-      }
-      if (
-        observation.metrics.prepareStartedAtMs > observation.metrics.sandboxReadyAtMs ||
-        observation.metrics.sandboxReadyAtMs > observation.metrics.startedAtMs ||
-        observation.metrics.startedAtMs > observation.observedAtMs
-      ) {
-        throw new Error("Checkout timing boundaries were not monotonic");
-      }
-      if (observation.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
+    if (cold.head !== cold.metrics.commit) {
+      throw new Error("The cold command observed a checkout other than the pinned commit");
     }
-    if (cold.metrics.startedAtMs === recovered.metrics.startedAtMs) {
-      throw new Error("Recovery reused checkout metrics from the destroyed Sandbox");
+    if (
+      cold.metrics.prepareStartedAtMs > cold.metrics.sandboxReadyAtMs ||
+      cold.metrics.sandboxReadyAtMs > cold.metrics.startedAtMs ||
+      cold.metrics.startedAtMs > cold.observedAtMs
+    ) {
+      throw new Error("Checkout timing boundaries were not monotonic");
     }
-    if (JSON.stringify(recovered.metrics) !== JSON.stringify(reused.metrics)) {
-      throw new Error("A reused Sandbox performed more than one recovery checkout");
-    }
+    if (cold.metrics.packBytes <= 0) throw new Error("Checkout reported no pack bytes");
     report = {
       outcome: "passed",
       accountId,
@@ -501,7 +494,7 @@ const run = async (): Promise<void> => {
       runId,
       commit: cold.head,
       cold: {
-        workflowToRunnerMs: cold.metrics.prepareStartedAtMs - coldReport.coldStartedAtMs,
+        workflowToSandboxMs: cold.metrics.prepareStartedAtMs - coldReport.coldStartedAtMs,
         sandboxReadyMs: cold.metrics.sandboxReadyAtMs - cold.metrics.prepareStartedAtMs,
         checkoutProcessStartMs: cold.metrics.startedAtMs - cold.metrics.sandboxReadyAtMs,
         checkoutMs: cold.metrics.checkoutMs,
@@ -510,18 +503,8 @@ const run = async (): Promise<void> => {
         commandReadyMs: cold.observedAtMs - cold.metrics.prepareStartedAtMs,
       },
       recovery: {
-        workflowToRunnerMs:
-          recovered.metrics.prepareStartedAtMs - recoveryReport.recoveryStartedAtMs,
-        sandboxReadyMs: recovered.metrics.sandboxReadyAtMs - recovered.metrics.prepareStartedAtMs,
-        checkoutProcessStartMs: recovered.metrics.startedAtMs - recovered.metrics.sandboxReadyAtMs,
-        checkoutMs: recovered.metrics.checkoutMs,
-        fetchMs: recovered.metrics.fetchMs,
-        packBytes: recovered.metrics.packBytes,
-        commandReadyMs: recovered.observedAtMs - recovered.metrics.prepareStartedAtMs,
-        overheadMs:
-          recovered.observedAtMs -
-          recoveryReport.recoveryStartedAtMs -
-          (reused.observedAtMs - recoveryReport.reusedStartedAtMs),
+        state: "lost",
+        detectedMs: Date.now() - lossReport.recoveryStartedAtMs,
       },
       totalMs: Date.now() - startedAt,
     };

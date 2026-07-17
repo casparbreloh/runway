@@ -6,5 +6,5 @@
     "tsBuildInfoFile": "../.tsbuild/runway-workflows.tsbuildinfo"
   },
   "references": [{ "path": "../packages/runway" }],
-  "include": ["ci.ts", "workflows"]
+  "include": ["ci.ts", "repository.test.ts", "repository.ts", "workflows"]
 }

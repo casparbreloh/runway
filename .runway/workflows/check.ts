@@ -1,6 +1,6 @@
 import { github, workflow } from "runway";
 
-import { installCiDependencies, setupCiToolchain } from "../ci.ts";
+import { prepareRepository, repositoryCommand } from "../repository.ts";
 
 export default workflow({
   id: "check",
@@ -12,13 +12,10 @@ export default workflow({
         { type: "pull_request", actions: ["opened", "reopened", "synchronize"] },
       ],
     }),
-}).handler(async (ctx) => {
-  await ctx.step.exec("setup-node", { command: setupCiToolchain, timeoutMs: 15 * 60_000 });
-  await ctx.step.exec("setup-pnpm", "pnpm --version");
-  await ctx.step.exec("toolchain", "node --version && pnpm --version");
-  await ctx.step.exec("install", installCiDependencies);
-  await ctx.step.exec("format-check", "pnpm format-check");
-  await ctx.step.exec("lint", "pnpm lint");
-  await ctx.step.exec("typecheck", "pnpm typecheck");
-  await ctx.step.exec("fallow", "pnpm fallow");
+}).run(async (run) => {
+  await prepareRepository(run);
+  await run.exec("format-check", repositoryCommand("pnpm format-check"));
+  await run.exec("lint", repositoryCommand("pnpm lint"));
+  await run.exec("typecheck", repositoryCommand("pnpm typecheck"));
+  await run.exec("fallow", repositoryCommand("pnpm fallow"));
 });

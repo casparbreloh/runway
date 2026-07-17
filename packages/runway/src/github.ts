@@ -1,9 +1,64 @@
-import type {
-  GitHubEventFilter,
-  GitHubPullRequestEvent,
-  GitHubPushEvent,
-  GitHubRepository,
-} from "./types.ts";
+import type { Trigger } from "./trigger.ts";
+
+export interface GitHubRepository {
+  readonly id: number;
+  readonly name: string;
+  readonly fullName: string;
+}
+
+export interface GitHubPushEvent {
+  readonly type: "push";
+  readonly repository: GitHubRepository;
+  readonly ref: string;
+  readonly sha: string;
+}
+
+export type GitHubPullRequestAction = "opened" | "reopened" | "synchronize";
+
+export interface GitHubPullRequestEvent<
+  A extends GitHubPullRequestAction = GitHubPullRequestAction,
+> {
+  readonly type: "pull_request";
+  readonly action: A;
+  readonly repository: GitHubRepository;
+  readonly number: number;
+  readonly ref: string;
+  readonly sha: string;
+}
+
+export interface GitHubPushFilter {
+  readonly type: "push";
+  readonly branches: readonly [string, ...string[]];
+}
+
+export interface GitHubPullRequestFilter<
+  A extends readonly [GitHubPullRequestAction, ...GitHubPullRequestAction[]] = readonly [
+    GitHubPullRequestAction,
+    ...GitHubPullRequestAction[],
+  ],
+> {
+  readonly type: "pull_request";
+  readonly actions: A;
+}
+
+export type GitHubEventFilter = GitHubPushFilter | GitHubPullRequestFilter;
+
+export type GitHubEventOf<F extends GitHubEventFilter> = F extends GitHubPushFilter
+  ? GitHubPushEvent
+  : F extends GitHubPullRequestFilter<infer A>
+    ? GitHubPullRequestEvent<A[number]>
+    : never;
+
+export interface GitHubOptions<F extends readonly [GitHubEventFilter, ...GitHubEventFilter[]]> {
+  readonly checkName: string;
+  readonly events: F;
+}
+
+export interface GitHubTrigger<E> extends Trigger<E> {
+  readonly type: "github";
+  readonly checkName: string;
+  readonly events: readonly GitHubEventFilter[];
+}
 
 export interface GitHubDeliveryConfig {
   readonly repository: GitHubRepository;
@@ -20,6 +75,7 @@ export interface GitHubAcceptedDelivery {
   readonly installationId: number;
   readonly checkRepository: GitHubRepository;
   readonly checkoutRepository: GitHubRepository;
+  readonly defaultRef: string;
   readonly event: GitHubPushEvent | GitHubPullRequestEvent;
   readonly concurrency:
     | { readonly type: "push"; readonly repositoryId: number; readonly ref: string }
@@ -139,6 +195,17 @@ const parseRepository = (value: unknown, label: string): GitHubRepository => {
   return { id, name, fullName };
 };
 
+const parseDefaultRef = (value: unknown, label: string): string => {
+  if (
+    !isRecord(value) ||
+    typeof value.default_branch !== "string" ||
+    !REF_PART.test(value.default_branch)
+  ) {
+    throw new Error(`invalid GitHub ${label} payload`);
+  }
+  return `refs/heads/${value.default_branch}`;
+};
+
 const sameRepository = (left: GitHubRepository, right: GitHubRepository): boolean =>
   left.id === right.id && left.fullName === right.fullName;
 
@@ -206,6 +273,7 @@ export const normalizeGitHubDelivery = async (
       installationId,
       checkRepository: config.repository,
       checkoutRepository: config.repository,
+      defaultRef: parseDefaultRef(payload.repository, "push"),
       event: {
         type: "push",
         repository: config.repository,
@@ -263,6 +331,7 @@ export const normalizeGitHubDelivery = async (
       installationId,
       checkRepository: config.repository,
       checkoutRepository: headRepository,
+      defaultRef: parseDefaultRef(payload.repository, "pull request"),
       event: {
         type: "pull_request",
         action,
@@ -355,6 +424,11 @@ export interface GitHubCheckRun {
   readonly conclusion: GitHubCheckConclusion | null;
 }
 
+export interface GitHubCheckOutput {
+  readonly title: string;
+  readonly summary: string;
+}
+
 interface GitHubCheckIdentity {
   readonly token: string;
   readonly repository: GitHubRepository;
@@ -391,6 +465,7 @@ export interface GitHubProvider {
     options: GitHubCheckIdentity & {
       readonly checkRunId: number;
       readonly conclusion: "success" | "failure" | "cancelled";
+      readonly output?: GitHubCheckOutput;
     },
   ): Promise<GitHubCheckRun>;
 }
@@ -882,20 +957,42 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       return check;
     },
 
-    async completeCheck({ token, repository, checkRunId, conclusion }) {
+    async completeCheck({ token, repository, checkRunId, conclusion, output }) {
       const { path, headers } = checkArguments(token, repository);
       if (!positiveInteger(checkRunId)) throw new Error("invalid GitHub Check request");
-      const check = parseCheckRun(
-        await checkRequest(`https://api.github.com/repos/${path}/check-runs/${checkRunId}`, {
+      if (
+        (output !== undefined &&
+          (!isRecord(output) ||
+            conclusion !== "failure" ||
+            Object.keys(output).sort().join(",") !== "summary,title" ||
+            typeof output.title !== "string" ||
+            new TextEncoder().encode(output.title).byteLength < 1 ||
+            new TextEncoder().encode(output.title).byteLength > 255 ||
+            typeof output.summary !== "string" ||
+            new TextEncoder().encode(output.summary).byteLength < 1 ||
+            new TextEncoder().encode(output.summary).byteLength > 65_535)) ||
+        (conclusion !== "failure" && output !== undefined)
+      ) {
+        throw new Error("invalid GitHub Check request");
+      }
+      const response = await checkRequest(
+        `https://api.github.com/repos/${path}/check-runs/${checkRunId}`,
+        {
           method: "PATCH",
           headers,
-          body: JSON.stringify({ status: "completed", conclusion }),
-        }),
+          body: JSON.stringify({ status: "completed", conclusion, ...(output ? { output } : {}) }),
+        },
       );
+      const check = parseCheckRun(response);
+      const responseOutput = isRecord(response) ? response.output : undefined;
       if (
         check.id !== checkRunId ||
         check.status !== "completed" ||
-        check.conclusion !== conclusion
+        check.conclusion !== conclusion ||
+        (output !== undefined &&
+          (!isRecord(responseOutput) ||
+            responseOutput.title !== output.title ||
+            responseOutput.summary !== output.summary))
       ) {
         throw new Error("invalid GitHub Check response");
       }

@@ -1,241 +1,185 @@
 # Runway Vision
 
-Runway is a general, TypeScript-first workflow framework on Cloudflare. It provides typed workflow
-definitions, triggers, secrets, routing, discovery, validation, deployment, durable steps, durable
-sleep, and managed repository execution without imposing a CI-specific DSL.
+Runway is a general workflow and repository-runner foundation on Cloudflare. TypeScript is the
+authoring language; repository commands and cached filesystem trees are language-neutral. The goal
+is a smaller CI primitive that can become faster and more cost-sensitive than hosted runners through
+exact execution semantics, generic persistent state, direct transfer, and measured infrastructure
+rather than ecosystem-specific magic.
 
-Repository execution and managed CI/CD come first. Cloudflare Workflows owns replay, persistence,
-and durable waiting. Cloudflare Sandbox stays internally behind `step.exec()` and is not part of the
-public workflow context. Runway transports source, caches, logs, and artifacts; tools such as
-Turborepo and Nx continue to own dependency graphs, scheduling, and cache keys.
+Repository execution and managed CI/CD come first. Cloudflare Sandbox stays internal. Runway
+transports exact Source and generic Cache state; tools such as Turborepo, Nx, sccache, and Bazel keep
+their own dependency graphs, hashes, and protocols. Package-manager and language-runtime helpers may
+be built later as separate consumers.
 
-Agents remain deferred until repository execution, caching, and deployments are reliable. A future
-`step.ai()` may provide durable model calls through Cloudflare AI Gateway, but AI is not part of the
-current foundation.
+Agents remain deferred until repository execution, caching, measurement, and Stack ownership are
+reliable. A future model primitive may use Cloudflare AI Gateway, but AI is not part of this
+foundation.
 
-## Current Foundation
+## Author Model
 
 ```ts
-workflow({ id, secrets?, trigger }).handler(async (ctx, event) => {
-  const value = await ctx.step.do("work", async (step) => ({ id: step.id }));
-  await ctx.step.exec("test", "pnpm test");
-  await ctx.step.sleep("wait", 1000);
+workflow({ id, secrets?, trigger }).run(async (run) => {
+  await run.cache("compiler-state", {
+    key: { files: ["compiler.lock"] },
+    path: "/cache/compiler-state",
+  });
+  await run.do("metadata", () => ({ ready: true }));
+  await run.exec("check", "./scripts/check");
+  await run.sleep("settle", 1000);
 });
 ```
 
-The public context is `{ runId, secrets, env, step: { do, exec, sleep } }`. Every durable operation
-has a stable caller-provided id. `step.exec()` has simple defaults and optional `cwd`, `env`, and
-`timeoutMs`; Sandbox and container configuration remain internal.
+The public Run contains only `runId`, declared secrets, and flat `do`, `exec`, `cache`, and `sleep`
+methods. Sandbox placement, Source credentials, cache refs and transfer capabilities, terminal
+claims, Meter samples, provider steps, and Stack receipts remain internal.
 
-Each repository owns one orchestration Worker, one matching Dynamic Workflow resource, one Worker
-Loader binding, one hidden Sandbox container application, and one narrow Durable Object coordinator.
-The coordinator remains idle unless the repository defines GitHub triggers; then it owns delivery
-deduplication, dispatch progress, Check state, and scoped supersession. Per-workflow modules are loaded dynamically, so Cloudflare
-dashboards are not filled with one static Workflow resource per authored workflow. There is no
-account-level execution Worker.
+The public cache declaration names one tree, one caller-defined string or exact-source file key, and
+optional byte/time/estimated-cost budgets. It is not a package-manager cache DSL, dependency graph,
+content-store API, or checkpoint primitive.
 
-Deployments persist each workflow as one immutable, content-addressed artifact containing its
-identity, declared secret names, and bundled source. Dynamic Workflow metadata pins each run to an
-artifact version. The typed host runtime verifies the artifact hash before loading it, and durable
-encrypted secret snapshots preserve the run's original declared secrets across redeploys and secret
-rotation. `runway deploy` waits for 31 consecutive cache-busted deployment identity observations
-over 30 seconds before reporting success.
+## Foundation Boundaries
 
-The managed runner currently provides:
+### Run And Sandbox
 
-- One lazy, isolated Sandbox workspace per workflow run.
-- Exact public or GitHub App-authenticated repository checkout in `/workspace` before the first
-  command and transparent reconstruction after Sandbox replacement.
-- Purpose-scoped, repository-scoped GitHub installation credentials that exist only in the checkout
-  process environment and are reminted after replacement.
-- Deterministic process ids and reconnection when a command step retries on the same container.
-- Bounded stdout and stderr tails with declared-secret redaction.
-- Typed non-zero failures, process-tree timeout cleanup, and active termination monitoring.
-- Best-effort workspace reuse across commands and durable sleep while the Sandbox placement
-  survives.
-- `standard-1` container capacity, with deploy-time reconciliation that explicitly creates and
-  verifies the rollout needed to activate changed container definitions.
+Run is the author capability. Sandbox is the deep run-bound module that owns one exact Source,
+mutable placement, processes, cache lifecycle, and cleanup. `do` and `sleep` allocate no Sandbox.
+Source/cache/command work starts it lazily.
 
-## Live Recovery Evidence
+Each command has canonical intent and a deterministic process identity. A durable retry reconnects
+only when the same placement, process, and command digest are proven. If a placement is lost after a
+command started or may have started, the run fails instead of replaying a potentially mutating
+command. Cache restoration never authorizes replay.
 
-On 2026-07-14, an isolated `runway-phase1-smoke` deployment tested the current runner on Cloudflare:
+### Source
 
-- A marker written to `/workspace` survived a three-minute durable sleep and an inactive container
-  cycle. Scale-to-zero alone did not replace that Sandbox placement.
-- Calling the runner's supported `Sandbox.destroy()` boundary between commands created a fresh
-  container. The next command ran successfully, but the marker was gone. Filesystem continuity is
-  therefore not a recovery contract.
-- After the same forced replacement, a filtered shallow clone of the public Runway repository
-  reconstructed exact commit `da322101847b4da536a52646b98862ee1e1b0b45` in 1,334 ms. The complete
-  write, destroy, clone, and verification workflow finished in six seconds.
-- One workflow triggered immediately after a successful redeploy executed the previous workflow
-  body. A later trigger used the new body. This established the deploy-readiness problem addressed
-  by the immutable artifact and readiness work below.
+Source is a credential-free repository URL plus stable repository identity and exact immutable Git
+revision. Checkout mints credentials only for its own process, verifies `HEAD`, and removes its
+credential helper before authored commands. The returned evidence contains no credential or remote
+with embedded authentication.
 
-The temporary Worker, Dynamic Workflow, and container application were deleted after the test.
+Before any command may have started, a replacement Sandbox can reconstruct the same exact Source.
+After that boundary, continuity must be proven rather than inferred from files.
 
-On 2026-07-15, the repeatable repository-recovery smoke repeatedly deployed the production runner
-and forced its supported `Sandbox.destroy()` boundary through a temporary, token-protected
-cross-script binding. The final instrumented run reconstructed exact commit
-`3ecbf2fedf9ab7d15fd531a1cad6f92b15c86aae`, and a third command reused that reconstruction without
-another checkout. Cold Sandbox readiness took 4,937 ms, checkout-process startup 194 ms, checkout
-1,296 ms, and total command readiness 6,682 ms. Recovery Sandbox readiness took 1,639 ms,
-checkout-process startup 293 ms, checkout 1,370 ms, and total command readiness 3,800 ms. The
-filtered shallow fetch took 751 ms cold and 811 ms during recovery, producing the same 242,794-byte
-pack. Recovery added 3,428 ms over the warm reused-command baseline. The smoke verified removal of
-both temporary Workers, the Dynamic Workflow, Sandbox container application, and owned R2 objects
-after each completed run.
+Cloudflare Artifacts is a possible later Source implementation. It will be adopted only if a stable
+service contract and repeated exact-revision P50/P95 plus total-cost measurements beat ordinary
+checkout for declared workloads. It is not the Cache store, and its availability is not part of the
+current foundation contract.
 
-On 2026-07-15, an isolated immutable-artifact deployment held a v1 run in durable sleep, deployed
-v2, rotated its secret, and then resumed v1. Fresh runs used only the v2 body and observed the new
-secret after propagation; the suspended run resumed with only its pinned v1 body and original
-secret. Managed command output remained redacted. Both deployments returned only after the
-readiness barrier succeeded.
+### Terminal
 
-The smoke test removed and verified absence of its Worker, Dynamic Workflow, Sandbox container
-application, and owned R2 artifact objects. It preserved the pre-existing shared artifact bucket.
-Cloudflare exposes no supported Worker Loader eviction control, so forced cold-loader recovery was
-not exercised live. Workers-runtime tests cover exact metadata-selected artifact and secret loading
-at that seam.
+Terminal is the one durable owner of the run winner and external terminal effect. Success, failure,
+cancellation, and supersession all claim through the same authority. Same-outcome retries return the
+winner; conflicting claims cannot change it. Only the verified winning success can publish eligible
+caches and report external success.
 
-On 2026-07-16, pull request 35 completed the authenticated GitHub self-hosting proof. The installed
-App, `Runway by casparbreloh`, accepted delivery `4ce375d0-812e-11f1-8d6c-4c67fc189943` for exact
-head `cc86fa5820f78d7dfce15cb2ffbc6507d03bccfb`. Generation 42 moved Runway Check
-`87671213580` and Test `87671211046` through queued, in-progress, and success; their external IDs
-were `runway-github-7ed846ac3591885a880664c1fedf47711faa30f2f4392fec-42` and
-`runway-github-6eef53a80024a4f9a2e643feba33c80044b1e36df4ffa7fc-42`. Superseding updates cancelled only
-prior checks with the same repository, PR, and workflow keys: generation 34 Check `87638027646`
-(`runway-github-c0947e032d903e1d0ddf595bebb20d5ab9c72a1913598c12-34`) and Test `87638030943`
-(`runway-github-ebc325fab03f9c8a438e35b1ef005d3193f131da50bbd97e-34`) ended cancelled, while their
-GitHub Actions counterparts remained successful. The unprotected `main` branch required no
-branch-rule migration.
+### Cache
 
-Authenticated recovery run `0a021705-4f8f-436f-9f3f-d0d98757c0a4` reconstructed exact SHA
-`8c63b9a00f7a15c8ed66eaad1dba33730609dfe4` after `Sandbox.destroy()`. Its SDK placement changed
-from `38f9f4c7-8768-4078-471c-c9e6d8e2d3c0` to
-`5e8ec9a4-1b75-81b3-3360-0b6d1827b5d1`; authentication was minted for the initial and replacement
-checkouts, and the following command reused the recovered Sandbox. Credentials were absent from
-diagnostics. Cleanup verified zero owned smoke Workers, Workflow resources and instances,
-container applications, Durable Object namespaces, and R2 artifacts.
+Cache owns one generic filesystem tree. Runtime-derived repository, trigger, branch/PR/fork,
+platform, image, schema, runner ABI, and generation state determine trust and compatibility; authors
+cannot spell an access scope.
 
-Runway's root workflows use a reproducible seven-chunk CI bootstrap whose complete SHA-256 is
-`4c7beaf69cf9508c416339cfc7ce42357903ee935875102e1451fcbbb5840235`. Every chunk and the complete
-archive are verified before extraction. Its dedicated public R2 bucket contains only the Linux
-toolchain and lockfile-resolved dependencies; immutable workflow artifacts, repository source, run
-data, and credentials remain private. This narrow bootstrap made self-hosting possible without
-preempting the general tool-native cache transport planned for Phase 3.
+The private implementation uses immutable content-addressed SquashFS objects and conditional named
+refs in private R2. Large bodies transfer directly Sandbox-to-R2 through short-lived exact-object
+capabilities; they do not pass through workflow author code. Restore verifies content, schema,
+platform, tree safety, and budgets in a sibling staging directory before atomic rename. Absence,
+corruption, unavailability, policy, target, or budget failures become diagnosed misses/skips without
+mutating a non-empty target.
 
-Cloudflare Sandbox backup/restore was inspected at the exact SDK version used here, `0.12.3`, but
-was not deployed. Production backup requires an R2 binding, bucket name, account id, and S3 access
-key credentials. A restored mount is lost again after a container restart and must be restored
-again. Successful backup objects are not automatically deleted, so Runway would also own explicit
-R2 lifecycle cleanup.
+Cache schema 2 and runner ABI `runway-sandbox-v2` add a bounded canonical private hardlink trailer to
+the SquashFS bytes. The pinned image contains high-level `squashfuse`, which does not expose reliable
+inode identity; the trailer preserves regular-file hardlinks without parsing compressed SquashFS
+metadata or weakening validation. It is a private compatibility boundary and can change only with a
+schema/ABI miss.
 
-## Recovery Decision
+Publication is success-only. Candidate bodies may be staged and verified while the run is active,
+but failure, cancellation, supersession, unsafe capture, budget rejection, or stale conditional refs
+cannot advance shared state.
 
-The first repository runner will reconstruct source from the exact commit and restore tool-owned
-remote caches. It will not use Sandbox backup/restore for source checkout.
+### Meter
 
-This keeps the recovery model deterministic and avoids adding R2 credentials, backup metadata,
-FUSE restore lifecycle, and object cleanup before benchmarks justify them. R2 remains appropriate
-for remote caches, logs, and artifacts. Sandbox backup can be reconsidered later for expensive
-generated workspace state only if measured restore cost is materially better than reconstruction.
+Meter records bounded sandbox/source/exec/reconnect/cache/loss/run timings and raw billable
+quantities. Cost quantities state whether they are provider-measured, provider-aggregate, derived, or
+allocated and carry a versioned price table. `maxEstimatedCostUsd` uses the same conservative
+estimator, but neither estimates nor allocated quantities are represented as provider invoices.
 
-## Delivery Phases
+### Stack
 
-### Phase 1: Repository Bootstrap And Recovery
+Stack is the only owner of desired Cloudflare resources for one repository deployment. Its manifest
+and immutable receipts cover Worker version/deployment, Dynamic Workflow, container definition and
+rollout, Durable Object namespaces, workers.dev, routes, schedules, bindings, secret names, private
+buckets, lifecycle, and exact owned objects. Apply and remove re-inventory provider state, fail closed
+on replacement drift, and preserve unknown or shared state.
 
-The core public-repository implementation shipped on 2026-07-15:
+The developer app and Worker/Workflow resource name are exactly **Runway** / `runway`, not Runway CI
+or `runway-ci`. The deployed Stack uses a digest-pinned linux/amd64 Sandbox image,
+runner ABI `runway-sandbox-v2`, cache schema 2, and internal `standard-4` capacity. Capacity is not a
+public author option.
 
-- Introduce an internal repository source descriptor containing the remote, exact commit SHA, and
-  an internal authentication capability. Do not add a public checkout DSL.
-- Prepare `/workspace` automatically before the first repository command.
-- Detect a fresh Sandbox placement or missing prepared workspace before later commands and
-  reconstruct the same commit exactly once for that placement.
-- Keep command ergonomics unchanged: ordinary workflows continue to call `step.exec()`.
-- Support public repositories.
-- Add deployment, artifact-runtime, and managed-runner seam tests.
-- Add a repeatable live smoke test that forces `Sandbox.destroy()` between commands.
-- Measure cold container and process start, checkout and fetch time, fetched pack bytes, and recovery
-  overhead.
+## Development Evidence And Boundary
 
-Private-repository access is implemented through short-lived GitHub App credentials without
-exposing credentials to command output, artifacts, snapshots, command text, repository markers, or
-logs. Deploy resolves stable installation and repository identity; each fresh checkout mints a
-repository-scoped Contents token and passes it only through a restricted askpass process
-environment. Local seams and the authenticated live replacement smoke cover this path.
+Nothing here is production. The repository exercises the system as if it were production while
+comparative release claims and publication remain gated.
 
-Phase 1 is complete: a workflow can check out an exact commit, lose its Sandbox, transparently
-reconstruct that commit, and continue with the next `step.exec()` without a public recovery call.
+At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
+integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
+P50/P95 of 96s/105s, with no cache operations. This supports the primitive decision; it is not a
+comparative release claim.
 
-### Phase 2: GitHub Repository Runs
+The live Stack is exactly `runway` on the digest-pinned linux/amd64 `standard-4` container. The legacy
+Worker, Workflow, container, namespaces, public bootstrap bucket, and migration receipt are deleted.
+The private shared workflow-artifact bucket and unclaimed objects survived the cutover.
 
-The Phase 2 implementation now:
+Private R2 miss, publication, warm restore, and corrupt-input behavior passed live. Runway's own
+whole-tree Node/pnpm caches were then removed because they regressed both latency and estimated cost.
+Future ecosystem adapters must prove a net win rather than adding package-manager semantics to the
+foundation.
 
-- Provides typed push and pull-request triggers while keeping `workflow()` as the only workflow
-  DSL.
-- Verifies exact GitHub App delivery bytes and maps every admitted run to an exact repository and
-  SHA.
-- Reports queued, running, success, failure, and cancellation through reconciled GitHub Checks.
-- Cancels and fences superseded runs only for the same repository, workflow, pull request, or full
-  branch ref.
-- Keeps one orchestration Worker and coordinator per repository; execution remains repo-scoped.
-- Starts Dynamic Workflows from a bounded durable outbox after fast ingress admission, without an
-  account-level router or Queue.
+The repository's duplicate GitHub Actions workflow was removed only after an earlier evidence gate.
+A `.github/workflows` fallback must not be restored without a new explicit migration and live gate.
 
-This repository now defines its own `Check` and `Test` workflows for pushes to `main` and pull
-requests opened, reopened, or synchronized. The live evidence above satisfies the gate for this
-cutover to delete the former GitHub Actions fallback. Revisions containing the cutover use Runway
-alone for the repository's CI checks.
+## Publication Gates
 
-Phase 2 completion consists of the live proof above and landing this cutover on `main`; pushes and
-pull requests then automatically run repository workflows at the correct SHA and report their
-terminal state to GitHub.
+The foundation primitives are independent of comparative marketing evidence. Before publication:
 
-### Phase 3: Cache Transport
+1. Handle every positively owned live run, disable legacy admission, remove only receipt-owned legacy
+   resources, and independently verify their absence.
+2. Create the fresh exact `runway` Stack on `standard-4`, verify its receipt equals provider inventory,
+   and preserve unknown/shared resources and the shared artifact bucket.
+3. Prove private cache miss, success-only publication, warm restore, corruption fallback,
+   cancellation fencing, credential unobservability, and cleanup in the exact pinned image.
+4. Remove the obsolete public bootstrap only after the new cache is no longer dependent on it.
+5. Run a statistically meaningful comparison against identical GitHub four-core commands before
+   publishing relative speed or cost claims; report webhook-to-terminal P50/P95 and total variable
+   infrastructure cost from Meter quantities.
+6. Pass local and live behavior gates plus standards, specification, and architecture review before
+   publication.
 
-- Provide R2-backed remote cache transport through the existing Turborepo and Nx protocols.
-- Let those tools compute dependency graphs, inputs, and cache keys.
-- Namespace objects by account and repository, with integrity validation and bounded retention.
-- Configure the required runner environment automatically.
-- Measure hit rate, transferred bytes, latency, and storage cost.
+Any image, capacity, limit, or Stack generation change after measurement invalidates the evidence.
+Public-repository GitHub standard compute is free, so Runway competes there on feedback time and
+capability rather than a lower compute bill.
 
-Do not add `step.cache(inputs)`, a Runway dependency graph, or a Runway build scheduler. Phase 3 is
-complete when an unchanged repository run obtains real remote cache hits after Sandbox replacement.
+## Later Consumers
 
-### Phase 4: Logs, Artifacts, And Run Inspection
+After the foundation gates pass:
 
-- Persist structured command logs outside transient Worker logs.
-- Add R2-backed artifact upload and download with explicit retention and size limits.
-- Link GitHub Checks to workflow runs, logs, and artifacts.
-- Add minimal CLI commands to list and inspect runs.
-- Keep cleanup and lifecycle policies automatic and repository-scoped.
-
-Phase 4 is complete when a failed run can be diagnosed and its declared outputs retrieved without
-opening the Cloudflare dashboard.
-
-### Phase 5: Deployment Workflows
-
-- Build typed Cloudflare deployment operations usable from ordinary workflows.
-- Support pull-request previews, production promotion, and rollback.
-- Surface deployment URLs and metadata through workflow results and GitHub Checks.
-- Keep deployment capabilities general enough for scheduled and webhook workflows, not only CI.
-
-Phase 5 is complete when a repository workflow can build, publish, report, promote, and roll back a
-Cloudflare deployment without introducing a separate CI language.
-
-### Later: AI And Agents
-
-- Add `step.ai()` through Cloudflare AI Gateway only after the CI/CD execution path is reliable.
-- Make model calls durable, typed, observable, and cost-accounted.
-- Build agent loops from workflow primitives rather than introducing a separate agent runtime.
+- Add thin tool-native Turbo, Nx, sccache, Bazel, or similar transports only for real users while
+  preserving tool-owned graphs, hashes, and validation.
+- Add separately packaged repository helpers for package managers or language runtimes; do not add
+  those concepts to Run, Sandbox, Source, Terminal, Cache, Meter, or Stack.
+- Persist structured logs and explicit run artifacts with repository-scoped lifecycle and budgets.
+- Build deployment workflows from ordinary Run primitives.
+- Evaluate repository acceleration, BuildKit, pulled-image caches, and agent/session workloads as
+  distinct cache families with their own measurement and trust contracts.
+- Add AI and agents only after repository execution, caching, and deployments are proven reliable.
 
 ## Guardrails
 
-- Preserve the small public context and simple `step.exec()` defaults.
-- Keep Sandbox, containers, repository credentials, and recovery mechanics internal.
-- Prefer reconstruction and standard tool protocols over Runway-specific abstractions.
-- Add a shared service only when a provider boundary requires it; keep execution repo-scoped.
-- Do not add Queues, new R2-backed subsystems, additional Durable Objects, or compatibility APIs
-  without a measured need.
-- Test behavior at SDK, Workers runtime, CLI, Cloudflare API, and live deployment seams.
+- Keep `workflow(...).run(...)` and flat `run.do/exec/cache/sleep` small.
+- Keep Cloudflare Sandbox, provider steps, credentials, cache storage, and Stack ownership internal.
+- Prefer exact reconstruction and proven continuity over filesystem inference.
+- Preserve one Terminal winner and success-only publication.
+- Keep the foundation language-neutral; ecosystem setup belongs in consumers.
+- Separate target/model numbers from measured evidence and label cost provenance.
+- Preserve shared artifacts and unknown provider state; remove only positively owned resources.
+- Do not add compatibility layers, speculative adapters, AI, agents, or public capacity controls
+  before a real consumer proves the seam.

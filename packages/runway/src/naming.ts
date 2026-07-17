@@ -47,7 +47,9 @@ const packageNameOf = async (cwd: string): Promise<string | undefined> => {
   try {
     const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8")) as {
       name?: unknown;
+      runway?: { name?: unknown };
     };
+    if (typeof pkg.runway?.name === "string" && pkg.runway.name.trim()) return pkg.runway.name;
     return typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : undefined;
   } catch (err) {
     if (isMissingFile(err)) return undefined;

@@ -1,11 +1,17 @@
 import {
   createDynamicWorkflowEntrypoint,
   wrapWorkflowBinding,
-  type WorkflowRunner,
+  type WorkflowRunner as DynamicRun,
 } from "@cloudflare/dynamic-workflows";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+import { Cache } from "./cache.ts";
+import { CloudflareCacheSnapshot } from "./cloudflare/cache-snapshot.ts";
+import { CloudflareCacheTransfer } from "./cloudflare/cache.ts";
+import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
+import { parseFailureDiagnostic } from "./diagnostic.ts";
+import type { FailureDiagnostic } from "./diagnostic.ts";
 import type {
   GitHubCoordinatorAdmission,
   GitHubCoordinatorRun,
@@ -16,25 +22,40 @@ import {
   matchGitHubDelivery,
   normalizeGitHubDelivery,
   type GitHubAcceptedDelivery,
+  type GitHubEventFilter,
+  type GitHubRepository,
 } from "./github.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import {
   parseGitHubRunSource,
   repositorySourceForRun,
+  sourceIdentity,
   type GitHubRunSource,
   type RepositorySource,
 } from "./repository-source.ts";
-import { createRunnerAdapter } from "./runner-adapter.ts";
-import { GITHUB_COORDINATOR_BINDING, SANDBOX_BINDING } from "./runner-config.ts";
-import type { HostCapability, RunLifecycleState } from "./runner.ts";
+import type { ExecResult } from "./run.ts";
+import type { RuntimeBinding } from "./runtime-binding.ts";
+import {
+  CACHE_SCHEMA,
+  CACHE_LIMITS,
+  GITHUB_COORDINATOR_BINDING,
+  SANDBOX_BINDING,
+  SANDBOX_CAPACITY,
+  SANDBOX_RUNNER_ABI,
+} from "./sandbox-config.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
-import type { GitHubEventFilter, GitHubRepository } from "./types.ts";
-import type { ExecResult } from "./types.ts";
+import type { PreparedSource, SourceIdentity } from "./source.ts";
+import { parseFinalization, parseTerminalIdentity, parseTerminalRecord } from "./terminal.ts";
+import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
+  CACHE_R2_ACCESS_KEY_ID_BINDING,
+  CACHE_R2_SECRET_ACCESS_KEY_BINDING,
+  CACHE_R2_SESSION_TOKEN_BINDING,
   COMPATIBILITY_DATE,
-  HOST_CAPABILITY_BINDING,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
+  RUNTIME_BINDING,
   RUNWAY_WORKFLOW_CLASS,
   SECRET_SNAPSHOT_KEY_BINDING,
   WORKFLOW_BINDING,
@@ -75,6 +96,9 @@ interface HostEnv {
   RUNWAY_GITHUB_APP_ID?: string;
   RUNWAY_GITHUB_PRIVATE_KEY?: string;
   RUNWAY_GITHUB_WEBHOOK_SECRET?: string;
+  [CACHE_R2_ACCESS_KEY_ID_BINDING]?: string;
+  [CACHE_R2_SECRET_ACCESS_KEY_BINDING]?: string;
+  [CACHE_R2_SESSION_TOKEN_BINDING]?: string;
 }
 
 interface HostProps {
@@ -83,11 +107,27 @@ interface HostProps {
   readonly secretNames: ReadonlyArray<string>;
   readonly secretSnapshotKey: string;
   readonly snapshotScope: string;
+  readonly terminal: Omit<TerminalIdentity, "runId">;
+  readonly cache: {
+    readonly accountId: string;
+    readonly bucket: string;
+    readonly admission: {
+      readonly type: string;
+      readonly ref?: string;
+      readonly defaultRef?: string;
+      readonly number?: number;
+      readonly headRepositoryId?: string;
+    };
+    readonly repositoryId: string;
+    readonly workflowId: string;
+    readonly generation: number;
+    readonly imageDigest?: string;
+  };
 }
 
 interface LoaderContext {
   exports: {
-    RunwayRunnerBinding(options: { props: HostProps }): HostCapability;
+    RunwaySandboxBinding(options: { props: HostProps }): RuntimeBinding;
   };
 }
 
@@ -113,6 +153,9 @@ type HostRoute =
     };
 
 export interface HostConfig {
+  readonly accountId: string;
+  readonly cacheBucket: string;
+  readonly imageDigest: string;
   readonly scriptName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
@@ -123,28 +166,112 @@ export interface HostConfig {
   };
 }
 
-export class RunwayRunnerBinding
+export class RunwaySandboxBinding
   extends WorkerEntrypoint<HostEnv, HostProps>
-  implements HostCapability
+  implements RuntimeBinding
 {
-  async reportRunLifecycle(runId: string, state: RunLifecycleState): Promise<boolean> {
-    if (
-      typeof runId !== "string" ||
-      (state !== "in_progress" && state !== "success" && state !== "failure")
-    ) {
-      throw new Error("invalid run lifecycle");
-    }
+  async startRun(runId: string): Promise<boolean> {
+    this.#assertRun(runId);
     const source = this.ctx.props.source;
     if (!source) return true;
-    if (source.runId !== runId) throw new Error("invalid GitHub run lifecycle");
     const namespace = this.env[GITHUB_COORDINATOR_BINDING];
     if (!namespace) throw new Error("GitHub coordinator is not configured");
     const result = await namespace.getByName(String(source.check.repository.id)).lifecycle({
       source,
-      state,
+      state: "in_progress",
     });
     if (typeof result?.proceed !== "boolean") throw new Error("invalid GitHub run lifecycle");
     return result.proceed;
+  }
+
+  async terminal(runId: string): Promise<TerminalIdentity> {
+    this.#assertRun(runId);
+    return parseTerminalIdentity({ ...this.ctx.props.terminal, runId });
+  }
+
+  async claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
+    this.#assertRun(runId);
+    const identity = await this.terminal(runId);
+    let parsed: TerminalRecord;
+    try {
+      parsed = parseTerminalRecord(candidate);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
+    if (
+      Object.entries(identity).some(
+        ([field, value]) => parsed[field as keyof TerminalIdentity] !== value,
+      )
+    ) {
+      throw new Error("invalid terminal claim");
+    }
+    const source = this.ctx.props.source;
+    if (!source) return parsed;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    const winner = await namespace
+      .getByName(String(source.check.repository.id))
+      .claimTerminal({ source, candidate: parsed });
+    try {
+      return parseTerminalRecord(winner);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
+  }
+
+  async readTerminal(runId: string): Promise<TerminalRecord | undefined> {
+    this.#assertRun(runId);
+    const source = this.ctx.props.source;
+    if (!source) return undefined;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    const record = await namespace
+      .getByName(String(source.check.repository.id))
+      .readTerminal(source);
+    if (record === undefined) return undefined;
+    try {
+      return parseTerminalRecord(record);
+    } catch {
+      throw new Error("invalid terminal claim");
+    }
+  }
+
+  async publishTerminal(
+    runId: string,
+    finalization: Finalization,
+    diagnosticValue: FailureDiagnostic | null,
+  ): Promise<void> {
+    this.#assertRun(runId);
+    let parsed: Finalization;
+    try {
+      parsed = parseFinalization(finalization);
+    } catch {
+      throw new Error("invalid terminal finalization");
+    }
+    let diagnostic: FailureDiagnostic | null;
+    try {
+      diagnostic = parseFailureDiagnostic(diagnosticValue);
+    } catch {
+      throw new Error("invalid terminal diagnostic");
+    }
+    if (parsed.outcome !== "failure" && diagnostic !== null) {
+      throw new Error("invalid terminal diagnostic");
+    }
+    const source = this.ctx.props.source;
+    if (!source) return;
+    const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+    if (!namespace) throw new Error("GitHub coordinator is not configured");
+    await namespace.getByName(String(source.check.repository.id)).publishTerminal({
+      source,
+      finalization: parsed,
+      diagnostic,
+    });
+  }
+
+  #assertRun(runId: string): void {
+    if (typeof runId !== "string" || runId.length === 0) throw new Error("invalid run lifecycle");
+    const source = this.ctx.props.source;
+    if (source && source.runId !== runId) throw new Error("invalid GitHub run lifecycle");
   }
 
   #secretValues(): Readonly<Record<string, string>> {
@@ -158,10 +285,10 @@ export class RunwayRunnerBinding
     );
   }
 
-  #adapter(): ReturnType<typeof createRunnerAdapter> {
-    return createRunnerAdapter({
-      sandbox: (runnerId) =>
-        getSandbox(this.env[SANDBOX_BINDING], runnerId, { enableDefaultSession: false }),
+  #sandbox(): ReturnType<typeof cloudflareSandbox> {
+    return cloudflareSandbox({
+      placement: (sandboxId) =>
+        getSandbox(this.env[SANDBOX_BINDING], sandboxId, { enableDefaultSession: false }),
       status: async (runId) => await (await this.env[WORKFLOW_BINDING].get(runId)).status(),
       waitUntil: (promise) => this.ctx.waitUntil(promise),
       repository: this.ctx.props.repository,
@@ -183,6 +310,126 @@ export class RunwayRunnerBinding
         if (stream === "stdout") console.log(chunk);
         else console.error(chunk);
       },
+    });
+  }
+
+  #cache(sourceRequest?: {
+    readonly runId: string;
+    readonly secrets: Readonly<Record<string, string>>;
+    readonly source?: PreparedSource;
+  }): Cache {
+    const config = this.ctx.props.cache;
+    const accessKeyId = this.env[CACHE_R2_ACCESS_KEY_ID_BINDING];
+    const secretAccessKey = this.env[CACHE_R2_SECRET_ACCESS_KEY_BINDING];
+    const sessionToken = this.env[CACHE_R2_SESSION_TOKEN_BINDING];
+    const sandbox = this.#sandbox();
+    const snapshotSecrets = sourceRequest ? this.#snapshotValues(sourceRequest.secrets) : undefined;
+    const transfer =
+      sourceRequest &&
+      snapshotSecrets &&
+      config.imageDigest &&
+      typeof accessKeyId === "string" &&
+      accessKeyId.length > 0 &&
+      typeof secretAccessKey === "string" &&
+      secretAccessKey.length > 0
+        ? new CloudflareCacheTransfer({
+            accountId: config.accountId,
+            bucket: config.bucket,
+            accessKeyId,
+            secretAccessKey,
+            ...(typeof sessionToken === "string" && sessionToken.length > 0
+              ? { sessionToken }
+              : {}),
+            expiresInSeconds: 120,
+            transport: sandbox.cacheTransfer(sourceRequest.runId, snapshotSecrets),
+            objects: {
+              head: async (key) => {
+                const object = await this.env[ARTIFACT_BUCKET_BINDING].head(key);
+                const digest = object?.customMetadata?.["runway-sha256"];
+                return object && typeof digest === "string"
+                  ? { bytes: object.size, digest }
+                  : undefined;
+              },
+            },
+          })
+        : undefined;
+    const snapshots =
+      transfer && sourceRequest && snapshotSecrets
+        ? new CloudflareCacheSnapshot({
+            runId: sourceRequest.runId,
+            process: async () => await sandbox.cacheProcess(sourceRequest.runId, snapshotSecrets),
+            transfer,
+          })
+        : undefined;
+    const meter = new Meter({
+      priceTable: CLOUDFLARE_PRICE_TABLE,
+      container: SANDBOX_CAPACITY,
+      cache: {
+        maxBytes: CACHE_LIMITS.maxBytes,
+        maxDurationMs: CACHE_LIMITS.helperDurationMs,
+        save: {
+          classAOperations: CACHE_LIMITS.saveClassAOperations,
+          classBOperations: CACHE_LIMITS.saveClassBOperations,
+          storageHorizonMs: CACHE_LIMITS.storageHorizonMs,
+          transferDurationMs: CACHE_LIMITS.transferDurationMs,
+          workflowSteps: CACHE_LIMITS.saveWorkflowSteps,
+        },
+        restore: {
+          classAOperations: CACHE_LIMITS.restoreClassAOperations,
+          classBOperations: CACHE_LIMITS.restoreClassBOperations,
+          transferDurationMs: CACHE_LIMITS.transferDurationMs,
+          workflowSteps: CACHE_LIMITS.restoreWorkflowSteps,
+        },
+      },
+      emit: (report) => console.log({ type: "runway-meter", report }),
+    });
+    return new Cache({
+      context: {
+        repositoryId: config.repositoryId,
+        workflowId: config.workflowId,
+        generation: config.generation,
+        admission: config.admission,
+        platform: {
+          schema: CACHE_SCHEMA,
+          os: "linux",
+          architecture: "amd64",
+          ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
+          runnerAbi: SANDBOX_RUNNER_ABI,
+        },
+      },
+      refs: {
+        get: async (key) => {
+          const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
+          return object ? { etag: object.etag, text: async () => await object.text() } : null;
+        },
+        put: async (key, text, options) => {
+          const object = await this.env[ARTIFACT_BUCKET_BINDING].put(key, text, {
+            onlyIf: options.onlyIf,
+          });
+          return object ? { etag: object.etag } : null;
+        },
+      },
+      files: {
+        inspect: async (path) => {
+          if (!sourceRequest?.source) throw new Error("cache source inspection is unavailable");
+          return await this.#sandbox().inspectCacheFile({
+            runId: sourceRequest.runId,
+            source: sourceRequest.source,
+            path,
+            secrets: this.#snapshotValues(sourceRequest.secrets),
+          });
+        },
+      },
+      current: async () => {
+        const source = this.ctx.props.source;
+        if (!source) return true;
+        const namespace = this.env[GITHUB_COORDINATOR_BINDING];
+        if (!namespace) throw new Error("GitHub coordinator is not configured");
+        return await namespace.getByName(String(source.check.repository.id)).current(source);
+      },
+      diagnose: (diagnostic) => console.log({ type: "runway-cache", diagnostic }),
+      meter,
+      ...(snapshots ? { restore: snapshots, snapshots } : {}),
     });
   }
 
@@ -273,26 +520,106 @@ export class RunwayRunnerBinding
     return await this.#snapshots().restore(runId, snapshot);
   }
 
-  async exec(
-    request: Omit<Parameters<ReturnType<typeof createRunnerAdapter>["exec"]>[0], "secrets"> & {
-      secrets: Readonly<Record<string, string>>;
-    },
-  ): Promise<ExecResult> {
-    const { secrets, ...runnerRequest } = request;
-    return await this.#adapter().exec({
-      ...runnerRequest,
+  async source(): Promise<SourceIdentity> {
+    return sourceIdentity(this.ctx.props.repository);
+  }
+
+  async prepareSource(request: {
+    readonly runId: string;
+    readonly source: SourceIdentity;
+    readonly secrets: Readonly<Record<string, string>>;
+    readonly allowReconstruct: boolean;
+  }): Promise<PreparedSource> {
+    const expected = sourceIdentity(this.ctx.props.repository);
+    if (
+      request.source.repositoryId !== expected.repositoryId ||
+      request.source.remote !== expected.remote ||
+      request.source.revision !== expected.revision
+    ) {
+      throw new Error("source preparation does not match the bound repository");
+    }
+    return await this.#sandbox().prepare({
+      runId: request.runId,
+      secrets: this.#snapshotValues(request.secrets),
+      allowReconstruct: request.allowReconstruct,
+    });
+  }
+
+  async execute(request: Parameters<RuntimeBinding["execute"]>[0]): Promise<ExecResult> {
+    const { secrets, ...command } = request;
+    return await this.#sandbox().execute({
+      ...command,
       secrets: this.#snapshotValues(secrets),
     });
   }
 
+  async restoreCache(
+    request: Parameters<RuntimeBinding["restoreCache"]>[0],
+  ): ReturnType<RuntimeBinding["restoreCache"]> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    const expected = sourceIdentity(this.ctx.props.repository);
+    if (request.source.result.revision !== expected.revision) {
+      throw new Error("cache source does not match the bound repository");
+    }
+    const cache = this.#cache(request);
+    try {
+      return await cache.record(request.id, request.declaration);
+    } finally {
+      await cache.flushMeter();
+    }
+  }
+
+  async quiesce(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
+    this.#assertRun(runId);
+    await this.#sandbox().quiesce(runId, this.#snapshotValues(secrets));
+  }
+
+  async prepareCaches(
+    request: Parameters<RuntimeBinding["prepareCaches"]>[0],
+  ): ReturnType<RuntimeBinding["prepareCaches"]> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    const cache = this.#cache(request);
+    try {
+      return await cache.prepare(request.pending);
+    } finally {
+      await cache.flushMeter();
+    }
+  }
+
+  async publishCaches(request: Parameters<RuntimeBinding["publishCaches"]>[0]): Promise<void> {
+    this.#assertRun(request.runId);
+    this.#snapshotValues(request.secrets);
+    if (request.finalization.outcome !== "success") return;
+    const source = this.ctx.props.source;
+    if (source) {
+      const winner = await this.readTerminal(request.runId);
+      if (
+        !winner ||
+        winner.claimId !== request.finalization.claimId ||
+        winner.outcome !== request.finalization.outcome
+      ) {
+        throw new Error("cache publication requires the terminal winner");
+      }
+    }
+    const cache = this.#cache(request);
+    try {
+      await cache.commit(request.prepared);
+    } finally {
+      await cache.flushMeter();
+    }
+  }
+
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
-    await this.#adapter().destroy(runId, this.#snapshotValues(secrets));
+    await this.#sandbox().destroy(runId, this.#snapshotValues(secrets));
   }
 }
 
 interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
   readonly artifactVersion: string;
   readonly source?: GitHubRunSource;
+  readonly trigger?: "webhook" | "cron";
 }
 
 type LoaderPurpose = "trigger" | "run";
@@ -308,14 +635,17 @@ const metadataOf = (value: unknown): WorkflowMetadata => {
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    !["artifactVersion", "artifactVersion,source"].includes(Object.keys(value).sort().join(","))
+    !["artifactVersion", "artifactVersion,source", "artifactVersion,trigger"].includes(
+      Object.keys(value).sort().join(","),
+    )
   ) {
     throw new Error("invalid workflow metadata");
   }
-  const { artifactVersion, source } = value as Record<string, unknown>;
+  const { artifactVersion, source, trigger } = value as Record<string, unknown>;
   if (typeof artifactVersion !== "string" || !/^[0-9a-f]{64}$/.test(artifactVersion)) {
     throw new Error("invalid workflow metadata");
   }
+  if (trigger === "webhook" || trigger === "cron") return { artifactVersion, trigger };
   if (source === undefined) return { artifactVersion };
   try {
     return { artifactVersion, source: parseGitHubRunSource(source) };
@@ -352,6 +682,27 @@ const loadWorker = async (
   artifact: WorkflowArtifact,
   metadata: WorkflowMetadata,
 ): Promise<LoaderStub> => {
+  const repository = metadata.source
+    ? repositorySourceForRun(metadata.source)
+    : artifact.repository;
+  const repositoryId = sourceIdentity(repository).repositoryId;
+  const cacheRepositoryId = metadata.source
+    ? `github:${metadata.source.check.repository.id}`
+    : repositoryId;
+  const admission = metadata.source
+    ? metadata.source.admission.type === "push"
+      ? {
+          type: "push",
+          ref: metadata.source.admission.ref,
+          defaultRef: metadata.source.admission.defaultRef,
+        }
+      : {
+          type: "pull_request",
+          number: metadata.source.admission.number,
+          headRepositoryId: `github:${metadata.source.repository.id}`,
+          defaultRef: metadata.source.admission.defaultRef,
+        }
+    : { type: metadata.trigger ?? "webhook" };
   const identity = new TextEncoder().encode(
     JSON.stringify([purpose, metadata.artifactVersion, config.deploymentId, metadata.source]),
   );
@@ -362,15 +713,29 @@ const loadWorker = async (
     mainModule: "index.js",
     modules: { "index.js": artifact.source },
     env: {
-      [HOST_CAPABILITY_BINDING]: ctx.exports.RunwayRunnerBinding({
+      [RUNTIME_BINDING]: ctx.exports.RunwaySandboxBinding({
         props: {
-          repository: metadata.source
-            ? repositorySourceForRun(metadata.source)
-            : artifact.repository,
+          repository,
           ...(metadata.source ? { source: metadata.source } : {}),
           secretNames: artifact.secrets,
           secretSnapshotKey: config.secretSnapshotKey,
           snapshotScope: `${config.scriptName}:${artifact.workflowId}:${metadata.artifactVersion}`,
+          terminal: {
+            accountId: config.accountId,
+            repositoryId,
+            workflowId: artifact.workflowId,
+            trustId: repositoryId,
+            generation: metadata.source?.generation ?? 1,
+          },
+          cache: {
+            accountId: config.accountId,
+            admission,
+            bucket: config.cacheBucket,
+            imageDigest: config.imageDigest,
+            repositoryId: cacheRepositoryId,
+            workflowId: artifact.workflowId,
+            generation: metadata.source?.generation ?? 1,
+          },
         },
       }),
       [WORKFLOW_BINDING]: wrapWorkflowBinding(metadata),
@@ -389,7 +754,7 @@ export const createDynamicWorkflow = (config: HostConfig) =>
       loaded.artifact,
       loaded.metadata,
     );
-    return worker.getEntrypoint(RUNWAY_WORKFLOW_CLASS) as unknown as WorkflowRunner;
+    return worker.getEntrypoint(RUNWAY_WORKFLOW_CLASS) as unknown as DynamicRun;
   });
 
 const dynamicFetch = async (
@@ -399,7 +764,11 @@ const dynamicFetch = async (
   ctx: LoaderContext,
   config: HostConfig,
 ): Promise<Response> => {
-  const loaded = await readArtifact(env, { artifactVersion: route.artifactVersion }, config);
+  const loaded = await readArtifact(
+    env,
+    { artifactVersion: route.artifactVersion, trigger: route.type },
+    config,
+  );
   if (loaded.artifact.workflowId !== route.id) {
     throw new Error("workflow artifact does not match route");
   }
@@ -465,7 +834,11 @@ export const createHost = (config: HostConfig) => ({
       const namespace = env[GITHUB_COORDINATOR_BINDING];
       if (!namespace) return new Response("GitHub coordinator is not configured", { status: 503 });
       const coordinator = namespace.getByName(String(config.github.repository.id));
-      const result = (await coordinator.admit({ delivery, workflows })) as {
+      const result = (await coordinator.admit({
+        accountId: config.accountId,
+        delivery,
+        workflows,
+      })) as {
         readonly runs: readonly GitHubCoordinatorRun[];
       };
       return Response.json({ runs: result.runs }, { status: 202 });

@@ -1,18 +1,50 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 
-import { secretNameOf } from "./secrets.ts";
-import type { SecretRef } from "./secrets.ts";
-import type {
-  CronTrigger,
-  GitHubEventFilter,
-  GitHubEventOf,
-  GitHubOptions,
-  GitHubTrigger,
-  WebhookOptions,
-  WebhookTimestamp,
-  WebhookTrigger,
-  WorkflowTrigger,
-} from "./types.ts";
+import type { GitHubEventFilter, GitHubEventOf, GitHubOptions, GitHubTrigger } from "./github.ts";
+import { secretNameOf, type SecretRef } from "./secrets.ts";
+import type { WorkflowTrigger } from "./workflow.ts";
+
+declare const EVENT: unique symbol;
+
+export interface Trigger<E> {
+  readonly [EVENT]: E;
+}
+
+export interface WebhookTimestamp {
+  readonly source: "body" | "header";
+  readonly field: string;
+  readonly toleranceMs: number;
+}
+
+export interface WebhookTrigger<E> extends Trigger<E> {
+  readonly type: "webhook";
+  readonly path: string;
+  readonly secret: SecretRef;
+  readonly signatureHeader: string;
+  readonly prefix?: string;
+  readonly timestamp?: WebhookTimestamp;
+  readonly schema?: StandardSchemaV1;
+  readonly predicate?: (event: unknown) => boolean;
+  filter<F extends E>(predicate: (event: E) => event is F): WebhookTrigger<F>;
+}
+
+export interface CronParams {
+  readonly cron: string;
+  readonly scheduledTime: number;
+}
+
+export interface CronTrigger extends Trigger<CronParams> {
+  readonly type: "cron";
+  readonly expression: string;
+}
+
+export interface WebhookOptions {
+  path: string;
+  secret: SecretRef;
+  signatureHeader: string;
+  prefix?: string;
+  timestamp?: { source?: "body" | "header"; field: string; toleranceMs: number };
+}
 
 export const BINDING = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

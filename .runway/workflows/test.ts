@@ -1,6 +1,6 @@
 import { github, workflow } from "runway";
 
-import { installCiDependencies, setupCiToolchain } from "../ci.ts";
+import { prepareRepository, repositoryCommand } from "../repository.ts";
 
 export default workflow({
   id: "test",
@@ -12,10 +12,7 @@ export default workflow({
         { type: "pull_request", actions: ["opened", "reopened", "synchronize"] },
       ],
     }),
-}).handler(async (ctx) => {
-  await ctx.step.exec("setup-node", { command: setupCiToolchain, timeoutMs: 15 * 60_000 });
-  await ctx.step.exec("setup-pnpm", "pnpm --version");
-  await ctx.step.exec("toolchain", "node --version && pnpm --version");
-  await ctx.step.exec("install", installCiDependencies);
-  await ctx.step.exec("test", { command: "pnpm test", env: { VITEST_MAX_WORKERS: "1" } });
+}).run(async (run) => {
+  await prepareRepository(run);
+  await run.exec("test", repositoryCommand("pnpm test", { env: { VITEST_MAX_WORKERS: "1" } }));
 });

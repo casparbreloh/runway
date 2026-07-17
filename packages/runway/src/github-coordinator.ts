@@ -1,13 +1,22 @@
 import { DurableObject } from "cloudflare:workers";
 
 import {
+  parseFailureDiagnostic,
+  sameFailureDiagnostic,
+  type FailureDiagnostic,
+} from "./diagnostic.ts";
+import {
   createGitHubProvider,
   type GitHubAcceptedDelivery,
+  type GitHubCheckOutput,
   type GitHubProvider,
+  type GitHubRepository,
 } from "./github.ts";
 import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
-import type { RunLifecycleState } from "./runner.ts";
-import type { GitHubRepository } from "./types.ts";
+import { parseFinalization, parseTerminalRecord } from "./terminal.ts";
+import type { Finalization, TerminalRecord } from "./terminal.ts";
+
+type GitHubLifecycleState = "in_progress";
 
 const DELIVERY_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const ALARM_BATCH_SIZE = 32;
@@ -20,6 +29,23 @@ const WORKFLOW_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const RUN_ID = /^runway-github-([0-9a-f]{48})-([1-9][0-9]*)$/;
 const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
 
+const checkOutput = (diagnostic: FailureDiagnostic | null): GitHubCheckOutput | undefined => {
+  if (!diagnostic) return undefined;
+  const sections = [
+    diagnostic.stdout ? `stdout\n${diagnostic.stdout}` : "",
+    diagnostic.stderr ? `stderr\n${diagnostic.stderr}` : "",
+  ].filter(Boolean);
+  return { title: "Command failed", summary: sections.join("\n\n") };
+};
+
+const diagnosticOf = (value: unknown): FailureDiagnostic | null => {
+  try {
+    return parseFailureDiagnostic(value);
+  } catch {
+    return invariant();
+  }
+};
+
 export interface GitHubWorkflowAdmission {
   readonly workflowId: string;
   readonly artifactVersion: string;
@@ -27,6 +53,7 @@ export interface GitHubWorkflowAdmission {
 }
 
 export interface GitHubCoordinatorAdmission {
+  readonly accountId: string;
   readonly delivery: GitHubAcceptedDelivery;
   readonly workflows: readonly GitHubWorkflowAdmission[];
 }
@@ -38,7 +65,7 @@ export interface GitHubCoordinatorRun {
 
 export interface GitHubCoordinatorLifecycle {
   readonly source: GitHubRunSource;
-  readonly state: RunLifecycleState;
+  readonly state: GitHubLifecycleState;
 }
 
 interface CoordinatorProvider extends GitHubProvider {}
@@ -73,6 +100,7 @@ type DesiredState = "queued" | "in_progress" | "success" | "failure" | "cancelle
 
 interface RunRecord {
   readonly kind: "run";
+  readonly accountId: string;
   readonly runId: string;
   readonly workflowId: string;
   readonly artifactVersion: string;
@@ -81,6 +109,9 @@ interface RunRecord {
   readonly activeKey: string;
   readonly generation: number;
   readonly expiresAt: number;
+  terminal: TerminalRecord | null;
+  terminalPublished: boolean;
+  diagnostic: FailureDiagnostic | null;
   desired: DesiredState;
   preflightComplete: boolean;
   checkCreateAttempted: boolean;
@@ -152,6 +183,22 @@ const parseString = (value: unknown, pattern?: RegExp): string =>
 const parseBoolean = (value: unknown): boolean =>
   typeof value === "boolean" ? value : invariant();
 
+const terminalRecordOf = (value: unknown): TerminalRecord => {
+  try {
+    return parseTerminalRecord(value);
+  } catch {
+    return invariant();
+  }
+};
+
+const finalizationOf = (value: unknown): Finalization => {
+  try {
+    return parseFinalization(value);
+  } catch {
+    return invariant();
+  }
+};
+
 const WORKFLOW_STATUSES = [
   "queued",
   "running",
@@ -215,6 +262,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
       "installationId",
       "checkRepository",
       "checkoutRepository",
+      "defaultRef",
       "event",
       "concurrency",
     ]) ||
@@ -230,6 +278,8 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
   assertRecord(concurrency);
   const checkRepository = parseRepository(value.checkRepository);
   const checkoutRepository = parseRepository(value.checkoutRepository);
+  const defaultRef = parseString(value.defaultRef);
+  if (!defaultRef.startsWith("refs/heads/")) invariant();
   if (event.type === "push") {
     if (
       !exactKeys(event, ["type", "repository", "ref", "sha"]) ||
@@ -255,6 +305,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
       installationId,
       checkRepository,
       checkoutRepository,
+      defaultRef,
       event: {
         type: "push",
         repository,
@@ -289,6 +340,7 @@ const parseAcceptedDelivery = (value: unknown): GitHubAcceptedDelivery => {
     installationId,
     checkRepository,
     checkoutRepository,
+    defaultRef,
     event: {
       type: "pull_request",
       action,
@@ -343,6 +395,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   assertRecord(value);
   const keys = [
     "kind",
+    "accountId",
     "runId",
     "workflowId",
     "artifactVersion",
@@ -351,6 +404,9 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     "activeKey",
     "generation",
     "expiresAt",
+    "terminal",
+    "terminalPublished",
+    "diagnostic",
     "desired",
     "preflightComplete",
     "checkCreateAttempted",
@@ -365,6 +421,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     "nextAttemptAt",
   ] as const;
   if (!exactKeys(value, keys) || value.kind !== "run") invariant();
+  const accountId = parseString(value.accountId);
   const delivery = parseAcceptedDelivery(value.delivery);
   const runId = parseString(value.runId, RUN_ID);
   const match = RUN_ID.exec(runId);
@@ -374,6 +431,9 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   const activeKey = parseString(value.activeKey);
   const generation = parseGeneration(value.generation);
   const expiresAt = parseGeneration(value.expiresAt);
+  const terminal = value.terminal === null ? null : terminalRecordOf(value.terminal);
+  const terminalPublished = parseBoolean(value.terminalPublished);
+  const diagnostic = diagnosticOf(value.diagnostic);
   const desired =
     value.desired === "queued" ||
     value.desired === "in_progress" ||
@@ -409,6 +469,20 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     Number(match[2]) !== generation ||
     activeKey !== concurrencyKey(delivery, workflowId) ||
     checkName.length === 0 ||
+    (terminal !== null &&
+      (terminal.accountId !== accountId ||
+        terminal.repositoryId !== `github:${delivery.checkoutRepository.id}` ||
+        terminal.workflowId !== workflowId ||
+        terminal.runId !== runId ||
+        terminal.trustId !== `github:${delivery.checkoutRepository.id}` ||
+        terminal.generation !== generation)) ||
+    (terminalPublished && terminal === null) ||
+    (diagnostic !== null &&
+      (!terminalPublished || terminal?.outcome !== "failure" || desired !== "failure")) ||
+    ((desired === "success" || desired === "failure" || desired === "cancelled") &&
+      (!terminalPublished || terminal?.outcome !== desired)) ||
+    ((desired === "queued" || desired === "in_progress") && terminalPublished) ||
+    (desired === "skipped" && terminal !== null) ||
     (checkCreateAttempted && !preflightComplete) ||
     (checkRunId !== null && !checkCreateAttempted) ||
     (workflowCreateAttempted && checkRunId === null) ||
@@ -442,6 +516,7 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
   }
   return {
     kind: "run",
+    accountId,
     runId,
     workflowId,
     artifactVersion,
@@ -450,6 +525,9 @@ const parseRun = (value: unknown, keyRunId: string): RunRecord => {
     activeKey,
     generation,
     expiresAt,
+    terminal,
+    terminalPublished,
+    diagnostic,
     desired,
     preflightComplete,
     checkCreateAttempted,
@@ -526,6 +604,9 @@ const isPending = (run: RunRecord): boolean =>
           ? !run.checkCancellationComplete
           : false;
 
+const isExternallyTerminal = (run: RunRecord): boolean =>
+  run.desired === "skipped" || run.checkCompletionComplete || run.checkCancellationComplete;
+
 const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -548,6 +629,10 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
   async admit(admission: GitHubCoordinatorAdmission): Promise<{
     readonly runs: readonly GitHubCoordinatorRun[];
   }> {
+    if (!isRecord(admission) || !exactKeys(admission, ["accountId", "delivery", "workflows"])) {
+      invariant();
+    }
+    const accountId = parseString(admission.accountId);
     const delivery = parseAcceptedDelivery(admission.delivery);
     const now = await this.#now();
     if (!Array.isArray(admission.workflows) || admission.workflows.length === 0) invariant();
@@ -594,6 +679,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           for (const runRef of tombstone.runs) {
             const run = parseRun(await transaction.get(runKey(runRef.id)), runRef.id);
             if (
+              run.accountId !== accountId ||
               run.workflowId !== runRef.workflow ||
               run.delivery.deliveryId !== delivery.deliveryId
             ) {
@@ -623,6 +709,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           const prior = parseActive(rawPrior, activeKey);
           const priorRun = parseRun(await transaction.get(runKey(prior.runId)), prior.runId);
           if (
+            priorRun.accountId !== accountId ||
             priorRun.activeKey !== activeKey ||
             priorRun.generation !== prior.generation ||
             prior.generation !== currentGeneration
@@ -632,9 +719,22 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           if (
             priorRun.desired !== "cancelled" &&
             priorRun.desired !== "skipped" &&
-            !priorRun.checkCompletionComplete
+            !priorRun.checkCompletionComplete &&
+            priorRun.terminal === null
           ) {
             await transaction.delete(pendingKey(priorRun.nextAttemptAt, priorRun.runId));
+            priorRun.terminal = {
+              accountId: priorRun.accountId,
+              repositoryId: `github:${priorRun.delivery.checkoutRepository.id}`,
+              workflowId: priorRun.workflowId,
+              runId: priorRun.runId,
+              trustId: `github:${priorRun.delivery.checkoutRepository.id}`,
+              generation: priorRun.generation,
+              claimId: crypto.randomUUID(),
+              outcome: "cancelled",
+            };
+            priorRun.terminalPublished = true;
+            priorRun.diagnostic = null;
             priorRun.desired = "cancelled";
             priorRun.retryCount = 0;
             priorRun.nextAttemptAt = now;
@@ -650,6 +750,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         }
         const record: RunRecord = {
           kind: "run",
+          accountId,
           runId,
           workflowId: workflow.workflowId,
           artifactVersion: workflow.artifactVersion,
@@ -658,6 +759,9 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
           activeKey,
           generation,
           expiresAt: now + DELIVERY_RETENTION_MS,
+          terminal: null,
+          terminalPublished: false,
+          diagnostic: null,
           desired: "queued",
           preflightComplete: false,
           checkCreateAttempted: false,
@@ -711,7 +815,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (!isRecord(request) || !exactKeys(request, ["source", "state"])) invariant();
     const source = parseGitHubRunSource(request.source);
     const state = request.state;
-    if (state !== "in_progress" && state !== "success" && state !== "failure") invariant();
+    if (state !== "in_progress") invariant();
     const now = await this.#now();
     const key = runKey(source.runId);
     const initial = parseRun(await this.ctx.storage.get(key), source.runId);
@@ -728,6 +832,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         run.desired !== "cancelled" &&
         run.desired !== "skipped" &&
         !run.checkCompletionComplete &&
+        run.terminal === null &&
         (generation !== run.generation ||
           active?.runId !== run.runId ||
           active.generation !== run.generation)
@@ -737,12 +842,8 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       const oldPending = pendingKey(run.nextAttemptAt, run.runId);
       const wasPending = isPending(run);
       let proceed = true;
-      if (state === "in_progress") {
-        if (run.desired === "queued") run.desired = "in_progress";
-        else if (run.desired !== "in_progress") proceed = false;
-      } else if (run.desired === "queued" || run.desired === "in_progress") {
-        run.desired = state;
-      }
+      if (run.desired === "queued") run.desired = "in_progress";
+      else if (run.desired !== "in_progress") proceed = false;
       run.workflowKnown = true;
       run.retryCount = 0;
       run.nextAttemptAt = now;
@@ -759,6 +860,105 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     });
     await this.ctx.storage.setAlarm(Date.now());
     return result;
+  }
+
+  async claimTerminal(request: {
+    readonly source: GitHubRunSource;
+    readonly candidate: TerminalRecord;
+  }): Promise<TerminalRecord> {
+    if (!isRecord(request) || !exactKeys(request, ["source", "candidate"])) invariant();
+    const source = parseGitHubRunSource(request.source);
+    const candidate = terminalRecordOf(request.candidate);
+    const key = runKey(source.runId);
+    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
+    await this.#validateDispatchIdentity(initial);
+    this.#validateLifecycleSource(initial, source);
+    const winner = await this.ctx.storage.transaction(async (transaction) => {
+      const run = parseRun(await transaction.get(key), source.runId);
+      this.#validateLifecycleSource(run, source);
+      this.#validateTerminalRecord(run, candidate);
+      if (run.terminal !== null) return run.terminal;
+      if (run.desired === "cancelled" || run.desired === "skipped") invariant();
+      run.terminal = candidate;
+      await transaction.put(key, run);
+      return candidate;
+    });
+    return winner;
+  }
+
+  async readTerminal(sourceValue: GitHubRunSource): Promise<TerminalRecord | undefined> {
+    const source = parseGitHubRunSource(sourceValue);
+    const run = parseRun(await this.ctx.storage.get(runKey(source.runId)), source.runId);
+    await this.#validateDispatchIdentity(run);
+    this.#validateLifecycleSource(run, source);
+    return run.terminal ?? undefined;
+  }
+
+  async current(sourceValue: GitHubRunSource): Promise<boolean> {
+    const source = parseGitHubRunSource(sourceValue);
+    const run = parseRun(await this.ctx.storage.get(runKey(source.runId)), source.runId);
+    await this.#validateDispatchIdentity(run);
+    this.#validateLifecycleSource(run, source);
+    const generation = await this.ctx.storage.get(generationStorageKey(run.activeKey));
+    if (!positiveInteger(generation) || generation < run.generation) invariant();
+    const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
+    const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
+    return (
+      generation === run.generation &&
+      active?.runId === run.runId &&
+      active.generation === run.generation
+    );
+  }
+
+  async publishTerminal(request: {
+    readonly source: GitHubRunSource;
+    readonly finalization: Finalization;
+    readonly diagnostic: FailureDiagnostic | null;
+  }): Promise<void> {
+    if (!isRecord(request) || !exactKeys(request, ["source", "finalization", "diagnostic"])) {
+      invariant();
+    }
+    const source = parseGitHubRunSource(request.source);
+    const finalization = finalizationOf(request.finalization);
+    const diagnostic = diagnosticOf(request.diagnostic);
+    if (finalization.outcome !== "failure" && diagnostic !== null) invariant();
+    const now = await this.#now();
+    const key = runKey(source.runId);
+    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
+    await this.#validateDispatchIdentity(initial);
+    this.#validateLifecycleSource(initial, source);
+    await this.ctx.storage.transaction(async (transaction) => {
+      const run = parseRun(await transaction.get(key), source.runId);
+      this.#validateLifecycleSource(run, source);
+      if (
+        run.terminal === null ||
+        run.terminal.claimId !== finalization.claimId ||
+        run.terminal.outcome !== finalization.outcome
+      ) {
+        invariant();
+      }
+      if (run.terminalPublished) {
+        if (!sameFailureDiagnostic(run.diagnostic, diagnostic)) invariant();
+        return;
+      }
+      const oldPending = pendingKey(run.nextAttemptAt, run.runId);
+      const wasPending = isPending(run);
+      run.terminalPublished = true;
+      run.diagnostic = diagnostic;
+      run.desired = finalization.outcome;
+      run.retryCount = 0;
+      run.nextAttemptAt = now;
+      if (wasPending) await transaction.delete(oldPending);
+      await transaction.put(key, run);
+      if (isPending(run)) {
+        await transaction.put(pendingKey(now, run.runId), {
+          kind: "pending",
+          runId: run.runId,
+          dueAt: now,
+        } satisfies PendingRecord);
+      }
+    });
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   async alarm(): Promise<void> {
@@ -792,26 +992,6 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       }
     }
     await this.#scheduleNextAlarm(now);
-  }
-
-  async seedForTest(entries: Record<string, unknown>): Promise<void> {
-    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
-    await this.ctx.storage.put(entries);
-  }
-
-  async alarmResultForTest(): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: string }
-  > {
-    if (!this.env.RUNWAY_GITHUB_CLOCK) invariant();
-    try {
-      await this.alarm();
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : "invalid GitHub coordinator state",
-      };
-    }
   }
 
   async #now(): Promise<number> {
@@ -849,7 +1029,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       if (run.workflowId !== ref.workflow || run.delivery.deliveryId !== entry.deliveryId)
         invariant();
       await this.#validateDispatchIdentity(run);
-      if (run.expiresAt <= now && (run.desired === "skipped" || !isPending(run))) {
+      if (run.expiresAt <= now && isExternallyTerminal(run)) {
         const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
         const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
         if (active?.runId !== run.runId) {
@@ -880,6 +1060,13 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (
       source.runId !== run.runId ||
       source.generation !== run.generation ||
+      source.admission.type !== run.delivery.event.type ||
+      source.admission.defaultRef !== run.delivery.defaultRef ||
+      (source.admission.type === "push" &&
+        (run.delivery.event.type !== "push" || source.admission.ref !== run.delivery.event.ref)) ||
+      (source.admission.type === "pull_request" &&
+        (run.delivery.event.type !== "pull_request" ||
+          source.admission.number !== run.delivery.event.number)) ||
       source.deliveryId !== run.delivery.deliveryId ||
       source.installationId !== run.delivery.installationId ||
       source.commit !== run.delivery.event.sha ||
@@ -893,6 +1080,19 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     }
   }
 
+  #validateTerminalRecord(run: RunRecord, record: TerminalRecord): void {
+    if (
+      record.accountId !== run.accountId ||
+      record.repositoryId !== `github:${run.delivery.checkoutRepository.id}` ||
+      record.workflowId !== run.workflowId ||
+      record.runId !== run.runId ||
+      record.trustId !== `github:${run.delivery.checkoutRepository.id}` ||
+      record.generation !== run.generation
+    ) {
+      invariant();
+    }
+  }
+
   async #validatedRunForEffect(entry: PendingRecord): Promise<RunRecord> {
     const run = parseRun(await this.ctx.storage.get(runKey(entry.runId)), entry.runId);
     if (run.nextAttemptAt !== entry.dueAt || !isPending(run)) invariant();
@@ -901,7 +1101,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     if (!positiveInteger(generation) || generation < run.generation) invariant();
     const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
     const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
-    if (run.desired !== "cancelled" && run.desired !== "skipped") {
+    if (run.desired !== "cancelled" && run.desired !== "skipped" && run.terminal === null) {
       if (
         generation !== run.generation ||
         active?.runId !== run.runId ||
@@ -1186,11 +1386,13 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       const token = (await this.#token(run, "checks")).token;
       run = await this.#getRun(key, run);
       if (run.desired !== desired || run.checkRunId === null) return;
+      const output = desired === "failure" ? checkOutput(run.diagnostic) : undefined;
       await this.#provider().completeCheck({
         token,
         repository: run.delivery.checkRepository,
         checkRunId: run.checkRunId,
         conclusion: desired,
+        ...(output ? { output } : {}),
       });
       run = await this.#getRun(key, run);
       if (run.desired !== desired) return;
@@ -1216,6 +1418,18 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         deliveryId: run.delivery.deliveryId,
         runId: run.runId,
         generation: run.generation,
+        admission:
+          run.delivery.event.type === "push"
+            ? {
+                type: "push",
+                ref: run.delivery.event.ref,
+                defaultRef: run.delivery.defaultRef,
+              }
+            : {
+                type: "pull_request",
+                number: run.delivery.event.number,
+                defaultRef: run.delivery.defaultRef,
+              },
         check: {
           id: run.checkRunId,
           name: run.checkName,

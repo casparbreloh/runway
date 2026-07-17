@@ -24,7 +24,10 @@ export const fetchWorkersDev = async (
   for (let attempt = 1; attempt <= 60; attempt += 1) {
     const response = await fetch(input, init);
     const text = await response.text();
-    const startupMiss = response.status === 404 && text.includes("There is nothing here yet");
+    const startupMiss =
+      (response.status === 404 && text.includes("There is nothing here yet")) ||
+      (response.status === 500 &&
+        (text.includes("Script not found") || text.includes("internal error; reference =")));
     if (!startupMiss) return { status: response.status, text };
     if (attempt === 60 || Date.now() >= deadline) {
       throw new Error(`workers.dev did not become reachable: ${text.slice(0, 1024)}`);

@@ -9,9 +9,16 @@ export type CloudflareApi = {
     list(): Promise<unknown>;
   };
   workers: {
+    routes: {
+      create(params: { zone_id: string; pattern: string; script: string }): Promise<unknown>;
+      list(params: { zone_id: string }): Promise<unknown>;
+      get(routeId: string, params: { zone_id: string }): Promise<unknown>;
+      delete(routeId: string, params: { zone_id: string }): Promise<unknown>;
+    };
     scripts: {
       list(params: { account_id: string }): Promise<unknown>;
       update: AsyncMethod<Cloudflare["workers"]["scripts"]["update"]>;
+      delete(scriptName: string, params: { account_id: string; force?: boolean }): Promise<unknown>;
       secrets: {
         list(scriptName: string, params: { account_id: string }): Promise<unknown>;
         bulkUpdate(scriptName: string, params: unknown): Promise<unknown>;
@@ -27,21 +34,40 @@ export type CloudflareApi = {
           params: { account_id: string },
         ): Promise<unknown>;
       };
+      deployments: {
+        list(scriptName: string, params: { account_id: string }): Promise<unknown>;
+      };
       schedules: {
         update: AsyncMethod<Cloudflare["workers"]["scripts"]["schedules"]["update"]>;
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
       };
       subdomain: {
         create: AsyncMethod<Cloudflare["workers"]["scripts"]["subdomain"]["create"]>;
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      scriptAndVersionSettings: {
+        get(scriptName: string, params: { account_id: string }): Promise<unknown>;
       };
     };
     subdomains: {
       get(params: { account_id: string }): Promise<unknown>;
     };
   };
+  durableObjects: {
+    namespaces: {
+      list(params: { account_id: string }): Promise<unknown>;
+    };
+  };
   workflows: {
     update: AsyncMethod<Cloudflare["workflows"]["update"]>;
     list(params: { account_id: string }): Promise<unknown>;
     delete: AsyncMethod<Cloudflare["workflows"]["delete"]>;
+    versions: {
+      list(workflowName: string, params: { account_id: string }): Promise<unknown>;
+    };
+  };
+  zones: {
+    list(params: { account: { id: string }; per_page?: number }): Promise<unknown>;
   };
   containers: {
     applications: {
@@ -51,6 +77,7 @@ export type CloudflareApi = {
         applicationId: string,
         params: { account_id: string; body: unknown },
       ): Promise<unknown>;
+      delete(applicationId: string, params: { account_id: string }): Promise<unknown>;
     };
     rollouts: {
       create(
@@ -62,17 +89,46 @@ export type CloudflareApi = {
         rolloutId: string,
         params: { account_id: string },
       ): Promise<unknown>;
+      list(applicationId: string, params: { account_id: string }): Promise<unknown>;
     };
   };
   r2: {
     buckets: {
+      list(params: { account_id: string }): Promise<unknown>;
       get(bucketName: string, params: { account_id: string }): Promise<unknown>;
       create(params: { account_id: string; name: string }): Promise<unknown>;
+      delete(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      lifecycle: {
+        get(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      cors: {
+        get(bucketName: string, params: { account_id: string }): Promise<unknown>;
+      };
+      domains: {
+        managed: {
+          list(bucketName: string, params: { account_id: string }): Promise<unknown>;
+        };
+        custom: {
+          list(bucketName: string, params: { account_id: string }): Promise<unknown>;
+        };
+      };
       objects: {
         upload(
           bucketName: string,
           objectKey: string,
           body: Uint8Array,
+          params: { account_id: string },
+          options?: { headers?: Readonly<Record<string, string>> },
+        ): Promise<unknown>;
+        list(bucketName: string, params: { account_id: string; prefix?: string }): Promise<unknown>;
+        get(
+          bucketName: string,
+          objectKey: string,
+          params: { account_id: string },
+        ): Promise<unknown>;
+        delete(
+          bucketName: string,
+          objectKey: string,
           params: { account_id: string },
         ): Promise<unknown>;
       };
@@ -80,32 +136,56 @@ export type CloudflareApi = {
   };
 };
 
-export const defaultClient = (apiToken: string): CloudflareApi => {
-  const cf = new Cloudflare({ apiToken });
+export const defaultClient = (
+  apiToken: string,
+  request: typeof globalThis.fetch = globalThis.fetch,
+): CloudflareApi => {
+  const cf = new Cloudflare({ apiToken, timeout: 15_000 });
   const containerRequest = async (
     accountId: string,
     path: string,
     init: { method?: string; body?: unknown } = {},
   ): Promise<unknown> => {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers${path}`,
-      {
-        method: init.method ?? "GET",
-        headers: {
-          authorization: `Bearer ${apiToken}`,
-          ...(init.body ? { "content-type": "application/json" } : {}),
-        },
-        ...(init.body ? { body: JSON.stringify(init.body) } : {}),
-      },
-    );
-    const text = await response.text();
-    if (!response.ok) throw new Error(`Cloudflare Containers API ${response.status}: ${text}`);
-    return text ? (JSON.parse(text) as unknown) : undefined;
+    const method = init.method ?? "GET";
+    const attempts = method === "GET" ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      let response: Response;
+      try {
+        response = await request(
+          `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers${path}`,
+          {
+            method,
+            headers: {
+              authorization: `Bearer ${apiToken}`,
+              ...(init.body ? { "content-type": "application/json" } : {}),
+            },
+            ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+      } catch (error) {
+        if (method === "GET" && attempt < attempts - 1) continue;
+        throw new Error("Cloudflare Containers API request failed", { cause: error });
+      }
+      const text = await response.text();
+      if (response.ok) return text ? (JSON.parse(text) as unknown) : undefined;
+      if (
+        method === "GET" &&
+        attempt < attempts - 1 &&
+        (response.status === 429 || response.status >= 500)
+      ) {
+        continue;
+      }
+      throw new Error(`Cloudflare Containers API ${response.status}: ${text}`);
+    }
+    throw new Error("Cloudflare Containers API request exhausted retries");
   };
   return {
     accounts: cf.accounts,
     workers: cf.workers,
     workflows: cf.workflows,
+    zones: cf.zones,
+    durableObjects: cf.durableObjects,
     containers: {
       applications: {
         list: async ({ account_id }) => await containerRequest(account_id, "/applications"),
@@ -115,6 +195,10 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
           await containerRequest(account_id, `/applications/${applicationId}`, {
             method: "PATCH",
             body,
+          }),
+        delete: async (applicationId, { account_id }) =>
+          await containerRequest(account_id, `/applications/${applicationId}`, {
+            method: "DELETE",
           }),
       },
       rollouts: {
@@ -128,6 +212,8 @@ export const defaultClient = (apiToken: string): CloudflareApi => {
             account_id,
             `/applications/${applicationId}/rollouts/${rolloutId}`,
           ),
+        list: async (applicationId, { account_id }) =>
+          await containerRequest(account_id, `/applications/${applicationId}/rollouts`),
       },
     },
     r2: cf.r2,

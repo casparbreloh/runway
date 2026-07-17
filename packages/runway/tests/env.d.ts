@@ -6,9 +6,10 @@ declare namespace Cloudflare {
   interface Env {
     DAILY: Workflow;
     ISSUE_CREATED: Workflow;
-    RUNNER: Workflow;
+    COMMANDS: Workflow;
     SECRET_SNAPSHOT: Workflow;
     GENERATED_ISSUE_HOST: {
+      terminal(runId: string): Promise<import("../src/terminal.ts").TerminalIdentity>;
       secrets(): Promise<Readonly<Record<string, string>>>;
       captureSecrets(runId: string): Promise<string>;
       restoreSecrets(runId: string, snapshot: string): Promise<Readonly<Record<string, string>>>;
@@ -36,7 +37,7 @@ declare namespace Cloudflare {
     GITHUB_TEST_ARTIFACT: string;
     GITHUB_TEST_ARTIFACT_VERSION: string;
     RUNWAY_SECRET_SNAPSHOT_KEY: string;
-    RUNWAY_TEST_RUNNER: Service<import("./runtime-worker.ts").TestRunner>;
+    RUNWAY_TEST_SANDBOX: Service<import("./runtime-worker.ts").TestSandbox>;
     RUNWAY_GITHUB_PROVIDER: Service<import("./runtime-worker.ts").GitHubProviderProbe>;
     RUNWAY_GITHUB_WORKFLOW: Service<import("./runtime-worker.ts").GitHubWorkflowProbe>;
     RUNWAY_GITHUB_CLOCK: Service<import("./runtime-worker.ts").GitHubClockProbe>;

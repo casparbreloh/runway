@@ -57,7 +57,7 @@ const pushPayload = {
   ref: "refs/heads/main",
   after: "0123456789abcdef0123456789abcdef01234567",
   deleted: false,
-  repository: { id: 17, name: "runway", full_name: "acme/runway" },
+  repository: { id: 17, name: "runway", full_name: "acme/runway", default_branch: "main" },
   installation: { id: 29 },
 };
 
@@ -86,7 +86,7 @@ const config = {
 const pullRequestPayload = {
   action: "opened",
   number: 41,
-  repository: { id: 17, name: "runway", full_name: "acme/runway" },
+  repository: { id: 17, name: "runway", full_name: "acme/runway", default_branch: "main" },
   installation: { id: 29 },
   pull_request: {
     base: { repo: { id: 17, name: "runway", full_name: "acme/runway" } },
@@ -132,6 +132,7 @@ describe("GitHub delivery admission", () => {
       installationId: 29,
       checkRepository: repository,
       checkoutRepository: repository,
+      defaultRef: "refs/heads/main",
       event: {
         type: "push",
         repository,
@@ -264,7 +265,12 @@ describe("GitHub delivery admission", () => {
       "push",
       {
         ...pushPayload,
-        repository: { id: 18, name: "runway", full_name: "other/runway" },
+        repository: {
+          id: 18,
+          name: "runway",
+          full_name: "other/runway",
+          default_branch: "main",
+        },
       },
       config,
     ],
@@ -300,6 +306,7 @@ describe("GitHub delivery admission", () => {
           name: "runway-fork",
           fullName: "contributor/runway-fork",
         },
+        defaultRef: "refs/heads/main",
         event: {
           type: "pull_request",
           action,
@@ -319,7 +326,12 @@ describe("GitHub delivery admission", () => {
       "a different top-level repository",
       {
         ...pullRequestPayload,
-        repository: { id: 99, name: "runway", full_name: "other/runway" },
+        repository: {
+          id: 99,
+          name: "runway",
+          full_name: "other/runway",
+          default_branch: "main",
+        },
       },
     ],
     [
@@ -868,6 +880,62 @@ describe("GitHub Checks", () => {
       });
     },
   );
+
+  test("completes a failed Check with the exact bounded diagnostic output", async () => {
+    let capturedRequest: Request | undefined;
+    const output = { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" };
+    const provider = checkProviderWith(async (input, init) => {
+      capturedRequest = new Request(input, init);
+      return Response.json(
+        checkRunResponse({ status: "completed", conclusion: "failure", output }),
+      );
+    });
+
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "failure",
+        output,
+      }),
+    ).resolves.toMatchObject({ id: 991, status: "completed", conclusion: "failure" });
+    await expect(capturedRequest?.clone().json()).resolves.toEqual({
+      status: "completed",
+      conclusion: "failure",
+      output,
+    });
+  });
+
+  test("rejects invalid or mismatched Check diagnostic output", async () => {
+    const provider = checkProviderWith(async () =>
+      Response.json(
+        checkRunResponse({
+          status: "completed",
+          conclusion: "failure",
+          output: { title: "Command failed", summary: "different" },
+        }),
+      ),
+    );
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "expected" },
+      }),
+    ).rejects.toThrow("invalid GitHub Check response");
+    await expect(
+      provider.completeCheck({
+        token: checksToken,
+        repository,
+        checkRunId: 991,
+        conclusion: "success",
+        output: { title: "Command failed", summary: "forged" },
+      }),
+    ).rejects.toThrow("invalid GitHub Check request");
+  });
 
   test.each([
     [async () => new Response(`denied ${checksToken}`, { status: 403 })],

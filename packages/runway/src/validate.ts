@@ -1,5 +1,6 @@
+import type { Registry } from "./registry.ts";
 import { secretNameOf } from "./secrets.ts";
-import type { Registry, WebhookTimestamp, WebhookTrigger } from "./types.ts";
+import type { WebhookTimestamp, WebhookTrigger } from "./trigger.ts";
 
 const timestampEqual = (a?: WebhookTimestamp, b?: WebhookTimestamp): boolean =>
   a?.source === b?.source && a?.field === b?.field && a?.toleranceMs === b?.toleranceMs;

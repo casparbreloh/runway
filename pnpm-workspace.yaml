@@ -13,6 +13,7 @@ catalog:
   "@standard-schema/spec": ^1.1.0
   "@types/node": 25.6.0
   "@typescript/native-preview": 7.0.0-dev.20260506.1
+  aws4fetch: 1.0.20
   citty: ^0.2.2
   cloudflare: ^6.3.0
   esbuild: ^0.28.0

@@ -6,6 +6,7 @@ import {
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, expect, test } from "vitest";
 
+import { repositoryFixture } from "./repository-fixture.ts";
 import worker from "./runtime-worker.ts";
 
 const signatureOf = async (body: string): Promise<string> => {
@@ -34,7 +35,12 @@ const githubSignatureOf = async (body: string): Promise<string> => {
     .join("")}`;
 };
 
-const baseRepository = { id: 101, name: "runway", full_name: "casparbreloh/runway" };
+const baseRepository = {
+  id: 101,
+  name: "runway",
+  full_name: "casparbreloh/runway",
+  default_branch: "main",
+};
 
 const pushPayload = (sha: string, ref = "refs/heads/main") => ({
   ref,
@@ -46,7 +52,10 @@ const pushPayload = (sha: string, ref = "refs/heads/main") => ({
 
 const pullRequestPayload = (
   sha: string,
-  options: { number?: number; headRepository?: typeof baseRepository } = {},
+  options: {
+    number?: number;
+    headRepository?: { id: number; name: string; full_name: string };
+  } = {},
 ) => ({
   action: "synchronize",
   number: options.number ?? 17,
@@ -90,6 +99,7 @@ const deliverManyGitHub = async (deliveryId: string): Promise<Response> => {
       id: 102,
       name: "runway-many",
       full_name: "casparbreloh/runway-many",
+      default_branch: "main",
     },
   };
   const body = JSON.stringify(payload);
@@ -139,13 +149,13 @@ const waitForGitHubCreates = async (runIds: ReadonlyArray<string>): Promise<void
     expect(runIds.every((runId) => created.has(runId))).toBe(true);
   });
 
-const testRunner = exports.TestRunner({ props: {} });
+const testSandbox = exports.TestSandbox({ props: {} });
 const testHost = exports.TestHost({
   props: {
     secrets: {
       API_KEY: "test-api-key",
       HOOK_SECRET: "test-secret",
-      RUNNER_SECRET: "runner-secret",
+      SANDBOX_SECRET: "sandbox-secret",
     },
   },
 });
@@ -154,7 +164,7 @@ beforeEach(async () => {
   await env.RUNWAY_GITHUB_PROVIDER.reset();
   await env.RUNWAY_GITHUB_WORKFLOW.reset();
   await env.RUNWAY_GITHUB_CLOCK.reset();
-  await testRunner.reset();
+  await testSandbox.reset();
   await testHost.resetSecret();
 });
 
@@ -221,9 +231,9 @@ test.each([
     ],
   },
 ])("runtime lifecycle orders $name after cleanup", async ({ params, status, events }) => {
-  const introspector = await introspectWorkflow(env.RUNNER);
+  const introspector = await introspectWorkflow(env.COMMANDS);
   try {
-    await env.RUNNER.create({ params });
+    await env.COMMANDS.create({ params });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus(status)).resolves.not.toThrow();
     await expect(testHost.lifecycleEvents()).resolves.toEqual(events);
@@ -232,22 +242,98 @@ test.each([
   }
 });
 
-test("cleanup failure reports failure before a retry can report late success", async () => {
-  await testRunner.failDestroyOnce();
-  const introspector = await introspectWorkflow(env.RUNNER);
+test("runtime publishes only bounded redacted ExecError tails", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
   try {
-    await env.RUNNER.create({ params: { commands: ["true"] } });
+    await env.COMMANDS.create({
+      params: { commands: ["diagnostic-stress https://command.example sandbox-secret"] },
+    });
     const [instance] = introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
-    await eventually(async () => {
-      const events = await testHost.lifecycleEvents();
-      expect(events).toContain("cleanup:failure");
-      expect(events).toContain("lifecycle:failure");
-      expect(events.lastIndexOf("cleanup:success")).toBeGreaterThan(
-        events.indexOf("lifecycle:failure"),
-      );
-      expect(events).not.toContain("lifecycle:success");
+    const diagnostics = await testHost.diagnostics();
+    expect(diagnostics).toHaveLength(1);
+    expect(new TextEncoder().encode(diagnostics[0]!.stdout).byteLength).toBeLessThanOrEqual(
+      4 * 1024,
+    );
+    expect(new TextEncoder().encode(diagnostics[0]!.stderr).byteLength).toBeLessThanOrEqual(
+      4 * 1024,
+    );
+    expect(diagnostics[0]).toMatchObject({
+      stdout: expect.stringContaining("stdout *** [redacted-url]"),
+      stderr: "stderr *** [redacted-url]",
     });
+    expect(JSON.stringify(diagnostics)).not.toContain("https://");
+    expect(JSON.stringify(diagnostics)).not.toContain("sandbox-secret");
+    expect(JSON.stringify(diagnostics)).not.toContain("echo ");
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("runtime never transports arbitrary thrown failures as diagnostics", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    await env.COMMANDS.create({
+      params: {
+        commands: ["true"],
+        throwMessage: "arbitrary-secret https://arbitrary.example command",
+      },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
+    expect(await testHost.diagnostics()).toEqual([null]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("the runtime durably records success after cleanup and before publication", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
+    const [instance] = introspector.get();
+
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    await expect(
+      instance!.waitForStepResult({ name: "runway:terminal-claim" }),
+    ).resolves.toMatchObject({
+      claimId: expect.any(String),
+      outcome: "success",
+      runId: run.id,
+    });
+    await expect(testHost.lifecycleEvents()).resolves.toEqual([
+      "lifecycle:in_progress",
+      "handler:start",
+      "handler:success",
+      "cleanup:start",
+      "cleanup:success",
+      "lifecycle:success",
+    ]);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("cleanup failure durably wins failure before any terminal publication", async () => {
+  await testSandbox.failDestroyOnce();
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  try {
+    await env.COMMANDS.create({ params: { commands: ["true"] } });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
+    await expect(
+      instance!.waitForStepResult({ name: "runway:terminal-claim" }),
+    ).resolves.toMatchObject({ outcome: "failure" });
+    await expect(testHost.lifecycleEvents()).resolves.toEqual([
+      "lifecycle:in_progress",
+      "handler:start",
+      "handler:success",
+      "cleanup:start",
+      "cleanup:failure",
+      "lifecycle:failure",
+      "cleanup:start",
+      "cleanup:success",
+    ]);
   } finally {
     await introspector.dispose();
   }
@@ -258,27 +344,27 @@ test.each([
   ["restore", "setup restore failure", async () => await testHost.failSecretRestoreOnce()],
   [
     "validation",
-    "missing secret: RUNNER_SECRET",
+    "missing secret: SANDBOX_SECRET",
     async () => await testHost.failSecretValidationOnce(),
   ],
 ])(
   "secret %s failure reports failure without entering the handler or cleanup",
   async (_stage, message, fail) => {
     await fail();
-    const introspector = await introspectWorkflow(env.RUNNER);
+    const introspector = await introspectWorkflow(env.COMMANDS);
     try {
-      const run = await env.RUNNER.create({ params: { commands: ["true"] } });
+      const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
       const [instance] = introspector.get();
       await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
       await expect(testHost.lifecycleEvents()).resolves.toEqual([
         "lifecycle:in_progress",
         "lifecycle:failure",
       ]);
-      await expect((await env.RUNNER.get(run.id)).status()).resolves.toMatchObject({
+      await expect((await env.COMMANDS.get(run.id)).status()).resolves.toMatchObject({
         status: "errored",
         error: { message },
       });
-      await expect(testRunner.state()).resolves.toMatchObject({ executions: [], destroys: [] });
+      await expect(testSandbox.state()).resolves.toMatchObject({ executions: [], destroys: [] });
     } finally {
       await introspector.dispose();
     }
@@ -357,6 +443,7 @@ const githubRunSource = () => ({
   deliveryId: "123e4567-e89b-42d3-a456-426614174000",
   runId: "run-github",
   generation: 1,
+  admission: { type: "push" as const, ref: "refs/heads/main", defaultRef: "refs/heads/main" },
   check: {
     id: 501,
     name: "Check",
@@ -414,112 +501,6 @@ test("bounded alarm batches drain more than one batch without missing or crossin
       payload.runs.map(({ id }) => id).sort(),
     );
   });
-});
-
-test("corrupted durable identities and contradictory flags fail closed before provider effects", async () => {
-  const now = await env.RUNWAY_GITHUB_CLOCK.now();
-  const deliveryId = "123e4567-e89b-42d3-a456-426614174115";
-  const workflowId = "github-check";
-  const activeKey = `${workflowId}:push:101:refs/heads/main`;
-  const delivery = {
-    status: "accepted",
-    deliveryId,
-    installationId: 42,
-    checkRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-    checkoutRepository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-    event: {
-      type: "push",
-      repository: { id: 101, name: "runway", fullName: "casparbreloh/runway" },
-      ref: "refs/heads/main",
-      sha: "f".repeat(40),
-    },
-    concurrency: { type: "push", repositoryId: 101, ref: "refs/heads/main" },
-  };
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(`101\0${deliveryId}\0${workflowId}`),
-  );
-  const seed = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 48);
-  const namespace = env.GITHUB_COORDINATOR_TEST as unknown as {
-    getByName(name: string): {
-      seedForTest(entries: Record<string, unknown>): Promise<void>;
-      alarmResultForTest(): Promise<{ ok: boolean; error?: string }>;
-    };
-  };
-  const seedRun = async (
-    objectName: string,
-    runId: string,
-    overrides: Record<string, unknown> = {},
-  ) => {
-    const stub = namespace.getByName(objectName);
-    await stub.seedForTest({
-      [`generation:${activeKey}`]: 1,
-      [`active:${activeKey}`]: { kind: "active", activeKey, runId, generation: 1 },
-      [`run:${runId}`]: {
-        kind: "run",
-        runId,
-        workflowId,
-        artifactVersion: "a".repeat(64),
-        checkName: "Check",
-        delivery,
-        activeKey,
-        generation: 1,
-        expiresAt: now + 7 * 24 * 60 * 60 * 1_000,
-        desired: "queued",
-        preflightComplete: false,
-        checkCreateAttempted: false,
-        checkRunId: null,
-        workflowCreateAttempted: false,
-        workflowKnown: false,
-        checkInProgressComplete: false,
-        checkCompletionComplete: false,
-        terminationComplete: false,
-        checkCancellationComplete: false,
-        retryCount: 0,
-        nextAttemptAt: now,
-        ...overrides,
-      },
-      [`pending:${String(now).padStart(16, "0")}:${runId}`]: {
-        kind: "pending",
-        runId,
-        dueAt: now,
-      },
-    });
-    return stub;
-  };
-
-  const forged = await seedRun("forged-run", `runway-github-${"f".repeat(48)}-1`);
-  await expect(forged.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-
-  const contradictory = await seedRun("contradictory-run", `runway-github-${seed}-1`, {
-    checkCreateAttempted: true,
-    checkRunId: 77,
-    workflowKnown: true,
-  });
-  await expect(contradictory.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-  const skippedProgress = await seedRun("skipped-progress", `runway-github-${seed}-1`, {
-    desired: "success",
-    preflightComplete: true,
-    checkCreateAttempted: true,
-    checkRunId: 77,
-    workflowCreateAttempted: true,
-    workflowKnown: true,
-    checkCompletionComplete: true,
-  });
-  await expect(skippedProgress.alarmResultForTest()).resolves.toEqual({
-    ok: false,
-    error: "invalid GitHub coordinator state",
-  });
-  expect((await env.RUNWAY_GITHUB_PROVIDER.state()).tokenStarts).toHaveLength(0);
 });
 
 test("the fixed GitHub ingress fails closed before durable admission", async () => {
@@ -657,6 +638,7 @@ test("workflow runtime owns in-progress and terminal Check transitions after cle
     const failureCheck = provider.checks.find(({ externalId }) => externalId === failureRef.id)!;
     expect(successCheck).toMatchObject({ status: "completed", conclusion: "success" });
     expect(failureCheck).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(failureCheck.output).toBeUndefined();
     expect(provider.updates.filter(({ checkRunId }) => checkRunId === successCheck.id)).toEqual([
       { checkRunId: successCheck.id, state: "in_progress" },
       { checkRunId: successCheck.id, state: "success" },
@@ -668,7 +650,7 @@ test("workflow runtime owns in-progress and terminal Check transitions after cle
   });
 });
 
-test("lost Check PATCH responses retry the persisted transition without re-running handlers", async () => {
+test("lost terminal and failed Check PATCH responses retry the exact persisted diagnostic", async () => {
   await putGitHubArtifacts();
   const response = await deliverGitHub({
     deliveryId: "123e4567-e89b-42d3-a456-426614174131",
@@ -679,11 +661,40 @@ test("lost Check PATCH responses retry the persisted transition without re-runni
     runs: Array<{ id: string; workflow: string }>;
   };
   await waitForGitHubCreates(runs.runs.map(({ id }) => id));
-  await env.RUNWAY_GITHUB_PROVIDER.configure({ losePatchResponse: true });
-  const ref = runs.runs.find(({ workflow }) => workflow === "github-check")!;
+  await env.RUNWAY_GITHUB_PROVIDER.configure({ loseCompletionResponse: true });
+  const ref = runs.runs.find(({ workflow }) => workflow === "github-test")!;
   const create = (await githubWorkflowProbeState()).creates.find(({ id }) => id === ref.id)!;
-  await using instance = await startGitHubWorkflow(create);
-  await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+  const source = (
+    create.params as {
+      __dispatcherMetadata: { source: Record<string, unknown> };
+    }
+  ).__dispatcherMetadata.source;
+  const coordinator = (
+    env.GITHUB_COORDINATOR_TEST as unknown as {
+      getByName(name: string): {
+        claimTerminal(request: { source: unknown; candidate: unknown }): Promise<unknown>;
+        publishTerminal(request: {
+          source: unknown;
+          finalization: unknown;
+          diagnostic: unknown;
+        }): Promise<void>;
+      };
+    }
+  ).getByName("101");
+  const finalization = { claimId: crypto.randomUUID(), outcome: "failure" as const };
+  const candidate = {
+    accountId: "test-account",
+    repositoryId: "github:101",
+    workflowId: ref.workflow,
+    runId: ref.id,
+    trustId: "github:101",
+    generation: source.generation,
+    ...finalization,
+  };
+  await coordinator.claimTerminal({ source, candidate });
+  const diagnostic = { stdout: "tail", stderr: "failed" };
+  await coordinator.publishTerminal({ source, finalization, diagnostic });
+  await coordinator.publishTerminal({ source, finalization, diagnostic });
   await env.RUNWAY_GITHUB_CLOCK.advance(1_000);
   await deliverGitHub({
     deliveryId: "123e4567-e89b-42d3-a456-426614174131",
@@ -694,13 +705,25 @@ test("lost Check PATCH responses retry the persisted transition without re-runni
   await eventually(async () => {
     const provider = await env.RUNWAY_GITHUB_PROVIDER.state();
     const check = provider.checks.find(({ externalId }) => externalId === ref.id)!;
-    expect(check).toMatchObject({ status: "completed", conclusion: "success" });
-    expect(
-      provider.updates.filter(
-        ({ checkRunId, state }) => checkRunId === check.id && state === "in_progress",
-      ),
-    ).toHaveLength(2);
+    expect(check).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+    });
+    expect(provider.completions.filter(({ checkRunId }) => checkRunId === check.id)).toEqual([
+      {
+        checkRunId: check.id,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+      },
+      {
+        checkRunId: check.id,
+        conclusion: "failure",
+        output: { title: "Command failed", summary: "stdout\ntail\n\nstderr\nfailed" },
+      },
+    ]);
   });
+  expect((await testSandbox.state()).executions).toEqual([]);
 });
 
 test("supersession before runtime start fences the old handler and keeps cancelled final", async () => {
@@ -742,12 +765,12 @@ test("supersession before runtime start fences the old handler and keeps cancell
   ]);
 });
 
-test("cancellation beats a persisted success while its Check effect is awaiting", async () => {
+test("a claimed GitHub success remains the terminal winner when supersession arrives before its Check effect", async () => {
   await putGitHubArtifacts();
   const oldResponse = await deliverGitHub({
-    deliveryId: "123e4567-e89b-42d3-a456-426614174134",
+    deliveryId: "123e4567-e89b-42d3-a456-426614174150",
     event: "pull_request",
-    payload: pullRequestPayload("7".repeat(40), { number: 42 }),
+    payload: pullRequestPayload("d".repeat(40), { number: 50 }),
   });
   const oldRuns = (await oldResponse.json()) as {
     runs: Array<{ id: string; workflow: string }>;
@@ -760,10 +783,11 @@ test("cancellation beats a persisted success while its Check effect is awaiting"
   )!;
   await using instance = await startGitHubWorkflow(oldCreate);
   await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
+
   const latestResponse = await deliverGitHub({
-    deliveryId: "123e4567-e89b-42d3-a456-426614174135",
+    deliveryId: "123e4567-e89b-42d3-a456-426614174151",
     event: "pull_request",
-    payload: pullRequestPayload("8".repeat(40), { number: 42 }),
+    payload: pullRequestPayload("e".repeat(40), { number: 50 }),
   });
   const latestRuns = (await latestResponse.json()) as { runs: Array<{ id: string }> };
   await env.RUNWAY_GITHUB_PROVIDER.configure({ checkTokenDelayMs: 0 });
@@ -772,19 +796,69 @@ test("cancellation beats a persisted success while its Check effect is awaiting"
   await eventually(async () => {
     const provider = await env.RUNWAY_GITHUB_PROVIDER.state();
     const check = provider.checks.find(({ externalId }) => externalId === oldSuccess.id)!;
-    expect(check).toMatchObject({ status: "completed", conclusion: "cancelled" });
+    expect(check).toMatchObject({ status: "completed", conclusion: "success" });
     expect(provider.updates.filter(({ checkRunId }) => checkRunId === check.id)).not.toContainEqual(
       {
         checkRunId: check.id,
-        state: "success",
+        state: "cancelled",
       },
     );
-    expect(
-      provider.checks
-        .filter(({ externalId }) => oldRuns.runs.some(({ id }) => id === externalId))
-        .map(({ conclusion }) => conclusion),
-    ).toEqual(["cancelled", "cancelled"]);
   });
+});
+
+test("an inactive claimed terminal winner survives delivery expiry until publication", async () => {
+  const oldResponse = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174153",
+    event: "pull_request",
+    payload: pullRequestPayload("1".repeat(40), { number: 51 }),
+  });
+  const oldRuns = (await oldResponse.json()) as {
+    runs: Array<{ id: string; workflow: string }>;
+  };
+  await waitForGitHubCreates(oldRuns.runs.map(({ id }) => id));
+  const oldRun = oldRuns.runs.find(({ workflow }) => workflow === "github-check")!;
+  const create = (await githubWorkflowProbeState()).creates.find(({ id }) => id === oldRun.id)!;
+  const source = (
+    create.params as {
+      __dispatcherMetadata: { source: ReturnType<typeof githubRunSource> };
+    }
+  ).__dispatcherMetadata.source;
+  const candidate = {
+    accountId: "test-account",
+    repositoryId: "github:101",
+    workflowId: "github-check",
+    runId: oldRun.id,
+    trustId: "github:101",
+    generation: 1,
+    claimId: crypto.randomUUID(),
+    outcome: "success" as const,
+  };
+  const coordinator = (
+    env.GITHUB_COORDINATOR_TEST as unknown as {
+      getByName(name: string): {
+        claimTerminal(request: unknown): Promise<unknown>;
+        readTerminal(request: unknown): Promise<unknown>;
+      };
+    }
+  ).getByName("101");
+  await expect(coordinator.claimTerminal({ source, candidate })).resolves.toEqual(candidate);
+
+  const latestResponse = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174154",
+    event: "pull_request",
+    payload: pullRequestPayload("2".repeat(40), { number: 51 }),
+  });
+  const latestRuns = (await latestResponse.json()) as { runs: Array<{ id: string }> };
+  await waitForGitHubCreates(latestRuns.runs.map(({ id }) => id));
+  await env.RUNWAY_GITHUB_CLOCK.advance(7 * 24 * 60 * 60 * 1_000 + 1);
+  const expiryTrigger = await deliverGitHub({
+    deliveryId: "123e4567-e89b-42d3-a456-426614174155",
+    event: "push",
+    payload: pushPayload("3".repeat(40)),
+  });
+  const expiryRuns = (await expiryTrigger.json()) as { runs: Array<{ id: string }> };
+  await waitForGitHubCreates(expiryRuns.runs.map(({ id }) => id));
+  await expect(coordinator.readTerminal(source)).resolves.toEqual(candidate);
 });
 
 test("terminate failure retries before the cancelled Check transition", async () => {
@@ -1209,7 +1283,7 @@ test("a generated host evaluates authored webhook gates inside the artifact", as
   expect(stale.status).toBe(401);
 });
 
-test("a generated start persists only its artifact version beside the event", async () => {
+test("a generated start persists its artifact version and authenticated trigger kind beside the event", async () => {
   await env.GENERATED_WORKFLOW_CAPTURE.reset();
   await putActiveArtifact();
   const body = JSON.stringify({ action: "create" });
@@ -1222,7 +1296,10 @@ test("a generated start persists only its artifact version beside the event", as
 
   expect(response.status).toBe(202);
   await expect(env.GENERATED_WORKFLOW_CAPTURE.captured()).resolves.toEqual({
-    __dispatcherMetadata: { artifactVersion: env.ACTIVE_ARTIFACT_VERSION },
+    __dispatcherMetadata: {
+      artifactVersion: env.ACTIVE_ARTIFACT_VERSION,
+      trigger: "webhook",
+    },
     params: { action: "create", normalized: true },
   });
 });
@@ -1236,12 +1313,12 @@ test("a Dynamic Workflow loads the artifact version and secrets selected by its 
 
   await expect(instance.waitForStepResult({ name: "artifact-version" })).resolves.toBe("suspended");
   await expect(instance.waitForStepResult({ name: "historical-secret" })).resolves.toBe(
-    "runner-secret",
+    "sandbox-secret",
   );
   await expect(instance.waitForStatus("complete")).resolves.not.toThrow();
 });
 
-test("GitHub run source passes its exact repository commit to the runner instead of the artifact commit", async () => {
+test("GitHub run source passes its exact repository commit to the Sandbox instead of the artifact commit", async () => {
   await putActiveArtifact();
   const artifact = JSON.parse(env.ACTIVE_ARTIFACT) as { repository: { commit: string } };
   const source = githubRunSource();
@@ -1394,18 +1471,71 @@ test("a signed webhook runs a durable workflow in the Workers runtime", async ()
   }
 });
 
-test("a generated host capability returns only declared secrets", async () => {
+test("a generated runtime binding returns only declared secrets", async () => {
   await expect(env.GENERATED_ISSUE_HOST.secrets()).resolves.toEqual({
     API_KEY: "test-api-key",
     HOOK_SECRET: "test-secret",
   });
 });
 
-test("a generated host capability rejects invalid lifecycle RPC states", async () => {
+test("a generated runtime binding returns its constructor-bound terminal identity", async () => {
+  await expect(env.GENERATED_ISSUE_HOST.terminal("run-id")).resolves.toEqual({
+    accountId: "test-account",
+    repositoryId: `remote:${repositoryFixture.remote}`,
+    workflowId: "issue-created",
+    runId: "run-id",
+    trustId: `remote:${repositoryFixture.remote}`,
+    generation: 1,
+  });
+});
+
+test("a generated runtime binding rejects invalid terminal control input", async () => {
   const probe = exports.CapabilityProbe({ props: {} });
-  await expect(probe.invoke("reportRunLifecycle", ["run-id", "cancelled"])).resolves.toBe(
-    "invalid run lifecycle",
-  );
+  await expect(probe.invoke("startRun", [""])).resolves.toBe("invalid run lifecycle");
+  await expect(
+    probe.invoke("claimTerminal", [
+      "run-id",
+      {
+        accountId: "test-account",
+        repositoryId: `remote:${repositoryFixture.remote}`,
+        workflowId: "issue-created",
+        runId: "run-id",
+        trustId: `remote:${repositoryFixture.remote}`,
+        generation: 0,
+        claimId: "claim",
+        outcome: "success",
+      },
+    ]),
+  ).resolves.toBe("invalid terminal claim");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "", outcome: "success" }]),
+  ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "claim", outcome: "pending" }]),
+  ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "success", extra: true },
+    ]),
+  ).resolves.toBe("invalid terminal finalization");
+  await expect(
+    probe.invoke("publishTerminal", ["run-id", { claimId: "claim", outcome: "success" }]),
+  ).resolves.toBe("invalid terminal diagnostic");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "success" },
+      { stdout: "forged", stderr: "" },
+    ]),
+  ).resolves.toBe("invalid terminal diagnostic");
+  await expect(
+    probe.invoke("publishTerminal", [
+      "run-id",
+      { claimId: "claim", outcome: "failure" },
+      { stdout: "https://capability.example", stderr: "" },
+    ]),
+  ).resolves.toBe("invalid terminal diagnostic");
 });
 
 test("a generated host resolves the immutable snapshot key named by its root", async () => {

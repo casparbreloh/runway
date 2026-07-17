@@ -6,9 +6,9 @@ import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
 import { buildDeployment } from "./src/deploy-build.ts";
+import type { Registry } from "./src/registry.ts";
 import { secretRef } from "./src/secrets.ts";
 import { cron, github, webhook } from "./src/trigger.ts";
-import type { Registry } from "./src/types.ts";
 import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
 import { repositoryFixture } from "./tests/repository-fixture.ts";
 
@@ -25,7 +25,7 @@ const generatedHostRegistry: Registry = [
         secret: secretRef("HOOK_SECRET"),
         signatureHeader: "x-signature",
       }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
 ];
@@ -37,7 +37,7 @@ const suspendedRunRegistry: Registry = [
     def: {
       ...generatedHostRegistry[0]!.def,
       id: "suspended-workflow",
-      secrets: ["RUNNER_SECRET"],
+      secrets: ["SANDBOX_SECRET"],
       trigger: cron("0 0 * * *"),
     },
   },
@@ -60,7 +60,7 @@ const githubRegistry: Registry = [
       id: "github-check",
       secrets: [],
       trigger: github({ checkName: "Check", events: githubEvents }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
   {
@@ -71,7 +71,7 @@ const githubRegistry: Registry = [
       id: "github-test",
       secrets: [],
       trigger: github({ checkName: "Test", events: githubEvents }),
-      handler: async () => {},
+      run: async () => {},
     },
   },
 ];
@@ -87,7 +87,7 @@ const manyGithubRegistry: Registry = Array.from({ length: 40 }, (_, index) => ({
       checkName: `Batch ${index}`,
       events: [{ type: "push", branches: ["main"] }],
     }),
-    handler: async () => {},
+    run: async () => {},
   },
 }));
 
@@ -95,18 +95,21 @@ export default defineConfig({
   plugins: [
     cloudflareTest(async () => {
       const generated = await buildDeployment(generatedHostRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const suspended = await buildDeployment(suspendedRunRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const githubHost = await buildDeployment(githubRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-github-host",
         repository: repositoryFixture,
@@ -123,6 +126,7 @@ export default defineConfig({
         ({ workflowId }) => workflowId === "github-test",
       )!;
       const manyGithubHost = await buildDeployment(manyGithubRegistry, {
+        accountId: "test-account",
         cwd: import.meta.dirname,
         scriptName: "generated-many-github-host",
         repository: repositoryFixture,
@@ -184,7 +188,7 @@ export default defineConfig({
               bindings: {
                 API_KEY: "test-api-key",
                 HOOK_SECRET: "test-secret",
-                RUNNER_SECRET: "runner-secret",
+                SANDBOX_SECRET: "sandbox-secret",
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
                 RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -212,7 +216,7 @@ export default defineConfig({
               bindings: {
                 API_KEY: "test-api-key",
                 HOOK_SECRET: "test-secret",
-                RUNNER_SECRET: "runner-secret",
+                SANDBOX_SECRET: "sandbox-secret",
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
                 RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -354,7 +358,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
           bindings: {
             API_KEY: "raw-api-key",
             HOOK_SECRET: "test-secret",
-            RUNNER_SECRET: "raw-runner-secret",
+            SANDBOX_SECRET: "raw-sandbox-secret",
             RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
             RUNWAY_SECRET_SNAPSHOT_KEY_TEST:
               '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
@@ -384,27 +388,35 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
             },
             GENERATED_ISSUE_HOST: {
               name: "generated-runway-host",
-              entrypoint: "RunwayRunnerBinding",
+              entrypoint: "RunwaySandboxBinding",
               props: {
+                repository: repositoryFixture,
                 secretNames: ["HOOK_SECRET", "API_KEY"],
                 secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
                 snapshotScope: "generated-runway-host:issue-created:direct-capability",
+                terminal: {
+                  accountId: "test-account",
+                  repositoryId: `remote:${repositoryFixture.remote}`,
+                  workflowId: "issue-created",
+                  trustId: `remote:${repositoryFixture.remote}`,
+                  generation: 1,
+                },
               },
             },
-            RUNWAY_HOST: {
+            RUNWAY_RUNTIME: {
               name: kCurrentWorker,
               entrypoint: "TestHost",
               props: {
                 secrets: {
                   API_KEY: "test-api-key",
                   HOOK_SECRET: "test-secret",
-                  RUNNER_SECRET: "runner-secret",
+                  SANDBOX_SECRET: "sandbox-secret",
                 },
               },
             },
-            RUNWAY_TEST_RUNNER: {
+            RUNWAY_TEST_SANDBOX: {
               name: kCurrentWorker,
-              entrypoint: "TestRunner",
+              entrypoint: "TestSandbox",
             },
             RUNWAY_GITHUB_PROVIDER: {
               name: "github-effects-probe",
@@ -432,9 +444,9 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: "issue-created-test",
               className: "IssueCreatedWorkflow",
             },
-            RUNNER: {
-              name: "runner-test",
-              className: "RunnerWorkflow",
+            COMMANDS: {
+              name: "commands-test",
+              className: "CommandWorkflow",
             },
             SECRET_SNAPSHOT: {
               name: "secret-snapshot-test",
@@ -462,7 +474,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
   ],
   test: {
     name: "runway-workers",
-    include: ["tests/runner.test.ts", "tests/worker.test.ts"],
+    include: ["tests/sandbox.workers.test.ts", "tests/worker.test.ts"],
     testTimeout: 20_000,
   },
 });

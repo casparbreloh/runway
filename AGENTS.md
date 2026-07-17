@@ -1,25 +1,38 @@
 # Runway
 
-TypeScript-first general workflow infrastructure for custom triggers, scheduled work, webhooks, and
-repository automation on Cloudflare. Author workflows with
-`workflow({ id, secrets?, trigger }).handler(async (ctx, event) => { ... })` and export them from
+TypeScript-first authoring over a language-neutral workflow and repository-runner foundation on
+Cloudflare. Author workflows with
+`workflow({ id, secrets?, trigger }).run(async (run, event) => { ... })` and export them from
 `.runway/workflows/**/*.ts`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox stays internally behind the
-runner. Runway will transport caches for tools such as Turborepo and Nx rather than build its
-own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents are deferred.
+runner. Runway's generic filesystem cache transports caller-owned trees; later adapters may transport
+tool-native caches for Turborepo, Nx, and other ecosystems. Foundation source contains no package-
+manager, language-runtime, tool-preset, or dependency-graph semantics. Agents are deferred.
+
+Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 
 ## Layout
 
 - `packages/runway/` — SDK and `runway` CLI.
-  - `src/types.ts` — public contracts.
   - `src/secrets.ts` — secret references.
-  - `src/workflow.ts` — `workflow()`.
-  - `src/trigger.ts` — webhook and cron triggers.
-  - `src/ctx.ts` — `makeCtx()` and `secretsOf()`.
-  - `src/runner.ts` — internal managed command runner.
+  - `src/workflow.ts` — `workflow()` and workflow contracts.
+  - `src/trigger.ts` — webhook and cron triggers and contracts.
+  - `src/github.ts` — GitHub trigger contracts and delivery normalization.
+  - `src/registry.ts` — discovered workflow registry contracts and loading.
+  - `src/run.ts` — public `Run`, command contracts, and durable operation wiring.
+  - `src/cache.ts` — private generic cache identity, policy, refs, and publication.
+  - `src/source.ts` — exact credential-free source identity and preparation evidence.
+  - `src/sandbox.ts` — run-bound command and source lifecycle.
+  - `src/cloudflare/sandbox.ts` — Cloudflare Sandbox process and checkout implementation.
+  - `src/cloudflare/cache.ts` and `src/cloudflare/cache-snapshot.ts` — direct private transfer and
+    safe schema-2 filesystem snapshots.
+  - `src/terminal.ts` — one durable terminal winner and external terminal authority.
+  - `src/meter.ts` — bounded latency, usage, provenance, and cost estimation.
+  - `src/stack.ts` and `src/cloudflare/stack.ts` — exact desired resources and ownership receipts.
+  - `src/runtime-binding.ts` — internal Worker RPC contract.
   - `src/runtime.ts` — workflow artifact runtime adapter.
-  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runner capability.
+  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runtime binding.
   - `src/workflow-artifact.ts` — immutable content-addressed artifact contract.
   - `src/secret-snapshot.ts` — encrypted durable run-secret snapshots.
   - `src/router.ts` — webhook and cron routing.
@@ -28,8 +41,7 @@ own dependency graph. A future `step.ai()` may use Cloudflare AI Gateway. Agents
   - `src/validate.ts` — registry validation.
   - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
 - `.runway/workflows/` — Runway's own GitHub-triggered `Check` and `Test` workflows.
-- `.runway/ci.ts` and `.runway/cache/Dockerfile` — verified content-addressed bootstrap for those
-  workflows' Linux toolchain and lockfile-resolved dependencies.
+- `.runway/repository.ts` — repository-only Node/pnpm consumer built from generic exec calls.
 
 ## Commands
 
@@ -49,47 +61,52 @@ export default workflow({
         { type: "pull_request", actions: ["opened", "reopened", "synchronize"] },
       ],
     }),
-}).handler(async (ctx) => {
-  await ctx.step.exec("install", "pnpm install --frozen-lockfile");
-  await ctx.step.exec("typecheck", "pnpm typecheck");
+}).run(async (run) => {
+  await run.cache("dependencies", { key: { files: ["lockfile"] }, path: "/cache/dependencies" });
+  await run.exec("install", "./scripts/install");
+  await run.exec("check", "./scripts/check");
 });
 ```
 
 - Trigger is required and lives in the `workflow()` object.
-- Handler receives `(ctx, event)`. There is no `ctx.params`.
-- `ctx` is `{ runId, secrets, env, step: { do, exec, sleep } }`.
-- Wrap HTTP and API calls in named `step.do()` calls.
-- Use `step.exec(id, command)` for managed shell commands; options can set `cwd`, `env`, and
+- The callback receives `(run, event)`.
+- `run` is `{ runId, secrets, do, exec, cache, sleep }`.
+- Wrap HTTP and API calls in named `run.do()` calls.
+- Use `run.exec(id, command)` for managed shell commands; options can set `cwd`, `env`, and
   `timeoutMs`.
-- Step return values must be JSON-serializable and step bodies idempotent.
+- Use `run.cache(id, declaration)` before any command for one generic caller-owned filesystem tree.
+  Foundation code must not infer package-manager, runtime, lockfile, or tool semantics.
+- Durable operation return values must be JSON-serializable and operation bodies idempotent.
 - Every sleep has a caller-provided stable id.
-- Caller-provided step ids must not begin with the reserved `runway:` prefix.
+- Caller-provided operation ids are 1–128 UTF-8 bytes and must not begin with `runway:`.
 
 ## Triggers And Secrets
 
-- `webhook({ schema })` validates with Standard Schema and types the event as its output.
-- `webhook<T>(opts)` is assertion-only typing; `webhook(opts)` gives `unknown`.
+- `webhook({ path, secret, signatureHeader, schema })` validates with Standard Schema and types the
+  event as its output.
+- `webhook<T>({ path, secret, signatureHeader })` is assertion-only typing; the same required options
+  without a generic give `unknown`.
 - `.filter(typeGuard)` narrows the event and returns a new trigger.
 - `cron(expression)` types the event as `{ cron, scheduledTime }`.
 - `github({ checkName, events })` types normalized push and pull-request events and keeps App
   signatures, installation IDs, credentials, and Checks internal.
 - Declare every workflow secret, including webhook signing secrets.
-- Trigger secrets are branded name references; handler secrets are runtime strings.
+- Trigger secrets are branded name references; run secrets are runtime strings.
 - Deploy fails before upload when a declared secret is missing from env and the repo Worker.
 - GitHub App bindings are `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and
   `RUNWAY_GITHUB_WEBHOOK_SECRET`; they are internal and must not appear in workflow secrets.
 
 ## Runtime And Deployment
 
-- Runway maps `ctx.step.do(id, fn)` to Cloudflare `step.do(id, fn)` and
-  `ctx.step.exec(id, command)` to a durable, run-scoped managed command step, and
-  `ctx.step.sleep(id, ms)` to `step.sleep(id, ms)`.
+- Runway maps `run.do(id, fn)`, `run.exec(id, command)`, `run.cache(id, declaration)`, and
+  `run.sleep(id, ms)` onto durable provider operations while keeping Cloudflare's step shape private.
 - Command steps use deterministic process identities. Workflow retries reconnect to an existing
-  running or completed process while the same Sandbox survives instead of starting it again.
+  running or completed process only when placement, process, and command digest prove continuity.
+  Once a command may have started, unproven placement loss is terminal and never authorizes replay.
 - Output is streamed incrementally and only redacted 64 KiB stdout/stderr tails are returned.
 - Timeout and termination kill the command process group. Because Cloudflare rollback was `null`
   for a terminated active step in the live deployment smoke test, termination polling remains
-  internal to the runner adapter.
+  internal to the Cloudflare Sandbox implementation.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
 - Deploy stores each bundled workflow as one immutable content-addressed artifact in the shared
@@ -97,34 +114,39 @@ export default workflow({
   resumed Dynamic Workflows load that exact artifact.
 - Declared secrets are captured once per run in an encrypted durable snapshot, so secret rotation
   does not alter an active run.
-- Runway owns one repo-scoped orchestration Worker, one Worker Loader binding, one matching Dynamic
-  Workflow resource, one `RUNWAY_ARTIFACTS` binding to the shared account artifact bucket, and a
-  repo-scoped GitHub coordinator whose instances are used only when GitHub triggers are present.
+- `Stack` is the sole owner of one repo-scoped orchestration Worker, one Worker Loader binding, one
+  matching Dynamic Workflow resource, the internal container and Durable Object namespaces,
+  schedules/routes/bindings/secrets, exact owned objects, and one `RUNWAY_ARTIFACTS` binding to the
+  private shared account artifact bucket. Sync/remove re-inventory exact provider state and preserve
+  unknown or shared resources.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
   up when the run ends. Deploy captures the repository remote and exact commit inside each workflow
   artifact. GitHub deliveries provide an exact run source. Private checkout uses a purpose-scoped,
-  repository-scoped installation token only in the checkout process environment. The runner
+  repository-scoped installation token only in the checkout process environment. The Sandbox
   prepares `/workspace` before the first command and reconstructs the same commit, reminting when
   needed, after a fresh Sandbox loses its matching marker.
 - Repository recovery is deterministic reconstruction, not Sandbox workspace checkpointing. The
   Workers-runtime seam and repeatable public and authenticated live `Sandbox.destroy()` smokes
   cover forced replacement. Sandbox backup/restore still needs R2 credentials/configuration and
   object lifecycle management, so Runway does not enable a partial checkpoint layer.
-- The managed runner uses the `standard-1` container tier. Reconciliation of an existing container
-  definition must explicitly create and verify its rollout; a successful metadata update does not
-  activate changed runner capacity by itself.
-- Runway's root workflows fetch a reproducible content-addressed CI bootstrap from a dedicated
-  public R2 bucket. Verify each chunk and the complete archive before extraction. Only the Linux
-  toolchain and lockfile-resolved dependencies are public; keep artifacts, source, run data, and
-  credentials in private storage. This bootstrap does not replace the future Turborepo/Nx cache
-  transport milestone.
+- Cache schema 2 and runner ABI `runway-sandbox-v2` use private content-addressed SquashFS objects
+  with a bounded canonical hardlink trailer. Restore is staged and integrity-checked; only the
+  durable winning success may publish. Cache is not Source, a checkpoint, or a public content store.
+- The deployed Stack is named exactly `runway` and uses the digest-pinned linux/amd64 image on
+  `standard-4`. The legacy `runway-monorepo` Stack and public bootstrap bucket are deleted.
+- Runway's root workflows intentionally use plain generic exec calls. Live evidence showed that
+  transporting their whole toolchain, pnpm store, and `node_modules` trees costs more and runs slower
+  than a clean install. The generic cache foundation remains available for consumers that prove a win.
+- Cloudflare Artifacts is a possible future `Source` implementation only after repeated exact-revision
+  latency and total-cost evidence wins. It is not the cache store.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
   returns webhook URLs, including one shared `/.runway/github` ingress when configured.
-- Keep Sandbox and container deployment resources internal to the managed command runner.
-- Runway's own `Check` and `Test` workflows are the repository CI. The live evidence gate passed,
-  and this cutover deletes the duplicate GitHub Actions workflow; do not restore it without a new
-  explicit migration.
+- Keep Sandbox and container deployment resources internal to the managed command implementation.
+- Runway's own `Check` and `Test` workflows are the repository CI. At exact PR head `df10a82`, 15
+  sequential development samples produced Check P50/P95 of 39s/46s and Test P50/P95 of 87s/102s,
+  with no cache operations. The duplicate GitHub Actions workflow is deleted; do not restore a
+  fallback without a new explicit migration and evidence gate.
 
 ## Conventions
 

@@ -1,7 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, github, makeCtx, secretNameOf, webhook, workflow } from "runway";
-import type { CronParams, ExecOptions, ExecResult, Primitives, SecretRef } from "runway";
+import { cron, github, webhook, workflow } from "runway";
+import type { CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
+
+import { makeRun } from "../src/run.ts";
+import { secretNameOf } from "../src/secrets.ts";
 
 const secretRef = <N extends string>(name: N): SecretRef<N> => {
   let ref: SecretRef<N> | undefined;
@@ -12,7 +15,7 @@ const secretRef = <N extends string>(name: N): SecretRef<N> => {
       ref = ctx.secrets[name];
       return cron("* * * * *");
     },
-  }).handler(async () => {});
+  }).run(async () => {});
   return ref!;
 };
 
@@ -49,7 +52,62 @@ test("a webhook signing secret must belong to its workflow", () => {
   ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
 });
 
-test("the authoring API types secrets, context, raw webhooks, and cron events", () => {
+test("a workflow run types secrets, events, and flat durable operations", () => {
+  workflow({
+    id: "flat-run",
+    secrets: ["API_KEY"],
+    trigger: () => cron("0 9 * * *"),
+  }).run(async (run, event) => {
+    expectTypeOf<keyof typeof run>().toEqualTypeOf<
+      "runId" | "secrets" | "do" | "exec" | "cache" | "sleep"
+    >();
+    expectTypeOf(run.secrets.API_KEY).toEqualTypeOf<string>();
+    expectTypeOf(event).toEqualTypeOf<CronParams>();
+    expectTypeOf<Parameters<typeof run.do>>().toMatchTypeOf<[id: string, work: () => unknown]>();
+    expectTypeOf<Parameters<typeof run.exec>>().toEqualTypeOf<
+      [id: string, command: string | ExecOptions]
+    >();
+    expectTypeOf<Parameters<typeof run.sleep>>().toEqualTypeOf<[id: string, durationMs: number]>();
+  });
+});
+
+test("a cache miss permits the next authored operation", async () => {
+  const calls: string[] = [];
+  const operations = {
+    do: async (_id, work) => await work(),
+    exec: async (id) => {
+      calls.push(id);
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 0 };
+    },
+    cache: async (id) => {
+      calls.push(id);
+      return { state: "miss", reason: "absent" };
+    },
+    sleep: async () => {},
+  } satisfies Parameters<typeof makeRun>[0];
+  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+
+  await expect(run.cache("build", { key: "v1", path: ".build" })).resolves.toEqual({
+    state: "miss",
+    reason: "absent",
+  });
+  await run.exec("compile", "compile");
+  expect(calls).toEqual(["build", "compile"]);
+});
+
+test("workflow authoring exposes no legacy handler or nested context", () => {
+  const author = workflow({ id: "clean-author", trigger: () => cron("0 9 * * *") });
+  expectTypeOf(author).not.toHaveProperty("handler");
+  expect(author).not.toHaveProperty("handler");
+
+  const definition = author.run(async (run) => {
+    expectTypeOf(run).not.toHaveProperty("env");
+    expectTypeOf(run).not.toHaveProperty("step");
+  });
+  expect(definition).not.toHaveProperty("handler");
+});
+
+test("the authoring API types secrets, runs, raw webhooks, and cron events", () => {
   workflow({
     id: "typed-webhook",
     secrets: ["HOOK_SECRET", "API_KEY"],
@@ -63,16 +121,17 @@ test("the authoring API types secrets, context, raw webhooks, and cron events", 
         signatureHeader: "x-signature",
       });
     },
-  }).handler(async (ctx, event) => {
-    type SleepParams = Parameters<(typeof ctx.step)["sleep"]>;
-    expectTypeOf<keyof typeof ctx>().toEqualTypeOf<"runId" | "secrets" | "env" | "step">();
-    expectTypeOf<keyof typeof ctx.step>().toEqualTypeOf<"do" | "exec" | "sleep">();
+  }).run(async (run, event) => {
+    type SleepParams = Parameters<typeof run.sleep>;
+    expectTypeOf<keyof typeof run>().toEqualTypeOf<
+      "runId" | "secrets" | "do" | "exec" | "cache" | "sleep"
+    >();
     expectTypeOf<SleepParams>().toEqualTypeOf<[id: string, durationMs: number]>();
-    expectTypeOf(ctx.secrets.API_KEY).toEqualTypeOf<string>();
+    expectTypeOf(run.secrets.API_KEY).toEqualTypeOf<string>();
     expectTypeOf(event).toBeUnknown();
   });
 
-  workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).handler(async (_ctx, event) => {
+  workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).run(async (_run, event) => {
     expectTypeOf(event).toEqualTypeOf<CronParams>();
   });
 });
@@ -81,7 +140,7 @@ test("a GitHub push trigger is declarative and types its normalized event", () =
   const definition = workflow({
     id: "github-push",
     trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
-  }).handler(async (_ctx, event) => {
+  }).run(async (_run, event) => {
     expectTypeOf(event).toEqualTypeOf<{
       readonly type: "push";
       readonly repository: {
@@ -109,7 +168,7 @@ test("a GitHub pull request trigger types only the selected normalized actions",
         checkName: "Test",
         events: [{ type: "pull_request", actions: ["opened", "synchronize"] }],
       }),
-  }).handler(async (_ctx, event) => {
+  }).run(async (_run, event) => {
     expectTypeOf(event).toEqualTypeOf<{
       readonly type: "pull_request";
       readonly action: "opened" | "synchronize";
@@ -136,7 +195,7 @@ test("a combined GitHub trigger types the selected event union", () => {
           { type: "pull_request", actions: ["reopened"] },
         ],
       }),
-  }).handler(async (_ctx, event) => {
+  }).run(async (_run, event) => {
     expectTypeOf(event).toEqualTypeOf<
       | {
           readonly type: "push";
@@ -254,7 +313,7 @@ test("a GitHub trigger rejects duplicate event filters", () => {
   ).toThrow('duplicate workflow GitHub event filter "push"');
 });
 
-test("step.exec delegates string and options commands with their durable ids", async () => {
+test("run.exec delegates string and options commands with their durable ids", async () => {
   const calls: Array<[string, string | ExecOptions]> = [];
   const result: ExecResult = {
     exitCode: 0,
@@ -262,17 +321,16 @@ test("step.exec delegates string and options commands with their durable ids", a
     stderr: "",
     durationMs: 12,
   };
-  const primitives: Primitives = {
-    step: {
-      do: async (_id, fn) => await fn(),
-      exec: async (id, command) => {
-        calls.push([id, command]);
-        return result;
-      },
-      sleep: async () => {},
+  const operations = {
+    do: async (_id, work) => await work(),
+    exec: async (id, command) => {
+      calls.push([id, command]);
+      return result;
     },
-  };
-  const ctx = makeCtx(primitives, { runId: "run-1", secrets: {}, env: {} });
+    cache: async () => ({ state: "miss", reason: "absent" }),
+    sleep: async () => {},
+  } satisfies Parameters<typeof makeRun>[0];
+  const run = makeRun(operations, { runId: "run-1", secrets: {} });
   const options = {
     command: "pnpm test",
     cwd: "packages/app",
@@ -280,36 +338,65 @@ test("step.exec delegates string and options commands with their durable ids", a
     timeoutMs: 1_200_000,
   } as const;
 
-  await expect(ctx.step.exec("runtime", "node --version")).resolves.toBe(result);
-  await expect(ctx.step.exec("test", options)).resolves.toBe(result);
+  await expect(run.exec("runtime", "node --version")).resolves.toBe(result);
+  await expect(run.exec("test", options)).resolves.toBe(result);
   expect(calls).toEqual([
     ["runtime", "node --version"],
     ["test", options],
   ]);
 });
 
-test("workflow steps cannot use Runway's internal id namespace", () => {
-  const primitives: Primitives = {
-    step: {
-      do: async (_id, fn) => await fn(),
-      exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
-      sleep: async () => {},
-    },
-  };
-  const ctx = makeCtx(primitives, { runId: "run-1", secrets: {}, env: {} });
+test("workflow runs cannot use Runway's internal id namespace", () => {
+  const operations = {
+    do: async (_id, work) => await work(),
+    exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
+    cache: async () => ({ state: "miss", reason: "absent" }),
+    sleep: async () => {},
+  } satisfies Parameters<typeof makeRun>[0];
+  const run = makeRun(operations, { runId: "run-1", secrets: {} });
 
-  expect(() => ctx.step.do("runway:secret-snapshot", () => undefined)).toThrow(
-    'step id "runway:secret-snapshot" is reserved by Runway',
+  expect(() => run.do("runway:secret-snapshot", () => undefined)).toThrow(
+    'operation id "runway:secret-snapshot" is reserved by Runway',
   );
-  expect(() => ctx.step.exec("runway:command", "true")).toThrow(
-    'step id "runway:command" is reserved by Runway',
+  expect(() => run.exec("runway:command", "true")).toThrow(
+    'operation id "runway:command" is reserved by Runway',
   );
-  expect(() => ctx.step.sleep("runway:wait", 1)).toThrow(
-    'step id "runway:wait" is reserved by Runway',
+  expect(() => run.cache("runway:cache", { key: "v1", path: "/cache/tree" })).toThrow(
+    'operation id "runway:cache" is reserved by Runway',
+  );
+  expect(() => run.sleep("runway:wait", 1)).toThrow(
+    'operation id "runway:wait" is reserved by Runway',
   );
 });
 
-test("schema validation and filtering narrow the handler event", () => {
+test("operation ids contain between 1 and 128 UTF-8 bytes", async () => {
+  const observed: string[] = [];
+  const operations = {
+    do: async (id, work) => {
+      observed.push(id);
+      return await work();
+    },
+    exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
+    cache: async () => ({ state: "miss", reason: "absent" }),
+    sleep: async () => {},
+  } satisfies Parameters<typeof makeRun>[0];
+  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+  const multibyteBoundary = "é".repeat(64);
+
+  await expect(run.do(multibyteBoundary, () => "ok")).resolves.toBe("ok");
+  expect(observed).toEqual([multibyteBoundary]);
+  expect(() => run.do("", () => undefined)).toThrow(
+    "operation id must contain between 1 and 128 UTF-8 bytes",
+  );
+  expect(() => run.do("a".repeat(129), () => undefined)).toThrow(
+    "operation id must contain between 1 and 128 UTF-8 bytes",
+  );
+  expect(() => run.do("é".repeat(65), () => undefined)).toThrow(
+    "operation id must contain between 1 and 128 UTF-8 bytes",
+  );
+});
+
+test("schema validation and filtering narrow the run event", () => {
   const schema: StandardSchemaV1<unknown, { action: string }> = {
     "~standard": {
       version: 1,
@@ -328,7 +415,7 @@ test("schema validation and filtering narrow the handler event", () => {
         signatureHeader: "x-signature",
         schema,
       }).filter((event): event is { action: "create" } => event.action === "create"),
-  }).handler(async (_ctx, event) => {
+  }).run(async (_run, event) => {
     expectTypeOf(event).toEqualTypeOf<{ action: "create" }>();
   });
 });

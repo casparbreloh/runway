@@ -1,10 +1,16 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { cron, ExecError, github, webhook, workflow } from "runway";
-import type { ExecOptions, ExecResult } from "runway";
+import type { CacheDeclaration, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
+import { Cache, normalizedCacheTarget } from "../src/cache.ts";
+import type { FailureDiagnostic } from "../src/diagnostic.ts";
 import { createRouter } from "../src/router.ts";
+import type { RuntimeBinding } from "../src/runtime-binding.ts";
+import type { PreparedSource, SourceIdentity } from "../src/source.ts";
+import type { Finalization, TerminalIdentity, TerminalRecord } from "../src/terminal.ts";
+import { repositoryFixture } from "./repository-fixture.ts";
 
 let githubEffectEvents: string[] = [];
 
@@ -18,13 +24,19 @@ const githubProviderState = {
     externalId: string;
     status: "queued" | "in_progress" | "completed";
     conclusion: string | null;
+    output?: { readonly title: string; readonly summary: string };
   }>,
-  completions: [] as Array<{ checkRunId: number; conclusion: string }>,
+  completions: [] as Array<{
+    checkRunId: number;
+    conclusion: string;
+    output?: { readonly title: string; readonly summary: string };
+  }>,
   reconciliations: [] as Array<{ name: string; headSha: string; runId: string }>,
   updates: [] as Array<{ checkRunId: number; state: string }>,
   unavailableRepositoryId: undefined as number | undefined,
   loseCheckCreateResponse: false,
   losePatchResponse: false,
+  loseCompletionResponse: false,
   failTokenAttempts: 0,
   failTokenRepositoryId: undefined as number | undefined,
   tokenDelayMs: 0,
@@ -105,18 +117,22 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
   async completeCheck(options: {
     checkRunId: number;
     conclusion: string;
+    output?: { readonly title: string; readonly summary: string };
   }): Promise<(typeof githubProviderState.checks)[number]> {
     const check = githubProviderState.checks.find(({ id }) => id === options.checkRunId);
     if (!check) throw new Error("missing Check");
     check.status = "completed";
     check.conclusion = options.conclusion;
+    if (options.output) check.output = options.output;
     githubProviderState.completions.push({
       checkRunId: options.checkRunId,
       conclusion: options.conclusion,
+      ...(options.output ? { output: options.output } : {}),
     });
     githubProviderState.updates.push({ checkRunId: options.checkRunId, state: options.conclusion });
     githubEffectEvents.push(`check:${options.checkRunId}:${options.conclusion}`);
-    if (githubProviderState.losePatchResponse) {
+    if (githubProviderState.loseCompletionResponse || githubProviderState.losePatchResponse) {
+      githubProviderState.loseCompletionResponse = false;
       githubProviderState.losePatchResponse = false;
       throw new Error("lost Check PATCH response");
     }
@@ -149,6 +165,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     githubProviderState.unavailableRepositoryId = undefined;
     githubProviderState.loseCheckCreateResponse = false;
     githubProviderState.losePatchResponse = false;
+    githubProviderState.loseCompletionResponse = false;
     githubProviderState.failTokenAttempts = 0;
     githubProviderState.failTokenRepositoryId = undefined;
     githubProviderState.tokenDelayMs = 0;
@@ -160,6 +177,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     unavailableRepositoryId?: number;
     loseCheckCreateResponse?: boolean;
     losePatchResponse?: boolean;
+    loseCompletionResponse?: boolean;
     failTokenAttempts?: number;
     failTokenRepositoryId?: number;
     tokenDelayMs?: number;
@@ -168,6 +186,7 @@ export class GitHubProviderProbe extends WorkerEntrypoint<Cloudflare.Env> {
     githubProviderState.unavailableRepositoryId = options.unavailableRepositoryId;
     githubProviderState.loseCheckCreateResponse = options.loseCheckCreateResponse ?? false;
     githubProviderState.losePatchResponse = options.losePatchResponse ?? false;
+    githubProviderState.loseCompletionResponse = options.loseCompletionResponse ?? false;
     githubProviderState.failTokenAttempts = options.failTokenAttempts ?? 0;
     githubProviderState.failTokenRepositoryId = options.failTokenRepositoryId;
     githubProviderState.tokenDelayMs = options.tokenDelayMs ?? 0;
@@ -315,8 +334,6 @@ export class GitHubWorkflowProbe extends WorkerEntrypoint<Cloudflare.Env> {
   }
 }
 
-export { RunnerAdapterHarness } from "./runner-adapter-harness.ts";
-
 interface NormalizedExecOptions {
   command: string;
   cwd: string;
@@ -324,14 +341,15 @@ interface NormalizedExecOptions {
   timeoutMs: number;
 }
 
-interface RunnerRequest {
+interface SandboxRequest {
   runId: string;
   step: { id: string; count: number; attempt: number };
   options: NormalizedExecOptions;
   secrets: ReadonlyArray<string>;
+  source: PreparedSource;
 }
 
-const runnerState = {
+const sandboxState = {
   executions: [] as Array<{
     runId: string;
     step: { id: string; count: number; attempt: number };
@@ -342,28 +360,99 @@ const runnerState = {
   kills: [] as string[],
 };
 let runtimeLifecycleEvents: string[] = [];
+let runtimeDiagnostics: Array<FailureDiagnostic | null> = [];
 const activeExecutions = new Map<string, () => void>();
-const runnerWorkspaces = new Map<string, string>();
+const workspaces = new Map<string, string>();
+let sourcePreparations: unknown[] = [];
 const secretSnapshots = new Map<string, Readonly<Record<string, string>>>();
 let destroyAttempts = 0;
 let failNextDestroy = false;
-let currentHostSecret = "runner-secret";
+let currentHostSecret = "sandbox-secret";
 let lastHostDestroySecrets: ReadonlyArray<string> = [];
 let failSecretCapture = false;
 let failNextSecretRestore = false;
 let failNextSecretValidation = false;
+let cacheRequests: unknown[] = [];
+let cacheFileInspections: unknown[] = [];
+let traceCacheExec = false;
+const cacheSessions = new Map<string, Cache>();
 
-export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
-  async exec(request: RunnerRequest): Promise<ExecResult> {
+class RuntimeCacheRefs {
+  readonly objects = new Map<string, { etag: string; text: string }>();
+  #version = 0;
+
+  async get(key: string) {
+    const object = this.objects.get(key);
+    return object ? { etag: object.etag, text: async () => object.text } : null;
+  }
+
+  async put(
+    key: string,
+    text: string,
+    options: { onlyIf: { etagMatches?: string; etagDoesNotMatch?: string } },
+  ) {
+    const current = this.objects.get(key);
+    if (options.onlyIf.etagDoesNotMatch === "*" && current) return null;
+    if (options.onlyIf.etagMatches !== undefined && current?.etag !== options.onlyIf.etagMatches) {
+      return null;
+    }
+    const etag = `cache-${++this.#version}`;
+    this.objects.set(key, { etag, text });
+    return { etag };
+  }
+}
+const runtimeCacheRefs = new RuntimeCacheRefs();
+
+export class TestSandbox extends WorkerEntrypoint<Cloudflare.Env> {
+  source(): SourceIdentity {
+    return {
+      repositoryId: `remote:${repositoryFixture.remote}`,
+      remote: repositoryFixture.remote,
+      revision: repositoryFixture.commit,
+    };
+  }
+
+  prepareSource(request: {
+    runId: string;
+    source: SourceIdentity;
+    secrets: Readonly<Record<string, string>>;
+    allowReconstruct: boolean;
+  }): PreparedSource {
+    sourcePreparations.push(structuredClone(request));
+    const expected = this.source();
+    if (JSON.stringify(request.source) !== JSON.stringify(expected)) {
+      throw new Error("unexpected source");
+    }
+    return {
+      placement: `placement:${request.runId}`,
+      result: { revision: expected.revision, state: "prepared", bytes: 0 },
+    };
+  }
+
+  async exec(request: SandboxRequest): Promise<ExecResult> {
     const { runId, step, options, secrets } = request;
-    runnerState.executions.push({ runId, step, options, secrets });
+    sandboxState.executions.push({ runId, step, options, secrets });
+    if (traceCacheExec) {
+      runtimeLifecycleEvents.push(`exec:${options.command}`);
+      traceCacheExec = false;
+    }
+    if (options.command === "ambiguous-start") {
+      const error = new Error("run continuity was lost: ambiguous command start");
+      error.name = "RunLostError";
+      throw error;
+    }
+    if (options.command === "confirmed-timeout") {
+      const error = new Error("command timed out after 25ms");
+      error.name = "ExecTimeoutError";
+      throw error;
+    }
     if (options.command === "block") {
       const blocked = new Promise<void>((resolve) => activeExecutions.set(runId, resolve));
       this.ctx.waitUntil(
         (async () => {
           while (activeExecutions.has(runId)) {
             await scheduler.wait(10);
-            if ((await (await this.env.RUNNER.get(runId)).status()).status === "terminated") {
+            if ((await (await this.env.COMMANDS.get(runId)).status()).status === "terminated") {
               await this.destroy(runId, secrets);
               return;
             }
@@ -375,20 +464,28 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     if (options.command === "exit 7") {
       return { exitCode: 7, stdout: "tail", stderr: "failed", durationMs: 4 };
     }
-    if (options.command.includes("runner-secret")) {
+    if (options.command.startsWith("diagnostic-stress ")) {
       return {
         exitCode: 9,
-        stdout: "stdout runner-secret",
-        stderr: "stderr runner-secret",
+        stdout: `${"🙂".repeat(3_000)} stdout sandbox-secret https://stdout.example/path`,
+        stderr: "\u001b[31mstderr sandbox-secret\u001b[0m https://stderr.example/path",
+        durationMs: 4,
+      };
+    }
+    if (options.command.includes("sandbox-secret")) {
+      return {
+        exitCode: 9,
+        stdout: "stdout sandbox-secret",
+        stderr: "stderr sandbox-secret",
         durationMs: 4,
       };
     }
     if (options.command === "echo hello > state.txt") {
-      runnerWorkspaces.set(runId, "hello\n");
+      workspaces.set(runId, "hello\n");
       return { exitCode: 0, stdout: "", stderr: "", durationMs: 2 };
     }
     if (options.command === "cat state.txt") {
-      const state = runnerWorkspaces.get(runId);
+      const state = workspaces.get(runId);
       return state === undefined
         ? {
             exitCode: 1,
@@ -411,28 +508,34 @@ export class TestRunner extends WorkerEntrypoint<Cloudflare.Env> {
     }
     const unblock = activeExecutions.get(runId);
     if (unblock) {
-      runnerState.kills.push(runId);
+      sandboxState.kills.push(runId);
       activeExecutions.delete(runId);
       unblock();
     }
-    runnerState.destroys.push(runId);
-    runnerWorkspaces.delete(runId);
+    sandboxState.destroys.push(runId);
+    workspaces.delete(runId);
     runtimeLifecycleEvents.push("cleanup:success");
   }
 
-  state(): typeof runnerState {
-    return runnerState;
+  state(): typeof sandboxState {
+    return sandboxState;
   }
 
   reset(): void {
-    runnerState.executions = [];
-    runnerState.destroys = [];
-    runnerState.kills = [];
+    sandboxState.executions = [];
+    sandboxState.destroys = [];
+    sandboxState.kills = [];
     activeExecutions.clear();
-    runnerWorkspaces.clear();
+    workspaces.clear();
+    sourcePreparations = [];
     destroyAttempts = 0;
     failNextDestroy = false;
     runtimeLifecycleEvents = [];
+    runtimeDiagnostics = [];
+  }
+
+  sourceState(): unknown[] {
+    return sourcePreparations;
   }
 
   failDestroyOnce(): void {
@@ -449,13 +552,41 @@ interface TestHostProps {
 }
 
 export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
-  async reportRunLifecycle(_runId: string, state: string): Promise<boolean> {
-    runtimeLifecycleEvents.push(`lifecycle:${state}`);
+  async startRun(): Promise<boolean> {
+    runtimeLifecycleEvents.push("lifecycle:in_progress");
     return true;
   }
 
+  async terminal(runId: string): Promise<TerminalIdentity> {
+    return {
+      accountId: "test-account",
+      repositoryId: `remote:${repositoryFixture.remote}`,
+      workflowId: "commands",
+      runId,
+      trustId: `remote:${repositoryFixture.remote}`,
+      generation: 1,
+    };
+  }
+
+  async claimTerminal(_runId: string, candidate: TerminalRecord): Promise<TerminalRecord> {
+    return candidate;
+  }
+
+  async readTerminal(): Promise<undefined> {
+    return undefined;
+  }
+
+  async publishTerminal(
+    _runId: string,
+    finalization: Finalization,
+    diagnostic: FailureDiagnostic | null,
+  ): Promise<void> {
+    runtimeLifecycleEvents.push(`lifecycle:${finalization.outcome}`);
+    runtimeDiagnostics.push(diagnostic);
+  }
+
   async secrets(): Promise<Readonly<Record<string, string>>> {
-    return { ...this.ctx.props.secrets, RUNNER_SECRET: currentHostSecret };
+    return { ...this.ctx.props.secrets, SANDBOX_SECRET: currentHostSecret };
   }
 
   async captureSecrets(runId: string): Promise<string> {
@@ -479,8 +610,21 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     return secrets;
   }
 
-  async exec(
-    request: Omit<RunnerRequest, "secrets"> & {
+  async source(): Promise<SourceIdentity> {
+    return await this.env.RUNWAY_TEST_SANDBOX.source();
+  }
+
+  async prepareSource(request: {
+    runId: string;
+    source: SourceIdentity;
+    secrets: Readonly<Record<string, string>>;
+    allowReconstruct: boolean;
+  }): Promise<PreparedSource> {
+    return await this.env.RUNWAY_TEST_SANDBOX.prepareSource(request);
+  }
+
+  async execute(
+    request: Omit<SandboxRequest, "secrets"> & {
       secrets: Readonly<Record<string, string>>;
     },
   ): Promise<ExecResult> {
@@ -490,21 +634,147 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
         exitCode: 0,
         stdout: secrets.reduce(
           (output, secret) => output.replaceAll(secret, "***"),
-          "runner-secret",
+          "sandbox-secret",
         ),
         stderr: "",
         durationMs: 1,
       };
     }
-    return await this.env.RUNWAY_TEST_RUNNER.exec({
+    return await this.env.RUNWAY_TEST_SANDBOX.exec({
       ...request,
       secrets,
     });
   }
 
+  async restoreCache(request: {
+    runId: string;
+    id: string;
+    declaration: CacheDeclaration;
+    secrets: Readonly<Record<string, string>>;
+    source: PreparedSource;
+  }) {
+    cacheRequests.push(structuredClone(request));
+    const cache =
+      cacheSessions.get(request.runId) ??
+      new Cache({
+        context: {
+          repositoryId: `remote:${repositoryFixture.remote}`,
+          workflowId: "commands",
+          generation: 1,
+          admission: { type: "cron" },
+          platform: {
+            schema: 2,
+            os: "linux",
+            architecture: "amd64",
+            imageDigest: `sha256:${"1".repeat(64)}`,
+            runnerAbi: "runway-sandbox-v2",
+          },
+        },
+        refs: runtimeCacheRefs,
+        files: {
+          inspect: async (path) => {
+            cacheFileInspections.push({ path, revision: request.source.result.revision });
+            return path === "present.input"
+              ? { type: "file" as const, bytes: new TextEncoder().encode("exact source bytes") }
+              : { type: "missing" as const };
+          },
+        },
+        current: async () => true,
+        restore: {
+          inspect: async () => "absent",
+          stage: async ({ object }) => ({
+            state: "ready",
+            archiveBytes: object.archiveBytes,
+            archiveDigest: object.archiveDigest,
+            byteCount: object.byteCount,
+            diskBytes: object.byteCount,
+            entryCount: object.entryCount,
+            fileCount: object.fileCount,
+            maxDepth: object.maxDepth,
+            treeDigest: object.treeDigest,
+            uniqueInodes: object.uniqueInodes,
+          }),
+          remove: async () => {},
+          rename: async () => {},
+        },
+      });
+    cacheSessions.set(request.runId, cache);
+    if (request.declaration.key === "hit") {
+      const lookup = await cache.lookup(request.id, request.declaration);
+      if (lookup.revision) {
+        const archiveDigest = "9".repeat(64);
+        const archiveBytes = 37;
+        const manifest = JSON.stringify({
+          archiveDigest,
+          byteCount: 37,
+          declarationDigest: lookup.revision.declarationDigest,
+          entryCount: 1,
+          fileCount: 1,
+          keyDigest: lookup.revision.keyDigest,
+          maxDepth: 1,
+          name: request.id,
+          platform: {
+            architecture: "amd64",
+            imageDigest: `sha256:${"1".repeat(64)}`,
+            os: "linux",
+            runnerAbi: "runway-sandbox-v2",
+          },
+          schema: 2,
+          target: normalizedCacheTarget(request.declaration.path),
+          treeDigest: "8".repeat(64),
+          uniqueInodes: 1,
+        });
+        const fields = ["cache-object", manifest, archiveDigest, String(archiveBytes)].map(
+          (field) => new TextEncoder().encode(field),
+        );
+        const canonical = new Uint8Array(
+          fields.reduce((total, field) => total + field.byteLength + 8, 0),
+        );
+        const view = new DataView(canonical.buffer);
+        let offset = 0;
+        for (const field of fields) {
+          view.setBigUint64(offset, BigInt(field.byteLength));
+          offset += 8;
+          canonical.set(field, offset);
+          offset += field.byteLength;
+        }
+        const objectDigest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", canonical))]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("");
+        await cache.publish(lookup.revision, {
+          digest: objectDigest,
+          archiveBytes,
+          archiveDigest,
+          manifest,
+        });
+      }
+    }
+    const record = await cache.record(request.id, request.declaration);
+    const result = record.result;
+    runtimeLifecycleEvents.push(`cache:${result.state}:${request.source.result.revision}`);
+    if (result.state === "hit") traceCacheExec = true;
+    return record;
+  }
+
+  async quiesce(): Promise<void> {
+    runtimeLifecycleEvents.push("cache:quiesce");
+  }
+
+  async prepareCaches(request: Parameters<RuntimeBinding["prepareCaches"]>[0]) {
+    return request.pending.map((pending) => ({
+      state: "skipped" as const,
+      id: pending.id,
+      reason: "unavailable" as const,
+    }));
+  }
+
+  async publishCaches(request: Parameters<RuntimeBinding["publishCaches"]>[0]): Promise<void> {
+    runtimeLifecycleEvents.push(`cache:publish:${request.finalization.outcome}`);
+  }
+
   async destroy(runId: string, secrets: Readonly<Record<string, string>>): Promise<void> {
     lastHostDestroySecrets = Object.values(secrets);
-    await this.env.RUNWAY_TEST_RUNNER.destroy(runId, lastHostDestroySecrets);
+    await this.env.RUNWAY_TEST_SANDBOX.destroy(runId, lastHostDestroySecrets);
   }
 
   rotateSecret(value: string): void {
@@ -512,12 +782,17 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
   }
 
   resetSecret(): void {
-    currentHostSecret = "runner-secret";
+    currentHostSecret = "sandbox-secret";
     lastHostDestroySecrets = [];
     secretSnapshots.clear();
     failSecretCapture = false;
     failNextSecretRestore = false;
     failNextSecretValidation = false;
+    cacheRequests = [];
+    cacheFileInspections = [];
+    traceCacheExec = false;
+    cacheSessions.clear();
+    runtimeCacheRefs.objects.clear();
   }
 
   failSecretCapturePermanently(): void {
@@ -538,6 +813,14 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
 
   lifecycleEvents(): ReadonlyArray<string> {
     return runtimeLifecycleEvents;
+  }
+
+  diagnostics(): ReadonlyArray<FailureDiagnostic | null> {
+    return runtimeDiagnostics;
+  }
+
+  cacheState(): { readonly requests: unknown[]; readonly fileInspections: unknown[] } {
+    return { requests: cacheRequests, fileInspections: cacheFileInspections };
   }
 }
 
@@ -586,26 +869,26 @@ export const issueCreated = workflow({
       issueGateEvaluations += 1;
       return event.action === "create";
     }),
-}).handler(async (ctx, event) => {
-  await ctx.step.do("run-loader-state", () => ++runLoaderExecutions);
-  await ctx.step.do("trigger-loader-state", () => issueGateEvaluations);
-  await ctx.step.do("record-issue", (step) => ({
-    stepId: step.id,
-    runId: ctx.runId,
-    apiKey: ctx.secrets.API_KEY,
-    envKeys: Object.keys(ctx.env as Record<string, unknown>).sort(),
+}).run(async (run, event) => {
+  await run.do("run-loader-state", () => ++runLoaderExecutions);
+  await run.do("trigger-loader-state", () => issueGateEvaluations);
+  await run.do("record-issue", () => ({
+    stepId: "record-issue",
+    runId: run.runId,
+    apiKey: run.secrets.API_KEY,
+    envKeys: [],
     event,
   }));
-  await ctx.step.sleep("settle", 1);
+  await run.sleep("settle", 1);
 });
 
 export const suspendedIssueCreated = workflow({
   id: "suspended-workflow",
-  secrets: ["RUNNER_SECRET"],
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx) => {
-  await ctx.step.do("artifact-version", () => "suspended");
-  await ctx.step.do("historical-secret", () => ctx.secrets.RUNNER_SECRET);
+}).run(async (run) => {
+  await run.do("artifact-version", () => "suspended");
+  await run.do("historical-secret", () => run.secrets.SANDBOX_SECRET);
 });
 
 export class IssueCreatedWorkflow extends toEntrypoint(issueCreated) {}
@@ -621,45 +904,55 @@ const githubEvents = [
 export const githubCheck = workflow({
   id: "github-check",
   trigger: () => github({ checkName: "Check", events: githubEvents }),
-}).handler(async () => {});
+}).run(async () => {});
 
 export const githubTest = workflow({
   id: "github-test",
   trigger: () => github({ checkName: "Test", events: githubEvents }),
-}).handler(async () => {
+}).run(async () => {
   throw new Error("GitHub handler failure");
 });
 
-const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).handler(
-  async (ctx, event) => {
-    await ctx.step.do("record-schedule", () => event);
+const daily = workflow({ id: "daily", trigger: () => cron("0 9 * * *") }).run(
+  async (run, event) => {
+    await run.do("record-schedule", () => event);
   },
 );
 
 export class DailyWorkflow extends toEntrypoint(daily) {}
 
-interface RunnerEvent {
+interface CommandEvent {
+  caches?: ReadonlyArray<{ readonly id: string; readonly declaration: CacheDeclaration }>;
   commands: ReadonlyArray<string | ExecOptions>;
   catchErrors?: boolean;
   pauseMs?: number;
   throwAfterCommands?: boolean;
+  throwMessage?: string;
   throwUndefinedAfterCommands?: boolean;
 }
 
-const runner = workflow({
-  id: "runner",
-  secrets: ["RUNNER_SECRET"],
+const commands = workflow({
+  id: "commands",
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx, event) => {
-  const { catchErrors, commands, pauseMs, throwAfterCommands, throwUndefinedAfterCommands } =
-    event as unknown as RunnerEvent;
+}).run(async (run, event) => {
+  const {
+    caches = [],
+    catchErrors,
+    commands,
+    pauseMs,
+    throwAfterCommands,
+    throwMessage,
+    throwUndefinedAfterCommands,
+  } = event as unknown as CommandEvent;
   runtimeLifecycleEvents.push("handler:start");
+  for (const cache of caches) await run.cache(cache.id, cache.declaration);
   for (const [index, command] of commands.entries()) {
     try {
-      using _result = (await ctx.step.exec(`command-${index}`, command)) as ExecResult & Disposable;
+      await run.exec(`command-${index}`, command);
     } catch (error) {
       if (!catchErrors) throw error;
-      await ctx.step.do("caught-error", () =>
+      await run.do("caught-error", () =>
         error instanceof ExecError && error.command.includes("leak")
           ? {
               name: error.name,
@@ -674,23 +967,24 @@ const runner = workflow({
             },
       );
     }
-    if (index === 0 && pauseMs !== undefined) await ctx.step.sleep("pause", pauseMs);
+    if (index === 0 && pauseMs !== undefined) await run.sleep("pause", pauseMs);
   }
   if (throwAfterCommands) throw new Error("handler failure");
+  if (throwMessage) throw new Error(throwMessage);
   if (throwUndefinedAfterCommands) throw undefined;
   runtimeLifecycleEvents.push("handler:success");
 });
 
-export class RunnerWorkflow extends toEntrypoint(runner) {}
+export class CommandWorkflow extends toEntrypoint(commands) {}
 
 const secretSnapshot = workflow({
   id: "secret-snapshot",
-  secrets: ["RUNNER_SECRET"],
+  secrets: ["SANDBOX_SECRET"],
   trigger: () => cron("0 0 * * *"),
-}).handler(async (ctx) => {
-  await ctx.step.do("resolved-secret", () => ctx.secrets.RUNNER_SECRET);
-  await ctx.step.sleep("rotate-secret", 100);
-  await ctx.step.exec("snapshot-output", "snapshot-output");
+}).run(async (run) => {
+  await run.do("resolved-secret", () => run.secrets.SANDBOX_SECRET);
+  await run.sleep("rotate-secret", 100);
+  await run.exec("snapshot-output", "snapshot-output");
 });
 
 export class SecretSnapshotWorkflow extends toEntrypoint(secretSnapshot) {}

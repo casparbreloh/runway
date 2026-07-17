@@ -1,5 +1,6 @@
 import { secretNameOf } from "./secrets.ts";
-import type { CronTrigger, WebhookTimestamp, WebhookTrigger, WorkflowTrigger } from "./types.ts";
+import type { CronTrigger, WebhookTimestamp, WebhookTrigger } from "./trigger.ts";
+import type { WorkflowTrigger } from "./workflow.ts";
 
 interface WorkflowBinding {
   create(opts: { params: unknown }): Promise<{ id: string }>;
