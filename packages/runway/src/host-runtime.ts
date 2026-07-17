@@ -381,7 +381,7 @@ export class RunwaySandboxBinding
         platform: {
           schema: CACHE_SCHEMA,
           os: "linux",
-          architecture: "x86_64",
+          architecture: "amd64",
           ...(config.imageDigest ? { imageDigest: config.imageDigest } : {}),
           runnerAbi: SANDBOX_RUNNER_ABI,
         },

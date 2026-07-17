@@ -657,7 +657,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
           platform: {
             schema: 2,
             os: "linux",
-            architecture: "x86_64",
+            architecture: "amd64",
             imageDigest: `sha256:${"1".repeat(64)}`,
             runnerAbi: "runway-sandbox-v2",
           },
@@ -706,7 +706,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
           maxDepth: 1,
           name: request.id,
           platform: {
-            architecture: "x86_64",
+            architecture: "amd64",
             imageDigest: `sha256:${"1".repeat(64)}`,
             os: "linux",
             runnerAbi: "runway-sandbox-v2",

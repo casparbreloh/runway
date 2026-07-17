@@ -223,7 +223,7 @@ const context = {
   platform: {
     schema: 2,
     os: "linux",
-    architecture: "x86_64",
+    architecture: "amd64",
     imageDigest: `sha256:${"1".repeat(64)}`,
     runnerAbi: "runway-sandbox-v2",
   },
