@@ -7,27 +7,16 @@ export const GITHUB_COORDINATOR_CLASS = "RunwayGitHubCoordinator";
 export const CACHE_SCHEMA = 2;
 export const SANDBOX_RUNNER_ABI = "runway-sandbox-v2";
 
-export const SANDBOX_INSTANCE_TYPES = {
-  lite: { vcpu: 0.0625, memoryMib: 256, diskMb: 2_000 },
-  basic: { vcpu: 0.25, memoryMib: 1_024, diskMb: 4_000 },
-  "standard-1": { vcpu: 0.5, memoryMib: 4_096, diskMb: 8_000 },
-  "standard-2": { vcpu: 1, memoryMib: 6_144, diskMb: 12_000 },
-  "standard-3": { vcpu: 2, memoryMib: 8_192, diskMb: 16_000 },
-  "standard-4": { vcpu: 4, memoryMib: 12_288, diskMb: 20_000 },
-} as const;
-
 export const SANDBOX_CONTAINER = {
   class_name: SANDBOX_CLASS,
   image: SANDBOX_IMAGE,
   instance_type: "standard-4",
 } as const;
 
-const capacity = SANDBOX_INSTANCE_TYPES[SANDBOX_CONTAINER.instance_type];
-
 export const SANDBOX_CAPACITY = {
-  vcpu: capacity.vcpu,
-  memoryGib: capacity.memoryMib / 1024,
-  diskGb: capacity.diskMb / 1000,
+  vcpu: 4,
+  memoryGib: 12,
+  diskGb: 20,
 } as const;
 
 export const CACHE_LIMITS = {

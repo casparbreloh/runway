@@ -38,13 +38,6 @@ export type CacheResult =
       readonly reason: "absent" | "budget" | "corrupt" | "unavailable" | "policy" | "target";
     };
 
-export interface RunOperations {
-  do<T>(id: string, work: () => Promise<T>): Promise<T>;
-  exec(id: string, command: string | ExecOptions): Promise<ExecResult>;
-  cache(id: string, declaration: CacheDeclaration): Promise<CacheResult>;
-  sleep(id: string, durationMs: number): Promise<void>;
-}
-
 export interface Run<Secrets extends string = string> {
   readonly runId: string;
   readonly secrets: { readonly [Name in Secrets]: string };
@@ -67,7 +60,7 @@ const authorId = (id: string): string => {
 };
 
 export const makeRun = <Secrets extends string>(
-  operations: RunOperations,
+  operations: Pick<Run, "do" | "exec" | "cache" | "sleep">,
   meta: {
     runId: string;
     secrets: { readonly [Name in Secrets]: string };

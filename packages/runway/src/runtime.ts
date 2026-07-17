@@ -7,7 +7,7 @@ import type { FailureDiagnostic } from "./diagnostic.ts";
 import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import { createRouter } from "./router.ts";
 import { makeRun, secretsOf } from "./run.ts";
-import type { RunOperations } from "./run.ts";
+import type { Run } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
 import { SANDBOX_CAPACITY } from "./sandbox-config.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
@@ -109,8 +109,7 @@ type DynamicWorkerEnv = Record<string, unknown> & {
   [RUNTIME_BINDING]?: RuntimeBinding;
 };
 
-interface RunRuntime {
-  readonly operations: RunOperations;
+interface RunRuntime extends Pick<Run, "do" | "exec" | "cache" | "sleep"> {
   cleanup(): Promise<void>;
   finish(finalization: Finalization): Promise<void>;
 }
@@ -177,110 +176,114 @@ const makeRunRuntime = (
     terminal,
     meter,
   });
-  return {
-    operations: {
-      do: <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-        measuredWorkflowStep(meter, () => step.do(id, fn as () => Promise<never>) as Promise<T>),
-      exec: (id, command) =>
-        sandbox.exec(
-          {
-            id,
-            run: async (digest, work, rollback) => {
-              let executed = false;
-              const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-                step.do(
-                  id,
-                  { retries: { limit: 5, delay: 0 } },
-                  async (ctx) => {
-                    executed = true;
-                    try {
+  const operations: Pick<Run, "do" | "exec" | "cache" | "sleep"> = {
+    do: <T>(id: string, work: () => T | Promise<T>): Promise<T> =>
+      measuredWorkflowStep(
+        meter,
+        () => step.do(id, async () => (await work()) as never) as Promise<T>,
+      ),
+    exec: (id, command) =>
+      sandbox.exec(
+        {
+          id,
+          run: async (digest, work, rollback) => {
+            let executed = false;
+            const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+              step.do(
+                id,
+                { retries: { limit: 5, delay: 0 } },
+                async (ctx) => {
+                  executed = true;
+                  try {
+                    return {
+                      digest,
+                      result: await work({
+                        count: ctx.step.count,
+                        attempt: ctx.attempt,
+                      }),
+                    } as never;
+                  } catch (error) {
+                    if (error instanceof RunLostError) {
                       return {
                         digest,
-                        result: await work({
-                          count: ctx.step.count,
-                          attempt: ctx.attempt,
-                        }),
+                        lost: { message: error.message, attempt: ctx.attempt },
                       } as never;
-                    } catch (error) {
-                      if (error instanceof RunLostError) {
-                        return {
-                          digest,
-                          lost: { message: error.message, attempt: ctx.attempt },
-                        } as never;
-                      }
-                      if (error instanceof ExecTimeoutError) {
-                        return {
-                          digest,
-                          timeout: { message: error.message, attempt: ctx.attempt },
-                        } as never;
-                      }
-                      throw error;
                     }
-                  },
-                  { rollback },
-                ),
-              );
-              if (
-                !recorded ||
-                typeof recorded !== "object" ||
-                !("digest" in recorded) ||
-                recorded.digest !== digest ||
-                ["result", "lost", "timeout"].filter((field) => field in recorded).length !== 1
-              ) {
-                throw new RunLostError("run continuity was lost because command options changed");
-              }
-              const evidence = recorded as {
-                readonly digest: string;
-                readonly result?: never;
-                readonly lost?: { readonly message: string; readonly attempt: number };
-                readonly timeout?: { readonly message: string; readonly attempt: number };
-              };
-              const terminal = evidence.lost
-                ? { lost: evidence.lost }
-                : evidence.timeout
-                  ? { timeout: evidence.timeout }
-                  : { result: evidence.result as never };
-              return {
-                digest: evidence.digest,
-                ...terminal,
-                callback: executed ? "executed" : "recorded",
-              };
-            },
+                    if (error instanceof ExecTimeoutError) {
+                      return {
+                        digest,
+                        timeout: { message: error.message, attempt: ctx.attempt },
+                      } as never;
+                    }
+                    throw error;
+                  }
+                },
+                { rollback },
+              ),
+            );
+            if (
+              !recorded ||
+              typeof recorded !== "object" ||
+              !("digest" in recorded) ||
+              recorded.digest !== digest ||
+              ["result", "lost", "timeout"].filter((field) => field in recorded).length !== 1
+            ) {
+              throw new RunLostError("run continuity was lost because command options changed");
+            }
+            const evidence = recorded as {
+              readonly digest: string;
+              readonly result?: never;
+              readonly lost?: { readonly message: string; readonly attempt: number };
+              readonly timeout?: { readonly message: string; readonly attempt: number };
+            };
+            const terminal = evidence.lost
+              ? { lost: evidence.lost }
+              : evidence.timeout
+                ? { timeout: evidence.timeout }
+                : { result: evidence.result as never };
+            return {
+              digest: evidence.digest,
+              ...terminal,
+              callback: executed ? "executed" : "recorded",
+            };
           },
-          command,
-        ),
-      cache: (id, declaration) =>
-        sandbox.cache(
-          {
-            id,
-            run: async (digest, work) => {
-              const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-                step.do(
-                  id,
-                  { retries: { limit: 5, delay: 0 } },
-                  async () => ({ digest, record: await work() }) as never,
-                ),
-              );
-              if (
-                !recorded ||
-                typeof recorded !== "object" ||
-                Array.isArray(recorded) ||
-                Object.keys(recorded).sort().join(",") !== "digest,record" ||
-                typeof (recorded as { digest?: unknown }).digest !== "string"
-              ) {
-                throw new Error("invalid durable cache evidence");
-              }
-              return recorded as {
-                readonly digest: string;
-                readonly record: Awaited<ReturnType<typeof work>>;
-              };
-            },
+        },
+        command,
+      ),
+    cache: (id, declaration) =>
+      sandbox.cache(
+        {
+          id,
+          run: async (digest, work) => {
+            const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+              step.do(
+                id,
+                { retries: { limit: 5, delay: 0 } },
+                async () => ({ digest, record: await work() }) as never,
+              ),
+            );
+            if (
+              !recorded ||
+              typeof recorded !== "object" ||
+              Array.isArray(recorded) ||
+              Object.keys(recorded).sort().join(",") !== "digest,record" ||
+              typeof (recorded as { digest?: unknown }).digest !== "string"
+            ) {
+              throw new Error("invalid durable cache evidence");
+            }
+            return recorded as {
+              readonly digest: string;
+              readonly record: Awaited<ReturnType<typeof work>>;
+            };
           },
-          declaration,
-        ),
-      sleep: (id: string, durationMs: number): Promise<void> =>
-        measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
-    },
+        },
+        declaration,
+      ),
+    sleep: (id: string, durationMs: number): Promise<void> =>
+      measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
+  };
+  return {
+    ...operations,
     cleanup: async () => {
       if (sandbox.hasPendingCaches()) {
         const recorded = (await measuredWorkflowStep(meter, async () =>
@@ -414,7 +417,7 @@ export const toEntrypoint = (
       let failure: unknown;
       try {
         result = await def.run(
-          makeRun(runtime.operations, {
+          makeRun(runtime, {
             runId: event.instanceId,
             secrets,
           }),
