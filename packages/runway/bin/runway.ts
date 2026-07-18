@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import process from "node:process";
 
 import { defineCommand, runMain } from "citty";
@@ -9,6 +10,7 @@ import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
 import type { ProgressEvent } from "../src/deploy.ts";
 import { deploymentNameOf } from "../src/internal/deploy/name.ts";
 import { loadRegistry } from "../src/internal/deploy/registry.ts";
+import { runLocal } from "../src/internal/local.ts";
 import {
   COMPATIBILITY_DATE,
   isSecretSnapshotKeyBinding,
@@ -161,9 +163,42 @@ const deploy = defineCommand({
   },
 });
 
+const parseRun = (args: ReadonlyArray<string>): { id: string; eventPath?: string } => {
+  const [id, flag, eventPath, ...extra] = args;
+  if (
+    !id ||
+    extra.length > 0 ||
+    (flag !== undefined && flag !== "--event") ||
+    (flag && !eventPath)
+  ) {
+    throw new Error("usage: runway run <workflow> [--event <file>]");
+  }
+  return { id, ...(eventPath ? { eventPath } : {}) };
+};
+
+const local = defineCommand({
+  meta: { name: "run", description: "Run one workflow locally" },
+  async run({ rawArgs }) {
+    try {
+      const cwd = process.cwd();
+      const { id, eventPath } = parseRun(rawArgs);
+      const registry = await loadRegistry(cwd);
+      const registered = registry.find(({ def }) => def.id === id);
+      if (!registered) throw new Error(`workflow ${JSON.stringify(id)} was not found`);
+      const event = eventPath ? (JSON.parse(await readFile(eventPath, "utf8")) as unknown) : {};
+      const result = await runLocal(registered.def, { cwd, env: process.env, event });
+      console.log(`Ran ${id} in ${result.durationMs}ms`);
+    } catch (err) {
+      console.error("runway: run failed");
+      console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+  },
+});
+
 await runMain(
   defineCommand({
     meta: { name: "runway", version: pkg.version, description: "Deploy code-first workflows" },
-    subCommands: { deploy, secrets },
+    subCommands: { deploy, run: local, secrets },
   }),
 );

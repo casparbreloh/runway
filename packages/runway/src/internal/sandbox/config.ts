@@ -1,7 +1,9 @@
 export const SANDBOX_BINDING = "RunwaySandbox";
 export const SANDBOX_CLASS = "Sandbox";
-export const SANDBOX_IMAGE =
-  "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042";
+export const SANDBOX_IMAGE_DIGEST =
+  "sha256:592fab3d33909f2d95220cf814d984596571ad04facc635e4ff858ab2012b7cd";
+export const SANDBOX_IMAGE = `registry.cloudflare.com/7f9a6aa1e42231cfbf32bbd13a9f3910/runway-sandbox@${SANDBOX_IMAGE_DIGEST}`;
+export const LOCAL_SANDBOX_IMAGE = `ghcr.io/casparbreloh/runway-sandbox@${SANDBOX_IMAGE_DIGEST}`;
 export const GITHUB_COORDINATOR_BINDING = "RUNWAY_GITHUB_COORDINATOR";
 export const GITHUB_COORDINATOR_CLASS = "RunwayGitHubCoordinator";
 export const CACHE_SCHEMA = 2;
@@ -12,7 +14,6 @@ export const SANDBOX_CONTAINER = {
   image: SANDBOX_IMAGE,
   instance_type: "standard-4",
 } as const;
-export const SANDBOX_IMAGE_DIGEST = SANDBOX_IMAGE.slice(SANDBOX_IMAGE.indexOf("@") + 1);
 
 export const SANDBOX_CAPACITY = {
   vcpu: 4,

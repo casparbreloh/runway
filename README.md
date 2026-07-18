@@ -187,6 +187,16 @@ wrangler login
 runway deploy
 ```
 
+Run one workflow against the current checkout in Runway's pinned Linux image:
+
+```bash
+runway run check
+runway run webhook --event event.json
+```
+
+Local runs exercise workflow and tool-provider behavior without emulating Cloudflare durability.
+Local cache restoration is bypassed; production latency and cache decisions still require live runs.
+
 In CI, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
 with `runway secrets set NAME ...`. Deployment identity cannot be configured through `package.json`
 or environment variables.

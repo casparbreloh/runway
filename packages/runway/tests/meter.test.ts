@@ -37,6 +37,14 @@ test("a bounded structured report distinguishes every run phase without cardinal
   meter.record({ type: "exec", state: "reconnected", durationMs: 20 });
   meter.record({ type: "cache", state: "miss", durationMs: 4, bytes: 0 });
   meter.record({ type: "cache", state: "hit", durationMs: 2, bytes: 50 });
+  meter.record({ type: "tool", state: "prepared", durationMs: 6 });
+  meter.record({
+    type: "transfer",
+    operation: "get",
+    state: "finished",
+    durationMs: 5,
+    bytes: 80,
+  });
   meter.record({ type: "loss", startedCommands: 2 });
   meter.record({ type: "run", outcome: "failure", durationMs: 31 });
   for (let index = 0; index < 10_000; index += 1) {
@@ -46,7 +54,7 @@ test("a bounded structured report distinguishes every run phase without cardinal
   const report = meter.report();
 
   expect(report.schema).toBe(1);
-  expect(report.samples).toHaveLength(10);
+  expect(report.samples).toHaveLength(12);
   expect(report.samples).toContainEqual({
     type: "exec",
     state: "finished",
@@ -64,6 +72,8 @@ test("a bounded structured report distinguishes every run phase without cardinal
     "sandbox",
     "source",
     "source",
+    "tool",
+    "transfer",
   ]);
   expect(JSON.stringify(report)).not.toMatch(
     /"(?:command|output|url|repository|runId|placement|secret|digest|author)"/i,

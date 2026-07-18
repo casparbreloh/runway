@@ -3,6 +3,11 @@ import type { ToolProvider } from "../tools.ts";
 
 type Operations = Pick<Step, "exec" | "cache">;
 
+interface ToolObservation {
+  readonly state: "prepared" | "failed";
+  readonly durationMs: number;
+}
+
 export const shell = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const withEnvironment = (
@@ -21,26 +26,35 @@ const withEnvironment = (
 export const withTools = (
   operations: Operations,
   providers: readonly ToolProvider[] | undefined,
+  observe?: (observation: ToolObservation) => void,
+  now: () => number = () => performance.now(),
 ): Operations => {
   if (!providers) return operations;
   if (providers.length === 0) return operations;
   let preparation: Promise<void> | undefined;
   const prepare = (): Promise<void> => {
     preparation ??= (async () => {
-      for (const provider of providers) {
-        if (provider.cache) {
-          await operations.cache(`runway:tools:${provider.id}:cache`, provider.cache);
+      const started = now();
+      try {
+        for (const provider of providers) {
+          if (provider.cache) {
+            await operations.cache(`runway:tools:${provider.id}:cache`, provider.cache);
+          }
         }
-      }
-      const setupPaths: string[] = [];
-      const setupEnv: Record<string, string> = {};
-      for (const provider of providers) {
-        setupPaths.push(...(provider.paths ?? []));
-        Object.assign(setupEnv, provider.env ?? {});
-        await operations.exec(
-          `runway:tools:${provider.id}:setup`,
-          withEnvironment(provider.setup, setupPaths, setupEnv),
-        );
+        const setupPaths: string[] = [];
+        const setupEnv: Record<string, string> = {};
+        for (const provider of providers) {
+          setupPaths.push(...(provider.paths ?? []));
+          Object.assign(setupEnv, provider.env ?? {});
+          await operations.exec(
+            `runway:tools:${provider.id}:setup`,
+            withEnvironment(provider.setup, setupPaths, setupEnv),
+          );
+        }
+        observe?.({ state: "prepared", durationMs: Math.max(0, Math.round(now() - started)) });
+      } catch (error) {
+        observe?.({ state: "failed", durationMs: Math.max(0, Math.round(now() - started)) });
+        throw error;
       }
     })();
     return preparation;

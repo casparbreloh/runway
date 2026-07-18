@@ -316,7 +316,7 @@ export class Sandbox {
 
   async exec(step: DurableStep, command: string | ExecOptions): Promise<ExecResult> {
     if (this.#lost) throw this.#lost;
-    const options = normalize(command);
+    const options = normalizeExec(command);
     const digest = await digestCommand(options);
     this.#started = true;
     this.#used = true;
@@ -459,7 +459,7 @@ export class Sandbox {
   }
 }
 
-const normalize = (command: string | ExecOptions): NormalizedExecOptions => {
+export const normalizeExec = (command: string | ExecOptions): NormalizedExecOptions => {
   const options = typeof command === "string" ? { command } : command;
   const timeoutMs = options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
