@@ -30,6 +30,8 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 ## Commands
 
 - Full gate: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test`
+- Exact pinned-image cache contract: `pnpm test:image` (requires privileged Docker with linux/amd64
+  support).
 - CLI: `runway deploy` and `runway secrets set`.
 
 ## Authoring Model

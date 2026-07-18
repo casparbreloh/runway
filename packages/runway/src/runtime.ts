@@ -2,7 +2,6 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import type { PreparedCache } from "./internal/cache/cache.ts";
-import { normalizedCacheTarget } from "./internal/cache/path.ts";
 import { CLOUDFLARE_PRICE_TABLE, Meter } from "./internal/meter.ts";
 import type { RuntimeBinding } from "./internal/runtime/binding.ts";
 import { RUNTIME_BINDING } from "./internal/runtime/contract.ts";
@@ -17,7 +16,7 @@ import { Terminal, TerminalError } from "./internal/terminal.ts";
 import type { Finalization, TerminalRecord, TerminalState } from "./internal/terminal.ts";
 import { withTools } from "./internal/tool/execution.ts";
 import { makeStep, secretsOf } from "./step.ts";
-import { validateCacheDeclaration, type Step } from "./step.ts";
+import type { Step } from "./step.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
@@ -119,15 +118,6 @@ interface StepRuntime extends Pick<Step, "do" | "exec" | "cache" | "sleep"> {
   finish(finalization: Finalization): Promise<void>;
 }
 
-const cacheTreeId = async (id: string, index: number, path: string): Promise<string> => {
-  const bytes = new TextEncoder().encode(JSON.stringify([id, index, path]));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  const hex = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  return `runway:cache-tree:${hex}`;
-};
-
 const makeStepRuntime = (
   step: WorkflowStep,
   binding: RuntimeBinding,
@@ -149,6 +139,8 @@ const makeStepRuntime = (
     placement: {
       cache: async ({ secrets: _secrets, ...request }) =>
         await binding.restoreCache({ ...request, secrets }),
+      discardCaches: async ({ secrets: _secrets, ...request }) =>
+        await binding.discardCaches({ ...request, secrets }),
       quiesce: async () => await binding.quiesce(runId, secrets),
       prepareCaches: async ({ secrets: _secrets, ...request }) =>
         await binding.prepareCaches({ ...request, secrets }),
@@ -265,78 +257,31 @@ const makeStepRuntime = (
         command,
       ),
     cache: async (id, declaration) => {
-      validateCacheDeclaration(declaration);
-      const results = [];
-      for (const [index, path] of declaration.paths.entries()) {
-        const treeId = declaration.paths.length === 1 ? id : await cacheTreeId(id, index, path);
-        results.push({
-          path,
-          result: await sandbox.cache(
-            {
-              id: treeId,
-              run: async (digest, work) => {
-                const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-                  step.do(
-                    treeId,
-                    { retries: { limit: 5, delay: 0 } },
-                    async () => ({ digest, record: await work() }) as never,
-                  ),
-                );
-                if (
-                  !recorded ||
-                  typeof recorded !== "object" ||
-                  Array.isArray(recorded) ||
-                  Object.keys(recorded).sort().join(",") !== "digest,record" ||
-                  typeof (recorded as { digest?: unknown }).digest !== "string"
-                ) {
-                  throw new Error("invalid durable cache evidence");
-                }
-                return recorded as {
-                  readonly digest: string;
-                  readonly record: Awaited<ReturnType<typeof work>>;
-                };
-              },
-            },
-            {
-              key: declaration.key,
-              path,
-              ...(declaration.restoreKeys ? { restoreKeys: declaration.restoreKeys } : {}),
-              ...(declaration.budget ? { budget: declaration.budget } : {}),
-            },
-          ),
-        });
-      }
-      const hits = results.filter(
-        (
-          entry,
-        ): entry is typeof entry & {
-          result: Extract<(typeof entry)["result"], { state: "hit" }>;
-        } => entry.result.state === "hit",
-      );
-      if (hits.length > 0 && hits.length !== results.length) {
-        await binding.discardCaches({
-          runId,
-          paths: hits.map((entry) => normalizedCacheTarget(entry.path)),
-          secrets,
-        });
-      }
-      const miss = results.find((entry) => entry.result.state !== "hit")?.result;
-      if (miss) return miss;
-      const first = hits[0]!.result;
-      if (hits.some((entry) => entry.result.key !== first.key)) {
-        await binding.discardCaches({
-          runId,
-          paths: hits.map((entry) => normalizedCacheTarget(entry.path)),
-          secrets,
-        });
-        return { state: "miss", reason: "absent" };
-      }
-      return {
-        state: "hit",
-        bytes: hits.reduce((total, entry) => total + entry.result.bytes, 0),
-        key: first.key,
-        match: hits.some((entry) => entry.result.match === "restore") ? "restore" : "exact",
-      };
+      return await sandbox.cacheSet(id, declaration, (treeId) => ({
+        id: treeId,
+        run: async (digest, work) => {
+          const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+            step.do(
+              treeId,
+              { retries: { limit: 5, delay: 0 } },
+              async () => ({ digest, record: await work() }) as never,
+            ),
+          );
+          if (
+            !recorded ||
+            typeof recorded !== "object" ||
+            Array.isArray(recorded) ||
+            Object.keys(recorded).sort().join(",") !== "digest,record" ||
+            typeof (recorded as { digest?: unknown }).digest !== "string"
+          ) {
+            throw new Error("invalid durable cache evidence");
+          }
+          return recorded as {
+            readonly digest: string;
+            readonly record: Awaited<ReturnType<typeof work>>;
+          };
+        },
+      }));
     },
     sleep: (id: string, durationMs: number): Promise<void> =>
       measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),

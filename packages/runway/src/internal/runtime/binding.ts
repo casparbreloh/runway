@@ -1,4 +1,5 @@
-import type { CacheTreeDeclaration, ExecResult } from "../../step.ts";
+import type { ExecResult } from "../../step.ts";
+import type { CacheTreeDeclaration } from "../cache/cache.ts";
 import type { PendingCache, PreparedCache } from "../cache/cache.ts";
 import type { CacheRecord, NormalizedExecOptions } from "../sandbox/sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "../source/source.ts";

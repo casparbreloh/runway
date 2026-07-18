@@ -84,13 +84,3 @@ test("a native release is another ordinary cached provider", () => {
     paths: ["/cache/runway/tools/release/aube/bin"],
   });
 });
-
-test("providers cannot multiply a cache budget across paths", () => {
-  expect(() =>
-    defineToolProvider({
-      id: "invalid-budget",
-      cache: { key: "v1", paths: [".one", ".two"], budget: { maxBytes: 100 } },
-      setup: "true",
-    }),
-  ).toThrow("cache budgets require a single path");
-});

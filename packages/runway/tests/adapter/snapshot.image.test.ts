@@ -11,6 +11,7 @@ import {
   CloudflareCacheSnapshot,
   type CacheSnapshotProcess,
 } from "../../src/internal/cache/snapshot.ts";
+import { SANDBOX_IMAGE } from "../../src/internal/sandbox/config.ts";
 
 const execute = promisify(execFile);
 
@@ -76,8 +77,6 @@ const inContainer = async (container: string, script: string): Promise<string> =
 
 test("the exact pinned image safely captures and restores hardlinks through the snapshot adapter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "runway-cache-snapshot-"));
-  const image =
-    "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042";
   const { stdout } = await execute(
     "docker",
     [
@@ -91,7 +90,7 @@ test("the exact pinned image safely captures and restores hardlinks through the 
       "linux/amd64",
       "--entrypoint",
       "/bin/sh",
-      image,
+      SANDBOX_IMAGE,
       "-lc",
       "sleep infinity",
     ],

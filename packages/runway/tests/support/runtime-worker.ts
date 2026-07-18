@@ -5,6 +5,7 @@ import type { CacheDeclaration, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
 import { Cache } from "../../src/internal/cache/cache.ts";
+import type { CacheTreeDeclaration } from "../../src/internal/cache/cache.ts";
 import { normalizedCacheTarget } from "../../src/internal/cache/path.ts";
 import type { RuntimeBinding } from "../../src/internal/runtime/binding.ts";
 import type { FailureDiagnostic } from "../../src/internal/runtime/diagnostic.ts";
@@ -15,7 +16,6 @@ import type {
   TerminalIdentity,
   TerminalRecord,
 } from "../../src/internal/terminal.ts";
-import type { CacheTreeDeclaration } from "../../src/step.ts";
 import { repositoryFixture } from "./repository.ts";
 
 let githubEffectEvents: string[] = [];

@@ -1,8 +1,19 @@
 const encoder = new TextEncoder();
 
-import type { CacheKey, CacheTreeDeclaration } from "../../step.ts";
+import type { CacheDeclaration, CacheKey } from "../../step.ts";
 import type { Meter } from "../meter.ts";
 import { normalizedCacheTarget } from "./path.ts";
+
+export interface Budget {
+  readonly maxBytes: number;
+  readonly maxDurationMs: number;
+  readonly maxEstimatedCostUsd: number;
+}
+
+export interface CacheTreeDeclaration extends Omit<CacheDeclaration, "paths"> {
+  readonly path: string;
+  readonly budget?: Partial<Budget>;
+}
 
 interface CacheContext {
   readonly repositoryId: string;

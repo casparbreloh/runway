@@ -1,5 +1,5 @@
-import type { Budget } from "../../step.ts";
 import { CACHE_LIMITS } from "../sandbox/config.ts";
+import type { Budget } from "./cache.ts";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_ENTRIES = 1_000_000;

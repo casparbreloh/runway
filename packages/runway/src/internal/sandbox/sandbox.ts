@@ -1,7 +1,8 @@
-import { trustedExecError } from "../../step.ts";
-import type { CacheResult, CacheTreeDeclaration, ExecOptions, ExecResult } from "../../step.ts";
+import { trustedExecError, validateCacheDeclaration } from "../../step.ts";
+import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "../../step.ts";
 import { cacheDeclarationEvidence } from "../cache/cache.ts";
-import type { PendingCache, PreparedCache } from "../cache/cache.ts";
+import type { CacheTreeDeclaration, PendingCache, PreparedCache } from "../cache/cache.ts";
+import { normalizedCacheTarget } from "../cache/path.ts";
 import type { Meter } from "../meter.ts";
 import { redactSecrets } from "../secret/redaction.ts";
 import type { PreparedSource, Source } from "../source/source.ts";
@@ -67,6 +68,11 @@ export interface Placement {
     readonly source: PreparedSource;
     readonly secrets: ReadonlyArray<string>;
   }): Promise<CacheRecord>;
+  discardCaches?(request: {
+    readonly runId: string;
+    readonly paths: readonly string[];
+    readonly secrets: ReadonlyArray<string>;
+  }): Promise<void>;
   quiesce?(runId: string, secrets: ReadonlyArray<string>): Promise<void>;
   prepareCaches?(request: {
     readonly runId: string;
@@ -186,6 +192,60 @@ export class Sandbox {
       }),
     );
     return record.result;
+  }
+
+  async cacheSet(
+    id: string,
+    declaration: CacheDeclaration,
+    durable: (id: string) => DurableCache,
+  ): Promise<CacheResult> {
+    validateCacheDeclaration(declaration);
+    const results = [];
+    for (const [index, path] of declaration.paths.entries()) {
+      const treeId = declaration.paths.length === 1 ? id : await cacheTreeId(id, index, path);
+      results.push({
+        path,
+        result: await this.cache(durable(treeId), {
+          key: declaration.key,
+          path,
+          ...(declaration.restoreKeys ? { restoreKeys: declaration.restoreKeys } : {}),
+        }),
+      });
+    }
+    const hits = results.filter(
+      (
+        entry,
+      ): entry is typeof entry & {
+        result: Extract<(typeof entry)["result"], { state: "hit" }>;
+      } => entry.result.state === "hit",
+    );
+    if (hits.length > 0 && hits.length !== results.length) {
+      await this.#discardCaches(hits.map((entry) => entry.path));
+    }
+    const miss = results.find((entry) => entry.result.state !== "hit")?.result;
+    if (miss) return miss;
+    const first = hits[0]!.result;
+    if (hits.some((entry) => entry.result.key !== first.key)) {
+      await this.#discardCaches(hits.map((entry) => entry.path));
+      return { state: "miss", reason: "absent" };
+    }
+    return {
+      state: "hit",
+      bytes: hits.reduce((total, entry) => total + entry.result.bytes, 0),
+      key: first.key,
+      match: hits.some((entry) => entry.result.match === "restore") ? "restore" : "exact",
+    };
+  }
+
+  async #discardCaches(paths: readonly string[]): Promise<void> {
+    if (!this.#placement.discardCaches) {
+      throw new Error("cache placement cannot discard an incomplete cache set");
+    }
+    await this.#placement.discardCaches({
+      runId: this.#runId,
+      paths: paths.map(normalizedCacheTarget),
+      secrets: this.#secrets,
+    });
   }
 
   async prepare(): Promise<readonly PreparedCache[]> {
@@ -408,6 +468,15 @@ const normalize = (command: string | ExecOptions): NormalizedExecOptions => {
     env: { CI: "true", ...options.env },
     timeoutMs,
   };
+};
+
+const cacheTreeId = async (id: string, index: number, path: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(JSON.stringify([id, index, path]));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `runway:cache-tree:${hex}`;
 };
 
 export const digestCommand = async (command: NormalizedExecOptions): Promise<string> => {

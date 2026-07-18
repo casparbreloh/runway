@@ -126,9 +126,6 @@ const result = await step.cache("compiler-state", {
 });
 ```
 
-Budgets are available for single-path declarations, where their byte, duration, and cost bounds are
-unambiguous.
-
 The foundation knows paths, content keys, platform identity, trust, integrity, and budgets. It knows
 nothing about pnpm, Python, Rust, or any other ecosystem. Relative targets resolve below
 `/workspace`; absolute targets are restricted to safe roots below `/workspace` or `/cache`. Cache

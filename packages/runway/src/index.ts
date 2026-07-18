@@ -20,7 +20,6 @@ export type {
   GitHubTrigger,
 } from "./trigger.ts";
 export type {
-  Budget,
   CacheDeclaration,
   CacheKey,
   CacheResult,

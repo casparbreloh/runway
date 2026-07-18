@@ -37,12 +37,6 @@ export const trustedExecError = (id: string, command: string, result: ExecResult
 export const isTrustedExecError = (error: unknown): error is ExecError =>
   error instanceof ExecError && trustedExecErrors.has(error);
 
-export interface Budget {
-  readonly maxBytes: number;
-  readonly maxDurationMs: number;
-  readonly maxEstimatedCostUsd: number;
-}
-
 export type CacheKey =
   | string
   | {
@@ -54,11 +48,6 @@ export interface CacheDeclaration {
   readonly key: CacheKey;
   readonly paths: readonly [string, ...string[]];
   readonly restoreKeys?: readonly string[];
-  readonly budget?: Partial<Budget>;
-}
-
-export interface CacheTreeDeclaration extends Omit<CacheDeclaration, "paths"> {
-  readonly path: string;
 }
 
 export type CacheResult =
@@ -76,9 +65,6 @@ export type CacheResult =
 export const validateCacheDeclaration = (declaration: CacheDeclaration): void => {
   if (!Array.isArray(declaration.paths) || declaration.paths.length === 0) {
     throw new Error("cache paths must not be empty");
-  }
-  if (declaration.paths.length > 1 && declaration.budget) {
-    throw new Error("cache budgets require a single path");
   }
 };
 
