@@ -380,7 +380,7 @@ export const toEntrypoint = (
       const meter = new Meter({
         priceTable: CLOUDFLARE_PRICE_TABLE,
         container: SANDBOX_CAPACITY,
-        emit: (report) => console.log({ type: "runway-meter", report }),
+        emit: async (report) => await binding.reportMeter(event.instanceId, report),
       });
       const diagnostic: { value: FailureDiagnostic | null } = { value: null };
       const terminal = await makeTerminal(step, binding, event.instanceId, meter, diagnostic);
@@ -422,7 +422,15 @@ export const toEntrypoint = (
       try {
         result = await def.run(
           makeStep(
-            { ...runtime, ...withTools(runtime, def.tools) },
+            {
+              ...runtime,
+              ...withTools(
+                runtime,
+                def.tools,
+                (observation) => meter.record({ type: "tool", ...observation }),
+                () => meter.now(),
+              ),
+            },
             {
               runId: event.instanceId,
               secrets,

@@ -125,6 +125,22 @@ test("deploy errors when no workflows are discovered", async () => {
   }
 });
 
+test("run validates workflow selection before starting a local container", async () => {
+  const app = await project({
+    ".runway/workflows/hello.ts": defaultWorkflow("hello"),
+  });
+
+  try {
+    const result = await run(["run", "missing"], {}, app.cwd);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/runway: run failed/);
+    expect(result.output).toMatch(/workflow "missing" was not found/);
+  } finally {
+    await app.cleanup();
+  }
+});
+
 test("deploy errors on duplicate workflow ids", async () => {
   const app = await project({
     ".runway/workflows/one.ts": workflow("same"),

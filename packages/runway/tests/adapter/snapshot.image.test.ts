@@ -1,19 +1,32 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { expect, test } from "vitest";
 
+import { cron, workflow } from "../../src/index.ts";
 import {
   CloudflareCacheSnapshot,
   type CacheSnapshotProcess,
 } from "../../src/internal/cache/snapshot.ts";
-import { SANDBOX_IMAGE } from "../../src/internal/sandbox/config.ts";
+import { runLocal } from "../../src/internal/local.ts";
+import { LOCAL_SANDBOX_IMAGE } from "../../src/internal/sandbox/config.ts";
 
 const execute = promisify(execFile);
+
+const runningImageContainers = async (): Promise<readonly string[]> => {
+  const { stdout } = await execute("docker", [
+    "ps",
+    "--filter",
+    `ancestor=${LOCAL_SANDBOX_IMAGE}`,
+    "--format",
+    "{{.ID}}",
+  ]);
+  return stdout.trim().split("\n").filter(Boolean).sort();
+};
 
 class DockerProcess implements CacheSnapshotProcess {
   readonly errors: string[] = [];
@@ -75,6 +88,31 @@ const inContainer = async (container: string, script: string): Promise<string> =
   return stdout;
 };
 
+test("the local runner isolates the checkout in the exact pinned image", async () => {
+  const source = await mkdtemp(join(tmpdir(), "runway-local-"));
+  await writeFile(join(source, "source.txt"), "original");
+  await mkdir(join(source, "node_modules"));
+  await writeFile(join(source, "node_modules", "host-only"), "host");
+  const before = await runningImageContainers();
+  const definition = workflow({ id: "local", trigger: () => cron("* * * * *") }).run(
+    async (step) => {
+      await step.exec(
+        "isolate",
+        "test ! -e node_modules && printf changed > source.txt && printf local > local-only",
+      );
+    },
+  );
+
+  try {
+    await runLocal(definition, { cwd: source, env: {}, event: {} });
+    expect(await readFile(join(source, "source.txt"), "utf8")).toBe("original");
+    await expect(readFile(join(source, "local-only"), "utf8")).rejects.toThrow();
+    expect(await runningImageContainers()).toEqual(before);
+  } finally {
+    await rm(source, { force: true, recursive: true });
+  }
+}, 60_000);
+
 test("the exact pinned image safely captures and restores hardlinks through the snapshot adapter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "runway-cache-snapshot-"));
   const { stdout } = await execute(
@@ -90,7 +128,7 @@ test("the exact pinned image safely captures and restores hardlinks through the 
       "linux/amd64",
       "--entrypoint",
       "/bin/sh",
-      SANDBOX_IMAGE,
+      LOCAL_SANDBOX_IMAGE,
       "-lc",
       "sleep infinity",
     ],
@@ -98,6 +136,13 @@ test("the exact pinned image safely captures and restores hardlinks through the 
   );
   const container = stdout.trim();
   try {
+    const { stdout: miseVersion } = await execute("docker", [
+      "exec",
+      container,
+      "/usr/local/bin/mise",
+      "--version",
+    ]);
+    expect(miseVersion).toContain("2026.7.7");
     await inContainer(
       container,
       String.raw`

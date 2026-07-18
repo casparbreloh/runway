@@ -6,6 +6,8 @@ import type { CacheDeclaration, ExecOptions, ExecResult } from "../src/step.ts";
 
 test("tool providers restore every private cache before setup and prepare once", async () => {
   const calls: { readonly id: string; readonly cwd?: string }[] = [];
+  const observations: unknown[] = [];
+  let now = 0;
   const operations = {
     cache: async (id: string, _declaration: CacheDeclaration) => {
       calls.push({ id });
@@ -35,7 +37,12 @@ test("tool providers restore every private cache before setup and prepare once",
     }),
   ];
 
-  const runtime = withTools(operations, tools);
+  const runtime = withTools(
+    operations,
+    tools,
+    (value) => observations.push(value),
+    () => (now += 3),
+  );
   await runtime.exec("check", "which first");
   await runtime.exec("test", { command: "first --version", cwd: "/workspace/example" });
 
@@ -48,6 +55,7 @@ test("tool providers restore every private cache before setup and prepare once",
     "test",
   ]);
   expect(calls.at(-1)).toMatchObject({ cwd: "/workspace/example" });
+  expect(observations).toEqual([{ state: "prepared", durationMs: 3 }]);
 });
 
 test("mise supports repository discovery and inline tools behind the same provider seam", () => {
@@ -59,7 +67,11 @@ test("mise supports repository discovery and inline tools behind the same provid
   expect(inline.cache).toBeUndefined();
   expect(inline.env).toMatchObject({
     MISE_CONFIG_FILE: "/cache/runway/tools/mise/config.toml",
+    MISE_STATE_DIR: "/cache/runway/tools/mise/state",
   });
+  expect(inline.paths).toEqual(["/cache/runway/tools/mise/data/shims"]);
+  expect(inline.setup).toContain("'/usr/local/bin/mise' install --yes");
+  expect(inline.setup).not.toContain("curl");
 });
 
 test("workflow definitions own an immutable normalized provider snapshot", () => {

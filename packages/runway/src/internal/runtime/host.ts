@@ -23,7 +23,7 @@ import {
   type GitHubAcceptedDelivery,
 } from "../github/delivery.ts";
 import { createGitHubProvider } from "../github/provider.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "../meter.ts";
+import { CLOUDFLARE_PRICE_TABLE, emitMeterReport, Meter, type MeterReport } from "../meter.ts";
 import { cloudflareSandbox } from "../sandbox/cloudflare.ts";
 import {
   CACHE_SCHEMA,
@@ -236,6 +236,11 @@ export class RunwaySandboxBinding
     }
   }
 
+  async reportMeter(runId: string, report: MeterReport): Promise<void> {
+    this.#assertRun(runId);
+    emitMeterReport(report);
+  }
+
   async publishTerminal(
     runId: string,
     finalization: Finalization,
@@ -324,43 +329,6 @@ export class RunwaySandboxBinding
     const sessionToken = this.env[CACHE_R2_SESSION_TOKEN_BINDING];
     const sandbox = this.#sandbox();
     const snapshotSecrets = sourceRequest ? this.#snapshotValues(sourceRequest.secrets) : undefined;
-    const transfer =
-      sourceRequest &&
-      snapshotSecrets &&
-      config.imageDigest &&
-      typeof accessKeyId === "string" &&
-      accessKeyId.length > 0 &&
-      typeof secretAccessKey === "string" &&
-      secretAccessKey.length > 0
-        ? new CloudflareCacheTransfer({
-            accountId: config.accountId,
-            bucket: config.bucket,
-            accessKeyId,
-            secretAccessKey,
-            ...(typeof sessionToken === "string" && sessionToken.length > 0
-              ? { sessionToken }
-              : {}),
-            expiresInSeconds: 120,
-            transport: sandbox.cacheTransfer(sourceRequest.runId, snapshotSecrets),
-            objects: {
-              head: async (key) => {
-                const object = await this.env[DATA_BUCKET_BINDING].head(key);
-                const digest = object?.customMetadata?.["runway-sha256"];
-                return object && typeof digest === "string"
-                  ? { bytes: object.size, digest }
-                  : undefined;
-              },
-            },
-          })
-        : undefined;
-    const snapshots =
-      transfer && sourceRequest && snapshotSecrets
-        ? new CloudflareCacheSnapshot({
-            runId: sourceRequest.runId,
-            process: async () => await sandbox.cacheProcess(sourceRequest.runId, snapshotSecrets),
-            transfer,
-          })
-        : undefined;
     const meter = new Meter({
       priceTable: CLOUDFLARE_PRICE_TABLE,
       container: SANDBOX_CAPACITY,
@@ -381,8 +349,46 @@ export class RunwaySandboxBinding
           workflowSteps: CACHE_LIMITS.restoreWorkflowSteps,
         },
       },
-      emit: (report) => console.log({ type: "runway-meter", report }),
+      emit: emitMeterReport,
     });
+    const transfer =
+      sourceRequest &&
+      snapshotSecrets &&
+      config.imageDigest &&
+      typeof accessKeyId === "string" &&
+      accessKeyId.length > 0 &&
+      typeof secretAccessKey === "string" &&
+      secretAccessKey.length > 0
+        ? new CloudflareCacheTransfer({
+            accountId: config.accountId,
+            bucket: config.bucket,
+            accessKeyId,
+            secretAccessKey,
+            ...(typeof sessionToken === "string" && sessionToken.length > 0
+              ? { sessionToken }
+              : {}),
+            expiresInSeconds: 120,
+            log: (entry) => meter.record({ type: "transfer", ...entry }),
+            transport: sandbox.cacheTransfer(sourceRequest.runId, snapshotSecrets),
+            objects: {
+              head: async (key) => {
+                const object = await this.env[DATA_BUCKET_BINDING].head(key);
+                const digest = object?.customMetadata?.["runway-sha256"];
+                return object && typeof digest === "string"
+                  ? { bytes: object.size, digest }
+                  : undefined;
+              },
+            },
+          })
+        : undefined;
+    const snapshots =
+      transfer && sourceRequest && snapshotSecrets
+        ? new CloudflareCacheSnapshot({
+            runId: sourceRequest.runId,
+            process: async () => await sandbox.cacheProcess(sourceRequest.runId, snapshotSecrets),
+            transfer,
+          })
+        : undefined;
     return new Cache({
       context: {
         repositoryId: config.repositoryId,

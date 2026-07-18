@@ -226,8 +226,8 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
       container: {
         name: "runway-ship-it",
         image:
-          "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
-        imageDigest: "sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
+          "registry.cloudflare.com/7f9a6aa1e42231cfbf32bbd13a9f3910/runway-sandbox@sha256:592fab3d33909f2d95220cf814d984596571ad04facc635e4ff858ab2012b7cd",
+        imageDigest: "sha256:592fab3d33909f2d95220cf814d984596571ad04facc635e4ff858ab2012b7cd",
         platform: { os: "linux", architecture: "amd64" },
         instanceType: "standard-4",
       },

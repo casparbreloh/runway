@@ -782,6 +782,8 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
     runtimeLifecycleEvents.push(`cache:discard:${request.paths.join(",")}`);
   }
 
+  async reportMeter(): Promise<void> {}
+
   async prepareCaches(request: Parameters<RuntimeBinding["prepareCaches"]>[0]) {
     return request.pending.map((pending) => ({
       state: "skipped" as const,

@@ -44,6 +44,18 @@ export type Sample =
       readonly durationMs: number;
       readonly bytes: number;
     }
+  | {
+      readonly type: "tool";
+      readonly state: "prepared" | "failed";
+      readonly durationMs: number;
+    }
+  | {
+      readonly type: "transfer";
+      readonly operation: "get" | "put";
+      readonly state: "finished" | "present";
+      readonly durationMs: number;
+      readonly bytes: number;
+    }
   | UsageSample
   | { readonly type: "loss"; readonly startedCommands: number }
   | { readonly type: "run"; readonly outcome: Outcome; readonly durationMs: number };
@@ -63,6 +75,9 @@ export interface MeterReport {
   readonly samples: ReadonlyArray<Record<string, string | number>>;
   readonly estimate: { readonly priceTableId: string; readonly usd: number };
 }
+
+export const emitMeterReport = (report: MeterReport): void =>
+  console.log(JSON.stringify({ type: "runway-meter", report }));
 
 interface CacheBoundOptions {
   readonly maxBytes?: number;
@@ -259,6 +274,27 @@ const assertSample = (sample: Sample, priceTableId?: string): void => {
       throw new Error("invalid meter sample");
     return;
   }
+  if (sample.type === "tool") {
+    if (
+      keys(sample) !== "durationMs,state,type" ||
+      !["prepared", "failed"].includes(sample.state) ||
+      !duration(sample.durationMs)
+    )
+      throw new Error("invalid meter sample");
+    return;
+  }
+  if (sample.type === "transfer") {
+    if (
+      keys(sample) !== "bytes,durationMs,operation,state,type" ||
+      !["get", "put"].includes(sample.operation) ||
+      !["finished", "present"].includes(sample.state) ||
+      (sample.operation === "get" && sample.state !== "finished") ||
+      !duration(sample.durationMs) ||
+      !integer(sample.bytes)
+    )
+      throw new Error("invalid meter sample");
+    return;
+  }
   if (sample.type === "usage") {
     const source = sample.source as UsageSource;
     const unit = sample.unit as UsageUnit;
@@ -315,6 +351,10 @@ const series = (sample: Sample): string => {
   if (sample.type === "sandbox") return `${sample.type}:${sample.phase}`;
   if (sample.type === "source" || sample.type === "exec" || sample.type === "cache") {
     return `${sample.type}:${sample.state}`;
+  }
+  if (sample.type === "tool") return `${sample.type}:${sample.state}`;
+  if (sample.type === "transfer") {
+    return `${sample.type}:${sample.operation}:${sample.state}`;
   }
   if (sample.type === "usage") {
     return `${sample.type}:${sample.source}:${sample.unit}:${sample.priceTableId}:${sample.provenance}`;
@@ -373,6 +413,24 @@ const aggregate = (
       state: sample.state,
       count,
       durationMs: sumInteger(Number(previous?.durationMs ?? 0), sample.durationMs),
+    };
+  }
+  if (sample.type === "tool") {
+    return {
+      type: sample.type,
+      state: sample.state,
+      count,
+      durationMs: sumInteger(Number(previous?.durationMs ?? 0), sample.durationMs),
+    };
+  }
+  if (sample.type === "transfer") {
+    return {
+      type: sample.type,
+      operation: sample.operation,
+      state: sample.state,
+      count,
+      durationMs: sumInteger(Number(previous?.durationMs ?? 0), sample.durationMs),
+      bytes: sumInteger(Number(previous?.bytes ?? 0), sample.bytes),
     };
   }
   return {

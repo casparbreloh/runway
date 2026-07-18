@@ -1,6 +1,7 @@
 import type { ExecResult } from "../../step.ts";
 import type { CacheTreeDeclaration } from "../cache/cache.ts";
 import type { PendingCache, PreparedCache } from "../cache/cache.ts";
+import type { MeterReport } from "../meter.ts";
 import type { CacheRecord, NormalizedExecOptions } from "../sandbox/sandbox.ts";
 import type { PreparedSource, SourceIdentity } from "../source/source.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "../terminal.ts";
@@ -8,6 +9,7 @@ import type { FailureDiagnostic } from "./diagnostic.ts";
 
 export interface RuntimeBinding {
   startRun(runId: string): Promise<boolean>;
+  reportMeter(runId: string, report: MeterReport): Promise<void>;
   terminal(runId: string): Promise<TerminalIdentity>;
   claimTerminal(runId: string, candidate: TerminalRecord): Promise<TerminalRecord>;
   readTerminal(runId: string): Promise<TerminalRecord | undefined>;
