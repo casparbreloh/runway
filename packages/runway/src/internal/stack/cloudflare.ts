@@ -195,9 +195,9 @@ export const cloudflareStackManifest = (opts: {
       {
         binding: GITHUB_COORDINATOR_BINDING,
         className: GITHUB_COORDINATOR_CLASS,
-        name: `${opts.name}-github`,
+        name: `${opts.name}_${GITHUB_COORDINATOR_CLASS}`,
       },
-      { binding: SANDBOX_BINDING, className: SANDBOX_CLASS, name: `${opts.name}-sandbox` },
+      { binding: SANDBOX_BINDING, className: SANDBOX_CLASS, name: `${opts.name}_${SANDBOX_CLASS}` },
     ].sort((left, right) => left.binding.localeCompare(right.binding)),
     schedules: [...opts.schedules].sort(),
     workersDev: true,

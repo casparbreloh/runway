@@ -233,8 +233,8 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
       },
       schedules: ["0 9 * * *"],
       namespaces: expect.arrayContaining([
-        expect.objectContaining({ name: "runway-ship-it-github" }),
-        expect.objectContaining({ name: "runway-ship-it-sandbox" }),
+        expect.objectContaining({ name: "runway-ship-it_RunwayGitHubCoordinator" }),
+        expect.objectContaining({ name: "runway-ship-it_Sandbox" }),
       ]),
     });
     expect(manifest!.buckets.map(({ name }) => name)).toEqual(["runway-data", "runway-state"]);

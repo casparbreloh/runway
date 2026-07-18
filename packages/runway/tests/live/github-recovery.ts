@@ -387,7 +387,7 @@ const durableNamespaces = async (
 };
 
 const namespaceNames = (scriptName: string): ReadonlySet<string> =>
-  new Set([`${scriptName}-github`, `${scriptName}-sandbox`]);
+  new Set([`${scriptName}_RunwayGitHubCoordinator`, `${scriptName}_Sandbox`]);
 
 const relatedNamespaces = async (
   cf: Cloudflare,

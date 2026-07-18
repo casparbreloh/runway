@@ -126,9 +126,9 @@ export default workflow({
   with a bounded canonical hardlink trailer. Restore is staged and integrity-checked; only the
   durable winning success may publish. Cache is not Source, a checkpoint, or a public content store.
 - A Stack derives one name from its Git repository. Its Worker, Dynamic Workflow, and container share
-  that name; its Durable Object namespaces append `-github` and `-sandbox`. Account data and state use
-  the shared `runway-data` and `runway-state` buckets. The digest-pinned linux/amd64 image runs on
-  `standard-4`.
+  that name. Cloudflare derives its Durable Object namespace names from the Worker and class names.
+  Account data and state use the shared `runway-data` and `runway-state` buckets. The digest-pinned
+  linux/amd64 image runs on `standard-4`.
 - Runway's root workflows use the mise provider for the Node/pnpm toolchain and keep application
   dependency installation uncached. Earlier evidence showed that transporting the pnpm store and
   `node_modules` costs more and runs slower than a clean install.

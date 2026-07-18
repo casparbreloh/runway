@@ -108,9 +108,9 @@ const manifestOf = (
     {
       binding: "RUNWAY_GITHUB_COORDINATOR",
       className: "RunwayGitHubCoordinator",
-      name: `${name}-github`,
+      name: `${name}_RunwayGitHubCoordinator`,
     },
-    { binding: "RunwaySandbox", className: "Sandbox", name: `${name}-sandbox` },
+    { binding: "RunwaySandbox", className: "Sandbox", name: `${name}_Sandbox` },
   ],
   schedules: ["0 3 * * *"],
   workersDev: true,
@@ -510,7 +510,7 @@ test("Stack sync prunes only exact stale owned resources and reports retained Wo
       expect.objectContaining({ type: "object", key: "content/shared" }),
       expect.objectContaining({ type: "workflow", name: "runway" }),
       expect.objectContaining({ type: "container", name: "runway" }),
-      expect.objectContaining({ type: "namespace", name: "runway-sandbox" }),
+      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
       expect.objectContaining({ type: "worker" }),
     ]),
   );
@@ -535,7 +535,7 @@ test("Stack sync separates provider identity from new deletion evidence", async 
       expect.objectContaining({ type: "object", key: "artifacts/repo-1/one" }),
       expect.objectContaining({ type: "workflow", name: "runway" }),
       expect.objectContaining({ type: "container", name: "runway" }),
-      expect.objectContaining({ type: "namespace", name: "runway-sandbox" }),
+      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
     ]),
   );
 });

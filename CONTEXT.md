@@ -63,8 +63,8 @@ _Avoid_: Deploy helpers, account inventory
   `runway-sandbox-v2` include a bounded canonical private hardlink trailer so regular-file identity is
   preserved even though the pinned image exposes only high-level `squashfuse`.
 - A Stack derives one deployment name from its Git repository. Its Worker, Dynamic Workflow, and
-  container share that name; its two Durable Object namespaces append `-github` and `-sandbox`.
-  Account state and data live in the shared `runway-state` and `runway-data` buckets.
+  container share that name. Cloudflare names its two Durable Object namespaces from the Worker and
+  class names. Account state and data live in the shared `runway-state` and `runway-data` buckets.
 - Cloudflare Artifacts may become a Source implementation only after repeated exact-revision latency
   and total-cost evidence wins. It is not the Cache store.
 - Agents are deferred until the runner, cache, and deployment foundation is proven.

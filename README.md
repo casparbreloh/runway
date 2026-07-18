@@ -178,9 +178,9 @@ objects are preserved.
 The private `runway-data` and `runway-state` buckets are shared by the account; Stack removal must
 preserve them and any object not claimed by exact ownership evidence. A deployment name is derived
 from the Git repository: `runway` for this repository and `runway-<repository>` otherwise. Its
-Worker, Dynamic Workflow, and container use that exact name; its Durable Object namespaces append
-`-github` and `-sandbox`. The digest-pinned linux/amd64 Sandbox uses `standard-4`. Capacity remains an
-internal foundation choice, not a public workflow option.
+Worker, Dynamic Workflow, and container use that exact name. Cloudflare derives its Durable Object
+namespace names from the Worker and class names. The digest-pinned linux/amd64 Sandbox uses
+`standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
 
 ```sh
 wrangler login
