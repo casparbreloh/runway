@@ -140,8 +140,7 @@ export default workflow({
 - Keep Sandbox and container deployment resources internal to the managed command implementation.
 - Runway's own `Check` and `Test` workflows are the repository CI. At exact PR head `df10a82`, 15
   sequential development samples produced Check P50/P95 of 39s/46s and Test P50/P95 of 87s/102s,
-  with no cache operations. The duplicate GitHub Actions workflow is deleted; do not restore a
-  fallback without a new explicit migration and evidence gate.
+  with no cache operations. Do not add a duplicate GitHub Actions fallback.
 
 ## Conventions
 

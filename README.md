@@ -217,13 +217,10 @@ P50/P95 of 96s/105s, with no cache operations. The earlier whole-tree cache expe
 2m23s/3m25s cold and 3m28s/4m14s warm, plus about $0.013 of cache work per warm run, so it was
 removed rather than abstracted into the foundation.
 
-The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`. The legacy
-`runway-monorepo` Worker, Workflow, container, Durable Object namespaces, public bootstrap bucket,
-and migration receipt are deleted. The private shared artifact bucket and unclaimed objects remain.
+The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`.
 
-Runway's Check/Test cutover removed the duplicate GitHub Actions workflow only after an earlier live
-evidence gate. Do not restore a `.github/workflows` fallback without a new explicit migration and
-evidence gate.
+Runway's Check/Test workflows are the only repository CI. Do not add a duplicate GitHub Actions
+fallback.
 
 ## Scope
 
