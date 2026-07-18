@@ -1,5 +1,5 @@
-import { defineToolProvider, type ToolProvider } from "../../tools.ts";
-import { shell } from "./execution.ts";
+import { shell } from "./internal/tool.ts";
+import { defineToolProvider, type ToolProvider } from "./tools.ts";
 
 const VERSION = "v2026.7.7";
 const SHA256 = "0953810c2785eb4a75159f67f8b5721c4f3c80b8a6a812015d5af7d7fbd1b8a4";

@@ -14,7 +14,7 @@ import { source } from "./internal/source/source.ts";
 import type { SourceIdentity } from "./internal/source/source.ts";
 import { Terminal, TerminalError } from "./internal/terminal.ts";
 import type { Finalization, TerminalRecord, TerminalState } from "./internal/terminal.ts";
-import { withTools } from "./internal/tool/execution.ts";
+import { withTools } from "./internal/tool.ts";
 import { makeStep, secretsOf } from "./step.ts";
 import type { Step } from "./step.ts";
 import type { WorkflowDefinition } from "./workflow.ts";

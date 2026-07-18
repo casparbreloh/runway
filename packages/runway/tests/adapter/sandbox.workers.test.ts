@@ -59,6 +59,7 @@ test("workflow tools restore caches, prepare once, and shape authored commands",
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("setup-native");
     expect(commands[1]).toContain("native --version");
+    expect(commands[1]).toContain("/cache/native/bin");
     expect(commands[1]).toContain("NATIVE_HOME");
   } finally {
     await introspector.dispose();

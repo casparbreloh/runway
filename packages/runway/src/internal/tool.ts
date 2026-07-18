@@ -1,5 +1,5 @@
-import type { ExecOptions, ExecResult, Step } from "../../step.ts";
-import { toolProviders, type Tools } from "../../tools.ts";
+import type { ExecOptions, ExecResult, Step } from "../step.ts";
+import type { ToolProvider } from "../tools.ts";
 
 type Operations = Pick<Step, "exec" | "cache">;
 
@@ -18,8 +18,11 @@ const withEnvironment = (
   return { ...options, command: [...exports, options.command].join("\n") };
 };
 
-export const withTools = (operations: Operations, tools: Tools | undefined): Operations => {
-  const providers = toolProviders(tools);
+export const withTools = (
+  operations: Operations,
+  providers: readonly ToolProvider[] | undefined,
+): Operations => {
+  if (!providers) return operations;
   if (providers.length === 0) return operations;
   let preparation: Promise<void> | undefined;
   const prepare = (): Promise<void> => {

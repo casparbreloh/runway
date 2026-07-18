@@ -1,5 +1,5 @@
-import { defineToolProvider, type ToolProvider } from "../../tools.ts";
-import { shell } from "./execution.ts";
+import { shell } from "./internal/tool.ts";
+import { defineToolProvider, type ToolProvider } from "./tools.ts";
 
 export interface ReleaseOptions {
   readonly name: string;

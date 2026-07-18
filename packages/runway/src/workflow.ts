@@ -1,6 +1,6 @@
 import { secretNameOf, secretRef, type SecretRef } from "./secret.ts";
 import type { Step } from "./step.ts";
-import { toolProviders, type Tools } from "./tools.ts";
+import { toolProviders, type ToolProvider, type Tools } from "./tools.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
 import type { CronTrigger, GitHubTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
 
@@ -15,7 +15,7 @@ export interface WorkflowDefinition {
   readonly id: string;
   readonly trigger: WorkflowTrigger;
   readonly secrets: ReadonlyArray<string>;
-  readonly tools?: Tools;
+  readonly tools?: readonly ToolProvider[];
   readonly run: (step: Step, event: unknown) => void | Promise<void>;
 }
 

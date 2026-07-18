@@ -302,83 +302,51 @@ test("an unavailable cache placement is an advisory miss", async () => {
   ).resolves.toEqual({ state: "miss", reason: "unavailable" });
 });
 
-test("a single exact cache tree does not schedule redundant publication", async () => {
-  let preparations = 0;
-  const sandbox = cacheSandbox({
-    cache: async ({ id }) => ({
-      result: { state: "hit", bytes: 12, key: "v1", match: "exact" },
-      pending: { schema: 1, id } as never,
-    }),
-    prepareCaches: async () => {
-      preparations += 1;
-      return [];
+test("cache sets retain only the trees needed for publication", async () => {
+  const exact = { state: "hit", bytes: 12, key: "v1", match: "exact" } as const;
+  const scenarios = [
+    { results: [exact], prepared: 0, discarded: [] },
+    { results: [exact, exact], prepared: 2, discarded: [] },
+    {
+      results: [{ ...exact, key: "v0", match: "restore" as const }],
+      prepared: 1,
+      discarded: [],
     },
-  });
-
-  await expect(
-    sandbox.cacheSet("tools", { key: "v1", paths: ["/cache/tools"] }, durableCache),
-  ).resolves.toMatchObject({ state: "hit", match: "exact" });
-  await expect(sandbox.prepare()).resolves.toEqual([]);
-  expect(preparations).toBe(0);
-});
-
-test("multi-tree, fallback, and partial sets retain every tree needed for publication", async () => {
-  const prepared: string[][] = [];
-  const multi = cacheSandbox({
-    cache: async ({ id }) => ({
-      result: { state: "hit", bytes: 12, key: "v1", match: "exact" },
-      pending: { schema: 1, id } as never,
-    }),
-    prepareCaches: async ({ pending }) => {
-      prepared.push(pending.map(({ id }) => id));
-      return [];
+    {
+      results: [exact, { state: "miss", reason: "absent" } as const],
+      prepared: 2,
+      discarded: ["/cache/0"],
     },
-  });
-  await multi.cacheSet("multi", { key: "v1", paths: ["/cache/one", "/cache/two"] }, durableCache);
-  await multi.prepare();
-
-  const fallback = cacheSandbox({
-    cache: async ({ id }) => ({
-      result: { state: "hit", bytes: 12, key: "v0", match: "restore" },
-      pending: { schema: 1, id } as never,
-    }),
-    prepareCaches: async ({ pending }) => {
-      prepared.push(pending.map(({ id }) => id));
-      return [];
-    },
-  });
-  await fallback.cacheSet(
-    "fallback",
-    { key: "v1", restoreKeys: ["v"], paths: ["/cache/fallback"] },
-    durableCache,
-  );
-  await fallback.prepare();
-
-  let restores = 0;
-  const discarded: string[][] = [];
-  const partial = cacheSandbox({
-    cache: async ({ id }) => ({
-      result:
-        restores++ === 0
-          ? { state: "hit", bytes: 12, key: "v1", match: "exact" }
-          : { state: "miss", reason: "absent" },
-      pending: { schema: 1, id } as never,
-    }),
-    discardCaches: async ({ paths }) => {
-      discarded.push([...paths]);
-    },
-    prepareCaches: async ({ pending }) => {
-      prepared.push(pending.map(({ id }) => id));
-      return [];
-    },
-  });
-  await expect(
-    partial.cacheSet("partial", { key: "v1", paths: ["/cache/one", "/cache/two"] }, durableCache),
-  ).resolves.toMatchObject({ state: "miss" });
-  await partial.prepare();
-
-  expect(prepared.map((ids) => ids.length)).toEqual([2, 1, 2]);
-  expect(discarded).toEqual([["/cache/one"]]);
+  ];
+  for (const scenario of scenarios) {
+    let result = 0;
+    let prepared = 0;
+    const discarded: string[] = [];
+    const sandbox = cacheSandbox({
+      cache: async ({ id }) => ({
+        result: scenario.results[result++]!,
+        pending: { schema: 1, id } as never,
+      }),
+      discardCaches: async ({ paths }) => {
+        discarded.push(...paths);
+      },
+      prepareCaches: async ({ pending }) => {
+        prepared = pending.length;
+        return [];
+      },
+    });
+    const paths = scenario.results.map((_, index) => `/cache/${index}`);
+    await sandbox.cacheSet(
+      "tree",
+      { key: "v1", restoreKeys: ["v"], paths: [paths[0]!, ...paths.slice(1)] },
+      durableCache,
+    );
+    await sandbox.prepare();
+    expect({ prepared, discarded }).toEqual({
+      prepared: scenario.prepared,
+      discarded: scenario.discarded,
+    });
+  }
 });
 
 test("cache declarations are canonical, retryable, disjoint, safe, and ordered before exec", async () => {

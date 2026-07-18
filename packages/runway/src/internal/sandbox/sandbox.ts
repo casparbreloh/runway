@@ -204,7 +204,6 @@ export class Sandbox {
     for (const [index, path] of declaration.paths.entries()) {
       const treeId = declaration.paths.length === 1 ? id : await cacheTreeId(id, index, path);
       results.push({
-        id: treeId,
         path,
         result: await this.cache(durable(treeId), {
           key: declaration.key,
@@ -231,7 +230,7 @@ export class Sandbox {
       return { state: "miss", reason: "absent" };
     }
     if (hits.length === 1 && hits[0]!.result.match === "exact") {
-      this.#pendingCaches.delete(hits[0]!.id);
+      this.#pendingCaches.delete(id);
     }
     return {
       state: "hit",

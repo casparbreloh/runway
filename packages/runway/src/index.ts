@@ -2,8 +2,8 @@ export { ExecError } from "./step.ts";
 
 export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
-export { mise } from "./internal/tool/mise.ts";
-export { release } from "./internal/tool/release.ts";
+export { mise } from "./mise.ts";
+export { release } from "./release.ts";
 export { defineToolProvider } from "./tools.ts";
 
 export type { SecretRef } from "./secret.ts";
@@ -27,8 +27,8 @@ export type {
   ExecResult,
   Step,
 } from "./step.ts";
-export type { MiseTools } from "./internal/tool/mise.ts";
-export type { ReleaseOptions } from "./internal/tool/release.ts";
+export type { MiseTools } from "./mise.ts";
+export type { ReleaseOptions } from "./release.ts";
 export type { ToolProvider, Tools } from "./tools.ts";
 export type {
   CronParams,

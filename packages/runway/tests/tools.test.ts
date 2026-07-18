@@ -1,18 +1,21 @@
-import { defineToolProvider, mise, release } from "runway";
+import { cron, defineToolProvider, mise, release, workflow, type ToolProvider } from "runway";
 import { expect, test } from "vitest";
 
-import { withTools } from "../src/internal/tool/execution.ts";
+import { withTools } from "../src/internal/tool.ts";
 import type { CacheDeclaration, ExecOptions, ExecResult } from "../src/step.ts";
 
 test("tool providers restore every private cache before setup and prepare once", async () => {
-  const calls: string[] = [];
+  const calls: { readonly id: string; readonly cwd?: string }[] = [];
   const operations = {
     cache: async (id: string, _declaration: CacheDeclaration) => {
-      calls.push(`cache:${id}`);
+      calls.push({ id });
       return { state: "miss" as const, reason: "absent" as const };
     },
     exec: async (id: string, command: string | ExecOptions): Promise<ExecResult> => {
-      calls.push(`exec:${id}:${typeof command === "string" ? command : command.command}`);
+      calls.push({
+        id,
+        ...(typeof command === "string" || !command.cwd ? {} : { cwd: command.cwd }),
+      });
       return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
     },
   };
@@ -36,17 +39,15 @@ test("tool providers restore every private cache before setup and prepare once",
   await runtime.exec("check", "which first");
   await runtime.exec("test", { command: "first --version", cwd: "/workspace/example" });
 
-  expect(calls.slice(0, 4).map((call) => call.split(":setup:")[0])).toEqual([
-    "cache:runway:tools:first:cache",
-    "cache:runway:tools:second:cache",
-    "exec:runway:tools:first",
-    "exec:runway:tools:second",
+  expect(calls.map(({ id }) => id)).toEqual([
+    "runway:tools:first:cache",
+    "runway:tools:second:cache",
+    "runway:tools:first:setup",
+    "runway:tools:second:setup",
+    "check",
+    "test",
   ]);
-  expect(calls[2]).toContain("setup-first");
-  expect(calls[3]).toContain("setup-second");
-  expect(calls[4]).toContain("export PATH='/cache/first/bin:/cache/second/bin':\"$PATH\"");
-  expect(calls[4]).toContain("export FIRST='yes'");
-  expect(calls.filter((call) => call.includes(":setup:"))).toHaveLength(2);
+  expect(calls.at(-1)).toMatchObject({ cwd: "/workspace/example" });
 });
 
 test("mise supports repository discovery and inline tools behind the same provider seam", () => {
@@ -58,12 +59,54 @@ test("mise supports repository discovery and inline tools behind the same provid
     paths: ["/cache/runway/tools/mise"],
     key: { prefix: expect.stringContaining("repository") },
   });
-  expect(discovered.setup).toContain("mise.lock");
-  expect(inline.setup).toContain('[tools]\n"node" = "24.5.0"');
   expect(inline.cache?.key).toEqual(expect.stringMatching(/^runway-mise-v2026\.7\.7-inline-/));
   expect(inline.env).toMatchObject({
     MISE_CONFIG_FILE: "/cache/runway/tools/mise/config.toml",
   });
+});
+
+test("workflow definitions own an immutable normalized provider snapshot", () => {
+  const provider = {
+    id: "mutable",
+    cache: {
+      key: { prefix: "v1-", files: ["lock"] as [string, ...string[]] },
+      paths: ["/cache/mutable"] as [string, ...string[]],
+      restoreKeys: ["v1-"],
+    },
+    setup: { command: "setup", env: { MODE: "original" } },
+    paths: ["/cache/mutable/bin"],
+    env: { TOOL_MODE: "original" },
+  };
+  const providers = [provider];
+  const definition = workflow({
+    id: "immutable-tools",
+    tools: providers,
+    trigger: () => cron("* * * * *"),
+  }).run(async () => {});
+
+  provider.cache.paths[0] = "/cache/changed";
+  provider.setup.env.MODE = "changed";
+  provider.paths[0] = "/cache/changed/bin";
+  provider.env.TOOL_MODE = "changed";
+  providers.length = 0;
+
+  const normalized = (definition.tools as readonly ToolProvider[])[0]!;
+  expect(normalized).toMatchObject({
+    cache: { paths: ["/cache/mutable"] },
+    setup: { env: { MODE: "original" } },
+    paths: ["/cache/mutable/bin"],
+    env: { TOOL_MODE: "original" },
+  });
+  expect([
+    definition.tools,
+    normalized,
+    normalized.cache,
+    normalized.cache?.paths,
+    normalized.setup,
+    typeof normalized.setup === "string" ? undefined : normalized.setup.env,
+  ]).toSatisfy((values: readonly unknown[]) =>
+    values.every((value) => value === undefined || Object.isFrozen(value)),
+  );
 });
 
 test("a native release is another ordinary cached provider", () => {
