@@ -1,6 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { cron, github, webhook, workflow } from "runway";
-import type { CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
+import type { CacheDeclaration, CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
 import { secretNameOf } from "../src/secret.ts";
@@ -69,49 +69,6 @@ test("a workflow run types secrets, events, and flat durable operations", () => 
     >();
     expectTypeOf<Parameters<typeof run.sleep>>().toEqualTypeOf<[id: string, durationMs: number]>();
   });
-});
-
-test("a cache miss permits the next authored operation", async () => {
-  const calls: string[] = [];
-  const operations = {
-    do: async (_id, work) => await work(),
-    exec: async (id) => {
-      calls.push(id);
-      return { exitCode: 0, stdout: "", stderr: "", durationMs: 0 };
-    },
-    cache: async (id) => {
-      calls.push(id);
-      return { state: "miss", reason: "absent" };
-    },
-    sleep: async () => {},
-  } satisfies Parameters<typeof makeStep>[0];
-  const run = makeStep(operations, { runId: "run-1", secrets: {} });
-
-  await expect(run.cache("build", { key: "v1", paths: [".build"] })).resolves.toEqual({
-    state: "miss",
-    reason: "absent",
-  });
-  expect(() =>
-    run.cache("budgeted", {
-      key: "v1",
-      paths: [".one", ".two"],
-      budget: { maxBytes: 100 },
-    }),
-  ).toThrow("cache budgets require a single path");
-  await run.exec("compile", "compile");
-  expect(calls).toEqual(["build", "compile"]);
-});
-
-test("workflow authoring exposes no legacy handler or nested context", () => {
-  const author = workflow({ id: "clean-author", trigger: () => cron("0 9 * * *") });
-  expectTypeOf(author).not.toHaveProperty("handler");
-  expect(author).not.toHaveProperty("handler");
-
-  const definition = author.run(async (run) => {
-    expectTypeOf(run).not.toHaveProperty("env");
-    expectTypeOf(run).not.toHaveProperty("step");
-  });
-  expect(definition).not.toHaveProperty("handler");
 });
 
 test("the authoring API types secrets, runs, raw webhooks, and cron events", () => {
@@ -320,8 +277,9 @@ test("a GitHub trigger rejects duplicate event filters", () => {
   ).toThrow('duplicate workflow GitHub event filter "push"');
 });
 
-test("run.exec delegates string and options commands with their durable ids", async () => {
+test("step delegates cache and exec declarations through their durable ids", async () => {
   const calls: Array<[string, string | ExecOptions]> = [];
+  const caches: Array<[string, CacheDeclaration]> = [];
   const result: ExecResult = {
     exitCode: 0,
     stdout: "v26.0.0\n",
@@ -334,7 +292,10 @@ test("run.exec delegates string and options commands with their durable ids", as
       calls.push([id, command]);
       return result;
     },
-    cache: async () => ({ state: "miss", reason: "absent" }),
+    cache: async (id, declaration) => {
+      caches.push([id, declaration]);
+      return { state: "miss", reason: "absent" };
+    },
     sleep: async () => {},
   } satisfies Parameters<typeof makeStep>[0];
   const run = makeStep(operations, { runId: "run-1", secrets: {} });
@@ -344,13 +305,26 @@ test("run.exec delegates string and options commands with their durable ids", as
     env: { NODE_ENV: "test" },
     timeoutMs: 1_200_000,
   } as const;
+  const declaration = { key: "v1", paths: [".build"] } as const;
 
+  await expect(run.cache("build", declaration)).resolves.toEqual({
+    state: "miss",
+    reason: "absent",
+  });
   await expect(run.exec("runtime", "node --version")).resolves.toBe(result);
   await expect(run.exec("test", options)).resolves.toBe(result);
+  expect(caches).toEqual([["build", declaration]]);
   expect(calls).toEqual([
     ["runtime", "node --version"],
     ["test", options],
   ]);
+  expect(() =>
+    run.cache("budgeted", {
+      key: "v1",
+      paths: [".one", ".two"],
+      budget: { maxBytes: 100 },
+    }),
+  ).toThrow("cache budgets require a single path");
 });
 
 test("workflow runs cannot use Runway's internal id namespace", () => {

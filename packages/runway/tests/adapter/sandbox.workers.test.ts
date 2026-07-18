@@ -351,19 +351,26 @@ test("a live Sandbox keeps workspace files across durable sleep", async () => {
   }
 });
 
-test("non-zero execution is recorded once, throws a typed error, and cleans up", async () => {
+test("non-zero execution is recorded once, redacted, typed, and cleaned up", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
-    const run = await env.COMMANDS.create({ params: { commands: ["exit 7"], catchErrors: true } });
+    const run = await env.COMMANDS.create({
+      params: { commands: ["leak sandbox-secret"], catchErrors: true },
+    });
     const [instance] = introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
-      result: { exitCode: 7 },
+      result: { exitCode: 9 },
     });
-    await expect(instance!.waitForStepResult({ name: "caught-error" })).resolves.toEqual({
+    const error = await instance!.waitForStepResult({ name: "caught-error" });
+    expect(error).toEqual({
       name: "ExecError",
-      typed: true,
+      message: 'command "command-0" exited with code 9: leak ***',
+      command: "leak ***",
+      stdout: "stdout ***",
+      stderr: "stderr ***",
     });
+    expect(JSON.stringify(error)).not.toContain("sandbox-secret");
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using stateResult = disposable(testSandbox.state());
     const state = await stateResult;
@@ -396,28 +403,6 @@ test("an ambiguous start latches loss across durable retries and later authored 
     ).toEqual([{ runId: run.id, command: "ambiguous-start" }]);
     using sourceStateResult = disposable(testSandbox.sourceState());
     expect(await sourceStateResult).toHaveLength(1);
-  } finally {
-    await introspector.dispose();
-  }
-});
-
-test("a non-zero command redacts declared secrets from its command and ExecError", async () => {
-  const introspector = await introspectWorkflow(env.COMMANDS);
-  try {
-    await env.COMMANDS.create({
-      params: { commands: ["leak sandbox-secret"], catchErrors: true },
-    });
-    const [instance] = introspector.get();
-
-    const error = await instance!.waitForStepResult({ name: "caught-error" });
-    expect(error).toEqual({
-      name: "ExecError",
-      message: 'command "command-0" exited with code 9: leak ***',
-      command: "leak ***",
-      stdout: "stdout ***",
-      stderr: "stderr ***",
-    });
-    expect(JSON.stringify(error)).not.toContain("sandbox-secret");
   } finally {
     await introspector.dispose();
   }
