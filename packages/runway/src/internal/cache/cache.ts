@@ -88,6 +88,7 @@ interface CacheRestore {
       readonly uniqueInodes: number;
     };
     readonly path: string;
+    readonly target: string;
     readonly budget: CacheTreeDeclaration["budget"];
   }): Promise<
     | {
@@ -979,6 +980,7 @@ export class Cache {
         staged = await restore.stage({
           object: lookup.object,
           path: staging,
+          target,
           budget: declaration.budget,
         });
       } finally {

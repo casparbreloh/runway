@@ -154,6 +154,7 @@ fs.linkSync(rawOne, rawTwo);
     const restored = await snapshots.stage({
       object: object(),
       path: "/cache/nested/restored",
+      target: "/cache/nested/restored",
       budget,
     });
     expect(restored).toMatchObject({ state: "ready", treeDigest: captured.treeDigest });
@@ -172,6 +173,71 @@ if (fs.readFileSync(root + "/nested/one", "utf8") !== "one") throw new Error("co
 `,
       ),
     ).resolves.toBe("");
+
+    await inContainer(
+      container,
+      `const fs=require("node:fs"); fs.mkdirSync("/cache/internal-absolute/bin", { recursive: true }); fs.mkdirSync("/cache/internal-absolute/data/shims", { recursive: true }); fs.writeFileSync("/cache/internal-absolute/bin/mise", "mise"); fs.symlinkSync("/cache/internal-absolute/bin/mise", "/cache/internal-absolute/data/shims/node"); fs.mkdirSync("/cache/external-absolute/data/shims", { recursive: true }); fs.symlinkSync("/cache/outside/mise", "/cache/external-absolute/data/shims/node"); fs.mkdirSync("/cache/prefix/data/shims", { recursive: true }); fs.symlinkSync("/cache/prefix-evil/mise", "/cache/prefix/data/shims/node")`,
+    );
+    await expect(
+      snapshots.capture({
+        target: "/cache/external-absolute",
+        path: "/tmp/external-absolute.sqsh",
+        budget,
+      }),
+    ).resolves.toEqual({ state: "skipped", reason: "unsafe" });
+    await expect(
+      snapshots.capture({
+        target: "/cache/prefix",
+        path: "/tmp/prefix.sqsh",
+        budget,
+      }),
+    ).resolves.toEqual({ state: "skipped", reason: "unsafe" });
+    const internalAbsolute = await snapshots.capture({
+      target: "/cache/internal-absolute",
+      path: "/tmp/internal-absolute.sqsh",
+      budget,
+    });
+    expect(internalAbsolute).toMatchObject({ state: "ready" });
+    if (internalAbsolute.state !== "ready") throw new Error(process.errors.join("\n"));
+    const internalObject = {
+      digest: internalAbsolute.treeDigest,
+      archiveBytes: internalAbsolute.archive.bytes,
+      archiveDigest: internalAbsolute.archive.digest,
+      byteCount: internalAbsolute.byteCount,
+      fileCount: internalAbsolute.fileCount,
+      treeDigest: internalAbsolute.treeDigest,
+      entryCount: internalAbsolute.entryCount,
+      uniqueInodes: internalAbsolute.uniqueInodes,
+      maxDepth: internalAbsolute.maxDepth,
+    };
+    await inContainer(
+      container,
+      `require("node:fs").rmSync("/cache/internal-absolute", { recursive: true })`,
+    );
+    transferSource = "/tmp/internal-absolute.sqsh";
+    await expect(
+      snapshots.stage({
+        object: internalObject,
+        path: "/cache/.runway-cache-relocated",
+        target: "/cache/relocated",
+        budget,
+      }),
+    ).resolves.toEqual({ state: "miss", reason: "unavailable" });
+    await expect(
+      snapshots.stage({
+        object: internalObject,
+        path: "/cache/.runway-cache-internal-absolute",
+        target: "/cache/internal-absolute",
+        budget,
+      }),
+    ).resolves.toMatchObject({ state: "ready" });
+    await snapshots.rename("/cache/.runway-cache-internal-absolute", "/cache/internal-absolute");
+    await expect(
+      inContainer(
+        container,
+        `process.stdout.write(require("node:fs").readFileSync("/cache/internal-absolute/data/shims/node", "utf8"))`,
+      ),
+    ).resolves.toBe("mise");
 
     await inContainer(
       container,
@@ -257,6 +323,7 @@ process.stdout.write(JSON.stringify(evidence));
         snapshots.stage({
           object: object(candidate),
           path: `/tmp/rejected-${candidate.name}`,
+          target: `/tmp/rejected-${candidate.name}`,
           budget,
         }),
         candidate.name,

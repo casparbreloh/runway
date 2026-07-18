@@ -148,6 +148,7 @@ test("restore verifies the archive before its isolated copy and cleans every fai
         maxDepth: 2,
       },
       path: "/workspace/.cache.staging",
+      target: "/workspace/cache",
       budget: { maxBytes: 10_000, maxDurationMs: 20_000, maxEstimatedCostUsd: 1 },
     }),
   ).resolves.toMatchObject({ state: "ready", treeDigest, byteCount: 7, fileCount: 2 });

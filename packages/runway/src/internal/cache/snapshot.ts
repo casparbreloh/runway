@@ -1,5 +1,6 @@
 import { CACHE_LIMITS } from "../sandbox/config.ts";
 import type { Budget } from "./cache.ts";
+import { normalizedCacheTarget } from "./path.ts";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_ENTRIES = 1_000_000;
@@ -128,10 +129,18 @@ const parseHardlinks = (encoded) => {
   }
   return groups;
 };
-const safeLink = (path, target) => {
-  if (target[0] === 47 || target.includes(0) || target.length > MAX_LINK) fail("unsafe link");
-  const resolved = parts(path).slice(0, -1);
-  for (const part of parts(target)) {
+const safeLink = (root, path, target) => {
+  if (target.includes(0) || target.length > MAX_LINK) fail("unsafe link");
+  const absolute = target[0] === 47;
+  const relative = absolute
+    ? same(target, root)
+      ? Buffer.alloc(0)
+      : target.length > root.length && target[root.length] === 47 && same(target.subarray(0, root.length), root)
+        ? target.subarray(root.length + 1)
+        : fail("unsafe link")
+    : target;
+  const resolved = absolute ? [] : parts(path).slice(0, -1);
+  for (const part of parts(relative)) {
     if (part.length === 0 || same(part, dot)) continue;
     if (same(part, dotdot)) {
       if (resolved.length === 0) fail("escaping link");
@@ -192,8 +201,9 @@ const parentRelative = (rootDescriptor, root, path) => {
     path: join(root, parent),
   };
 };
-const scanTree = (rootValue, maxBytes, includeRecords = false, hardlinks = null) => {
+const scanTree = (rootValue, maxBytes, includeRecords = false, hardlinks = null, linkRootValue = rootValue) => {
   const root = Buffer.from(rootValue);
+  const linkRoot = Buffer.from(linkRootValue);
   const rootDescriptor = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   const pending = [[Buffer.alloc(0), 0]];
   const found = [];
@@ -223,7 +233,7 @@ const scanTree = (rootValue, maxBytes, includeRecords = false, hardlinks = null)
           else if (info.isSymbolicLink()) {
             kind = Buffer.from("l");
             target = fs.readlinkSync(absolute, { encoding: "buffer" });
-            safeLink(path, target);
+            safeLink(linkRoot, path, target);
           } else fail("special file");
           metadata += path.length + (target?.length ?? 0) + 96;
           if (metadata > MAX_METADATA) fail("metadata quota");
@@ -415,8 +425,8 @@ const run = (command, capture = false) => {
   return result;
 };
 const sameTree = (left, right) => ["schema", "treeDigest", "entryCount", "uniqueInodes", "fileCount", "byteCount", "maxDepth"].every((field) => left[field] === right[field]);
-const mountScan = (helper, archive, mount, maxBytes, mode, staging, expected) => {
-  const command = ["unshare", "--mount", "--propagation", "private", "--fork", "/usr/local/bin/node", helper, mode, archive, mount, String(maxBytes)];
+const mountScan = (helper, archive, mount, maxBytes, mode, linkRoot, staging, expected) => {
+  const command = ["unshare", "--mount", "--propagation", "private", "--fork", "/usr/local/bin/node", helper, mode, archive, mount, String(maxBytes), linkRoot];
   if (staging !== undefined) command.push(staging, JSON.stringify(expected));
   return JSON.parse(run(command, true).stdout);
 };
@@ -507,7 +517,7 @@ const prepareParent = (targetValue) => {
     current = next;
   }
 };
-const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
+const mounted = (helper, archive, mount, maxBytes, linkRoot, staging, expected) => {
   const { groups } = preflight(archive, maxBytes, true);
   fs.mkdirSync(mount, { mode: 0o700 });
   const process = child.spawn("squashfuse", ["-f", "-o", "ro,nodev,nosuid,noexec", archive, mount], { stdio: "ignore" });
@@ -517,13 +527,13 @@ const mounted = (helper, archive, mount, maxBytes, staging, expected) => {
       if (process.exitCode !== null || Date.now() > deadline) fail("mount unavailable");
       sleep(20);
     }
-    if (staging === undefined) return scanTree(mount, maxBytes, false, groups);
-    const scanned = scanTree(mount, maxBytes, true, groups);
+    if (staging === undefined) return scanTree(mount, maxBytes, false, groups, linkRoot);
+    const scanned = scanTree(mount, maxBytes, true, groups, linkRoot);
     if (!sameTree(scanned.summary, expected)) fail("tree evidence");
     prepareParent(staging);
     try { copyTree(scanned.rootDescriptor, scanned.root, scanned.records, staging, maxBytes); }
     finally { fs.closeSync(scanned.rootDescriptor); }
-    const restored = scanTree(staging, maxBytes);
+    const restored = scanTree(staging, maxBytes, false, null, linkRoot);
     if (!sameTree(restored, expected)) fail("restored evidence");
     return restored;
   } finally {
@@ -568,18 +578,18 @@ const main = () => {
     const proof = preflight(archive, maxBytes);
     const after = scanTree(target, maxBytes);
     if (JSON.stringify(before) !== JSON.stringify(after)) fail("source changed");
-    const mountedSummary = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-scan");
+    const mountedSummary = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-scan", target);
     if (!sameTree(before, mountedSummary)) fail("archive tree changed");
     before.diskBytes = Math.max(before.diskBytes, mountedSummary.diskBytes);
     result = { ...before, archive: proof };
-  } else if (mode === "mounted-scan") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]));
+  } else if (mode === "mounted-scan") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]), process.argv[6]);
   else if (mode === "restore") {
-    const [archive, mount, staging, maxBytes] = [process.argv[3], process.argv[4], process.argv[5], Number(process.argv[6])];
-    const expected = JSON.parse(process.argv[7]);
+    const [archive, mount, staging, target, maxBytes] = [process.argv[3], process.argv[4], process.argv[5], process.argv[6], Number(process.argv[7])];
+    const expected = JSON.parse(process.argv[8]);
     const proof = preflight(archive, maxBytes);
-    if (proof.bytes !== Number(process.argv[8]) || proof.digest !== process.argv[9]) fail("archive evidence");
-    result = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-restore", staging, expected);
-  } else if (mode === "mounted-restore") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]), process.argv[6], JSON.parse(process.argv[7]));
+    if (proof.bytes !== Number(process.argv[9]) || proof.digest !== process.argv[10]) fail("archive evidence");
+    result = mountScan(process.argv[1], archive, mount, maxBytes, "mounted-restore", target, staging, expected);
+  } else if (mode === "mounted-restore") result = mounted(process.argv[1], process.argv[3], process.argv[4], Number(process.argv[5]), process.argv[6], process.argv[7], JSON.parse(process.argv[8]));
   else fail("invalid mode");
   process.stdout.write(JSON.stringify(result));
 };
@@ -870,6 +880,7 @@ export class CloudflareCacheSnapshot {
       readonly maxDepth: number;
     };
     readonly path: string;
+    readonly target: string;
     readonly budget: SnapshotBudget;
   }) {
     if (request.budget?.maxBytes === 0 || request.budget?.maxDurationMs === 0) {
@@ -878,6 +889,8 @@ export class CloudflareCacheSnapshot {
     const archivePath = `/tmp/.runway-cache-${crypto.randomUUID()}.sqsh`;
     const expected = { bytes: request.object.archiveBytes, digest: request.object.archiveDigest };
     try {
+      const target = normalizedCacheTarget(request.target);
+      if (target !== request.target) throw new Error();
       const downloaded = await this.#transfer.get({
         runId: this.#runId,
         key: `content/${request.object.digest}.sqsh`,
@@ -907,6 +920,7 @@ export class CloudflareCacheSnapshot {
               archivePath,
               mount,
               request.path,
+              target,
               maximumBytes(request.budget),
               JSON.stringify(summary),
               expected.bytes,
