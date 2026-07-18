@@ -31,8 +31,8 @@ const manifest = cloudflareStackManifest({
   schedules: ["0 9 * * *"],
   secretNames: ["RUNWAY_SECRET_SNAPSHOT_KEY"],
   snapshotKeyBindings: [],
-  artifactBucket: "runway-account",
-  stateBucket: "runway-state-account",
+  dataBucket: "runway-data",
+  stateBucket: "runway-state",
 });
 
 const providerBindings = manifest.bindings.map((binding) => ({
@@ -185,7 +185,7 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
             : [
                 {
                   id: "container-id",
-                  name: "runway-Sandbox",
+                  name: "runway",
                   scheduling_policy: overrides.containerSchedulingPolicy ?? "default",
                   instances: overrides.containerInstances ?? 0,
                   max_instances: manifest.container.maxInstances,
@@ -253,7 +253,7 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
         },
         objects: {
           list: async (bucket: string) =>
-            bucket === "runway-account" && overrides.absent !== "object"
+            bucket === "runway-data" && overrides.absent !== "object"
               ? [
                   {
                     key: `artifacts/${artifactVersion}.json`,
@@ -277,7 +277,7 @@ const control = (cf: CloudflareApi) =>
     registry: [],
     deployment,
     secretBindings: {},
-    stateBucket: "runway-state-account",
+    stateBucket: "runway-state",
     ready: async () => {},
   });
 
@@ -338,13 +338,13 @@ test("inventory returns exact provider evidence after every desired field is ver
     routes: [],
     buckets: [
       expect.objectContaining({
-        name: "runway-account",
+        name: "runway-data",
         lifecycle: "retain",
         publicAccess: false,
         customDomains: [],
       }),
       expect.objectContaining({
-        name: "runway-state-account",
+        name: "runway-state",
         lifecycle: "stack-state",
         publicAccess: false,
         customDomains: [],
@@ -475,11 +475,11 @@ test("delete mutates the provider only after exact evidence matches", async () =
         publicAccess: bucket.publicAccess,
         customDomains: bucket.customDomains,
       },
-      "bucket:runway-account",
+      "bucket:runway-data",
     ],
     [
       { type: "object", bucket: bucket.name, ...bucket.objects[0]! },
-      `object:runway-account/${bucket.objects[0]!.key}`,
+      `object:runway-data/${bucket.objects[0]!.key}`,
     ],
   ];
 
@@ -603,7 +603,7 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
       : new TextEncoder().encode(overrides.artifact === "conflict" ? "replacement" : "artifact");
   const application = {
     id: "container-id",
-    name: "runway-Sandbox",
+    name: "runway",
     scheduling_policy: "default",
     instances: overrides.providerInstances ?? 0,
     max_instances: manifest.container.maxInstances,
@@ -768,7 +768,7 @@ test("apply creates missing storage, publishes content before host, and uploads 
     registry: [],
     deployment,
     secretBindings: { RUNWAY_SECRET_SNAPSHOT_KEY: "snapshot" },
-    stateBucket: "runway-state-account",
+    stateBucket: "runway-state",
     ready: async () => {
       ready += 1;
     },
@@ -776,7 +776,7 @@ test("apply creates missing storage, publishes content before host, and uploads 
 
   await stack.apply(manifest);
 
-  expect(calls.bucketCreates).toEqual([{ account_id: "account", name: "runway-account" }]);
+  expect(calls.bucketCreates).toEqual([{ account_id: "account", name: "runway-data" }]);
   expect(calls.operations).toEqual([
     `artifact-upload:artifacts/${artifactVersion}.json`,
     "worker-upload",
@@ -802,8 +802,8 @@ test("apply creates missing storage, publishes content before host, and uploads 
       { type: "worker_loader", name: "LOADER" },
       {
         type: "r2_bucket",
-        name: "RUNWAY_ARTIFACTS",
-        bucket_name: "runway-account",
+        name: "RUNWAY_DATA",
+        bucket_name: "runway-data",
       },
       {
         type: "secret_text",

@@ -86,14 +86,14 @@ const manifestOf = (
   owner: {
     accountId: "account-1",
     repositoryId,
-    stackId: stackIdOf("account-1", repositoryId),
+    stackId: stackIdOf("account-1", repositoryId, name),
     name,
   },
   generation: digest(repositoryId === "repo-1" ? "1" : "2"),
   worker: { name, moduleDigest: digest("3") },
   workflow: { name, className: "DynamicWorkflow" },
   container: {
-    name: `${name}-Sandbox`,
+    name,
     image: `docker.io/cloudflare/sandbox@${digest("4")}`,
     imageDigest: digest("4"),
     platform: { os: "linux", architecture: "amd64" },
@@ -108,16 +108,16 @@ const manifestOf = (
     {
       binding: "RUNWAY_GITHUB_COORDINATOR",
       className: "RunwayGitHubCoordinator",
-      name: `${name}-RunwayGitHubCoordinator`,
+      name: `${name}-github`,
     },
-    { binding: "RunwaySandbox", className: "Sandbox", name: `${name}-Sandbox` },
+    { binding: "RunwaySandbox", className: "Sandbox", name: `${name}-sandbox` },
   ],
   schedules: ["0 3 * * *"],
   workersDev: true,
   routes: ["ci.example.com/*"],
   bindings: [
     { name: "LOADER", type: "worker_loader" },
-    { name: "RUNWAY_ARTIFACTS", type: "r2_bucket", target: "runway-account-1" },
+    { name: "RUNWAY_DATA", type: "r2_bucket", target: "runway-data" },
     {
       name: "RUNWAY_GITHUB_COORDINATOR",
       type: "durable_object_namespace",
@@ -139,7 +139,7 @@ const manifestOf = (
   },
   buckets: [
     {
-      name: "runway-account-1",
+      name: "runway-data",
       shared: true,
       lifecycle: "retain",
       publicAccess: false,
@@ -232,7 +232,7 @@ test("Stack captures every exact owned field, persists canonical refs, and rerea
   expect(persisted).toContain('"rolloutId":"rollout-1"');
   expect(persisted).toContain('"imageDigest":"sha256:4444');
   expect(persisted).toContain('"architecture":"amd64","os":"linux"');
-  expect(persisted).toContain('"name":"runway-Sandbox"');
+  expect(persisted).toContain('"name":"runway"');
   expect(persisted).toContain('"pattern":"ci.example.com/*","scriptName":"runway"');
   expect(persisted).toContain(
     '"binding":"RUNWAY_SECRET_SNAPSHOT_KEY","ownedKeyBindings":["RUNWAY_SECRET_SNAPSHOT_KEY_11111111111111111111111111111111"]',
@@ -275,7 +275,7 @@ test("cross-owner resource collisions and unknown shared state fail closed", asy
     owner: {
       accountId: "account-1",
       repositoryId: "repo-2",
-      stackId: stackIdOf("account-1", "repo-2"),
+      stackId: stackIdOf("account-1", "repo-2", "runway-two"),
       name: "runway-two",
     },
   });
@@ -288,7 +288,7 @@ test("cross-owner resource collisions and unknown shared state fail closed", asy
   const unknown = new MemoryControl();
   const manifest = manifestOf("repo-1", "runway");
   unknown.inventoryAs(manifest, receiptOf(manifest));
-  unknown.object(`${Stack.refPrefix("bucket", "runway-account-1")}unknown.json`, '{"schema":99}');
+  unknown.object(`${Stack.refPrefix("bucket", "runway-data")}unknown.json`, '{"schema":99}');
   await expect(new Stack(manifest, unknown).capture()).rejects.toThrow(
     "invalid persisted Stack ownership",
   );
@@ -506,11 +506,11 @@ test("Stack sync prunes only exact stale owned resources and reports retained Wo
   );
   expect(control.removed).not.toEqual(
     expect.arrayContaining([
-      expect.objectContaining({ type: "bucket", name: "runway-account-1" }),
+      expect.objectContaining({ type: "bucket", name: "runway-data" }),
       expect.objectContaining({ type: "object", key: "content/shared" }),
       expect.objectContaining({ type: "workflow", name: "runway" }),
-      expect.objectContaining({ type: "container", name: "runway-Sandbox" }),
-      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
+      expect.objectContaining({ type: "container", name: "runway" }),
+      expect.objectContaining({ type: "namespace", name: "runway-sandbox" }),
       expect.objectContaining({ type: "worker" }),
     ]),
   );
@@ -534,8 +534,8 @@ test("Stack sync separates provider identity from new deletion evidence", async 
     expect.arrayContaining([
       expect.objectContaining({ type: "object", key: "artifacts/repo-1/one" }),
       expect.objectContaining({ type: "workflow", name: "runway" }),
-      expect.objectContaining({ type: "container", name: "runway-Sandbox" }),
-      expect.objectContaining({ type: "namespace", name: "runway_Sandbox" }),
+      expect.objectContaining({ type: "container", name: "runway" }),
+      expect.objectContaining({ type: "namespace", name: "runway-sandbox" }),
     ]),
   );
 });

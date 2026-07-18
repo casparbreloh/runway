@@ -74,7 +74,7 @@ const createSmokeContainer = async (
   await cf.containers.applications.create({
     account_id: accountId,
     body: {
-      name: `${scriptName}-Sandbox`,
+      name: scriptName,
       ...SANDBOX_APPLICATION,
       durable_objects: { namespace_id: binding.namespace_id },
     },
@@ -229,7 +229,7 @@ const run = async (): Promise<void> => {
   const accountId = await oneAccountId(cf);
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
   const scriptName = `runway-cache-smoke-${suffix}`;
-  const containerName = `${scriptName}-Sandbox`;
+  const containerName = scriptName;
   const suppliedBucket = process.env.RUNWAY_CACHE_SMOKE_BUCKET;
   const bucket = suppliedBucket ?? `runway-cache-smoke-${suffix}`;
   const bucketOwned = suppliedBucket === undefined;

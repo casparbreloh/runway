@@ -12,9 +12,9 @@ import { deploy } from "../../src/deploy.ts";
 import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
 import type { Registry } from "../../src/internal/deploy/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
+import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { COMPATIBILITY_DATE } from "../../src/internal/runtime/contract.ts";
 import { resolveRepositorySource } from "../../src/internal/source/repository.ts";
-import { artifactBucketName } from "../../src/internal/stack/cloudflare.ts";
 import { fetchWorkersDev, nonGitHubDeployEnv } from "./support.ts";
 
 const execFileAsync = promisify(execFile);
@@ -389,11 +389,11 @@ const run = async (): Promise<void> => {
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
   const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-recovery-smoke-${suffix}`;
   const driverName = `${scriptName}-driver`;
-  const containerName = `${scriptName}-Sandbox`;
+  const containerName = scriptName;
   const token = await tokenOf();
   const cf = new Cloudflare({ apiToken: token });
   const accountId = await oneAccountId(cf);
-  const bucketName = artifactBucketName(accountId);
+  const bucketName = DATA_BUCKET;
   const bucketExisted = await bucketExists(cf, accountId, bucketName);
   const scriptNames = new Set([scriptName, driverName]);
   const collisions = [
@@ -414,6 +414,7 @@ const run = async (): Promise<void> => {
   let smokeError: unknown;
   let cleanupError: Error | undefined;
   let report: Record<string, unknown> | undefined;
+  let removeStack: (() => Promise<void>) | undefined;
 
   try {
     await mkdir(path.dirname(workflowPath), { recursive: true });
@@ -423,7 +424,7 @@ const run = async (): Promise<void> => {
     const prepared = await buildDeployment(registry(project), {
       accountId,
       cwd: project,
-      scriptName,
+      deploymentName: scriptName,
       repository,
       snapshotKeyAvailable: false,
     });
@@ -437,11 +438,12 @@ const run = async (): Promise<void> => {
     const deployment = await deploy(registry(project), {
       cwd: project,
       env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_SCRIPT_NAME: scriptName,
+        RUNWAY_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         DRIVER_TOKEN: driverToken,
       }),
     });
+    removeStack = deployment.remove;
     if (
       JSON.stringify(deployment.artifactVersions) !==
       JSON.stringify(prepared.artifacts.map(({ artifactVersion }) => artifactVersion))
@@ -512,6 +514,11 @@ const run = async (): Promise<void> => {
     smokeError = error;
   } finally {
     const cleanupErrors: string[] = [];
+    try {
+      await removeStack?.();
+    } catch (error) {
+      cleanupErrors.push(`Stack: ${String(error)}`);
+    }
     for (const name of [driverName, scriptName]) {
       try {
         await cf.workers.scripts.delete(name, { account_id: accountId });

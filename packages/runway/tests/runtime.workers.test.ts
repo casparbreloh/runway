@@ -379,31 +379,22 @@ const putArtifact = async (contents: string): Promise<string> => {
   const version = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  await env.RUNWAY_ARTIFACTS.put(artifactKey(version), contents);
+  await env.RUNWAY_DATA.put(artifactKey(version), contents);
   return version;
 };
 
 const putActiveArtifact = async (): Promise<void> => {
-  await env.RUNWAY_ARTIFACTS.put(artifactKey(env.ACTIVE_ARTIFACT_VERSION), env.ACTIVE_ARTIFACT);
+  await env.RUNWAY_DATA.put(artifactKey(env.ACTIVE_ARTIFACT_VERSION), env.ACTIVE_ARTIFACT);
 };
 
 const putSuspendedArtifact = async (): Promise<void> => {
-  await env.RUNWAY_ARTIFACTS.put(
-    artifactKey(env.SUSPENDED_ARTIFACT_VERSION),
-    env.SUSPENDED_ARTIFACT,
-  );
+  await env.RUNWAY_DATA.put(artifactKey(env.SUSPENDED_ARTIFACT_VERSION), env.SUSPENDED_ARTIFACT);
 };
 
 const putGitHubArtifacts = async (): Promise<void> => {
   await Promise.all([
-    env.RUNWAY_ARTIFACTS.put(
-      artifactKey(env.GITHUB_CHECK_ARTIFACT_VERSION),
-      env.GITHUB_CHECK_ARTIFACT,
-    ),
-    env.RUNWAY_ARTIFACTS.put(
-      artifactKey(env.GITHUB_TEST_ARTIFACT_VERSION),
-      env.GITHUB_TEST_ARTIFACT,
-    ),
+    env.RUNWAY_DATA.put(artifactKey(env.GITHUB_CHECK_ARTIFACT_VERSION), env.GITHUB_CHECK_ARTIFACT),
+    env.RUNWAY_DATA.put(artifactKey(env.GITHUB_TEST_ARTIFACT_VERSION), env.GITHUB_TEST_ARTIFACT),
   ]);
 };
 
@@ -1217,7 +1208,7 @@ test("a generated host reports only its no-cache deployment identity", async () 
 test("a generated host serves only content-addressed workflow caches", async () => {
   const digest = "c".repeat(64);
   const body = "cached toolchain";
-  await env.RUNWAY_ARTIFACTS.put(`caches/${digest}.tar.gz`, body);
+  await env.RUNWAY_DATA.put(`caches/${digest}.tar.gz`, body);
 
   const response = await env.GENERATED_HOST.fetch(
     `https://runway.test/.runway/cache/${digest}.tar.gz`,
@@ -1399,7 +1390,7 @@ test("a Dynamic Workflow fails closed when its exact artifact is unavailable", a
 
 test("a Dynamic Workflow rejects tampered artifact bytes", async () => {
   const artifactVersion = "2".repeat(64);
-  await env.RUNWAY_ARTIFACTS.put(artifactKey(artifactVersion), "tampered artifact");
+  await env.RUNWAY_DATA.put(artifactKey(artifactVersion), "tampered artifact");
 
   await expectGeneratedRunError({ artifactVersion }, "invalid workflow artifact hash");
 });
@@ -1431,7 +1422,7 @@ test("a Dynamic Workflow rejects credentials embedded in an artifact repository 
 test("a Dynamic Workflow rejects an artifact owned by another script", async () => {
   const active = JSON.parse(env.ACTIVE_ARTIFACT) as Record<string, unknown>;
   const artifactVersion = await putArtifact(
-    JSON.stringify({ ...active, scriptName: "another-runway-host" }),
+    JSON.stringify({ ...active, deploymentName: "another-runway-host" }),
   );
 
   await expectGeneratedRunError({ artifactVersion }, "workflow artifact does not match route");

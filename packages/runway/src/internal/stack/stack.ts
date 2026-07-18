@@ -298,10 +298,11 @@ const digestOf = (values: readonly string[]): string => {
   return `sha256:${hash.digest("hex")}`;
 };
 
-export const stackIdOf = (accountId: string, repositoryId: string): string => {
+export const stackIdOf = (accountId: string, repositoryId: string, name: string): string => {
   required(accountId, "account identity", 512);
   required(repositoryId, "repository identity", 512);
-  return digestOf(["runway-stack-v1", accountId, repositoryId]);
+  required(name, "name", 128);
+  return digestOf(["runway-stack-v2", accountId, repositoryId, name]);
 };
 
 const assertOwner = (owner: StackOwner): void => {
@@ -310,7 +311,7 @@ const assertOwner = (owner: StackOwner): void => {
   required(owner.repositoryId, "repository identity", 512);
   required(owner.name, "name", 128);
   sha256(owner.stackId, "stack identity");
-  if (owner.stackId !== stackIdOf(owner.accountId, owner.repositoryId)) {
+  if (owner.stackId !== stackIdOf(owner.accountId, owner.repositoryId, owner.name)) {
     throw new Error("invalid Stack owner identity");
   }
 };

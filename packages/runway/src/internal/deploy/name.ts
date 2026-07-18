@@ -1,69 +1,41 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import type { RepositorySource } from "../source/repository.ts";
 
-const DEFAULT_SCRIPT_NAME = "runway";
-const MAX_SCRIPT_NAME_LENGTH = 63;
-const SCRIPT_NAME_ENV = "RUNWAY_SCRIPT_NAME";
+const MAX_NAME_LENGTH = 63;
 
-const ensureScriptNameLength = (name: string, value: string): void => {
-  if (name.length > MAX_SCRIPT_NAME_LENGTH) {
-    throw new Error(
-      `invalid Runway script name ${JSON.stringify(value)}: normalized name ${JSON.stringify(name)} exceeds ${MAX_SCRIPT_NAME_LENGTH} characters`,
-    );
-  }
+const repositoryNameOf = (source: RepositorySource): string => {
+  if (source.authentication.type === "github") return source.authentication.repository.name;
+  const pathname = new URL(source.remote).pathname.replace(/\/$/, "");
+  const name = pathname.slice(pathname.lastIndexOf("/") + 1).replace(/\.git$/, "");
+  if (!name) throw new Error("repository remote has no name");
+  return name;
 };
 
 const slugOf = (value: string): string => {
   const slug = value
     .trim()
     .toLowerCase()
-    .replace(/^@/, "")
-    .replace(/[/\\]+/g, "-")
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
-  if (!slug) throw new Error(`invalid Runway script name ${JSON.stringify(value)}`);
-  ensureScriptNameLength(slug, value);
+  if (!slug) throw new Error(`invalid repository name ${JSON.stringify(value)}`);
   return slug;
 };
 
-const repoScriptNameOf = (identity: string): string => {
-  const slug = slugOf(identity);
-  const name =
-    slug === DEFAULT_SCRIPT_NAME || slug.startsWith(`${DEFAULT_SCRIPT_NAME}-`)
-      ? slug
-      : `${DEFAULT_SCRIPT_NAME}-${slug}`;
-  ensureScriptNameLength(name, identity);
-  return name;
-};
-
-const isMissingFile = (err: unknown): boolean =>
-  err !== null &&
-  typeof err === "object" &&
-  "code" in err &&
-  (err as { code?: unknown }).code === "ENOENT";
-
-const packageNameOf = async (cwd: string): Promise<string | undefined> => {
-  try {
-    const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8")) as {
-      name?: unknown;
-      runway?: { name?: unknown };
-    };
-    if (typeof pkg.runway?.name === "string" && pkg.runway.name.trim()) return pkg.runway.name;
-    return typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : undefined;
-  } catch (err) {
-    if (isMissingFile(err)) return undefined;
-    throw err;
+export const deploymentNameOf = (
+  source: RepositorySource,
+  env: Readonly<Record<string, string | undefined>> = {},
+): string => {
+  const repository = slugOf(repositoryNameOf(source));
+  const name = env.RUNWAY_NAME
+    ? slugOf(env.RUNWAY_NAME)
+    : repository === "runway"
+      ? "runway"
+      : `runway-${repository}`;
+  if (name !== "runway" && !name.startsWith("runway-")) {
+    throw new Error("RUNWAY_NAME must be runway or begin with runway-");
   }
-};
-
-export const resolveScriptName = async (opts: {
-  readonly cwd: string;
-  readonly env?: Record<string, string | undefined>;
-}): Promise<string> => {
-  const explicit = opts.env?.[SCRIPT_NAME_ENV];
-  if (explicit) return slugOf(explicit);
-  const packageName = await packageNameOf(opts.cwd);
-  if (packageName) return repoScriptNameOf(packageName);
-  return repoScriptNameOf(path.basename(opts.cwd));
+  if (name.length > MAX_NAME_LENGTH) {
+    throw new Error(`repository name produces a deployment name longer than ${MAX_NAME_LENGTH}`);
+  }
+  return name;
 };

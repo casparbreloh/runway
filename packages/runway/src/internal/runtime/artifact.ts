@@ -2,7 +2,7 @@ import { parseRepositorySource } from "../source/repository.ts";
 import type { RepositorySource } from "../source/repository.ts";
 
 export interface WorkflowArtifact {
-  readonly scriptName: string;
+  readonly deploymentName: string;
   readonly workflowId: string;
   readonly secrets: ReadonlyArray<string>;
   readonly repository: RepositorySource;
@@ -26,14 +26,17 @@ export const decodeWorkflowArtifact = (bytes: ArrayBuffer): WorkflowArtifact => 
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join(",") !== "repository,scriptName,secrets,source,workflowId"
+    Object.keys(value).sort().join(",") !== "deploymentName,repository,secrets,source,workflowId"
   ) {
     throw new Error("invalid workflow artifact");
   }
-  const { scriptName, workflowId, secrets, repository, source } = value as Record<string, unknown>;
+  const { deploymentName, workflowId, secrets, repository, source } = value as Record<
+    string,
+    unknown
+  >;
   if (
-    typeof scriptName !== "string" ||
-    scriptName.length === 0 ||
+    typeof deploymentName !== "string" ||
+    deploymentName.length === 0 ||
     typeof workflowId !== "string" ||
     workflowId.length === 0 ||
     !Array.isArray(secrets) ||
@@ -49,5 +52,5 @@ export const decodeWorkflowArtifact = (bytes: ArrayBuffer): WorkflowArtifact => 
   } catch {
     throw new Error("invalid workflow artifact");
   }
-  return { scriptName, workflowId, secrets, repository: parsedRepository, source };
+  return { deploymentName, workflowId, secrets, repository: parsedRepository, source };
 };

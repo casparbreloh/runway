@@ -175,10 +175,12 @@ namespaces, schedules, routes, bindings, secret names, workers.dev state, and ex
 objects. Sync and removal re-inventory the provider and fail closed on drift. Unknown state and shared
 objects are preserved.
 
-The account artifact bucket is private and shared; Stack removal must preserve it and any object not
-claimed by exact ownership evidence. The developer app and Worker/Workflow resource name is exactly
-`runway`, not `runway-ci` or `runway-monorepo`. Its deployed digest-pinned linux/amd64 Sandbox uses
-`standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
+The private `runway-data` and `runway-state` buckets are shared by the account; Stack removal must
+preserve them and any object not claimed by exact ownership evidence. A deployment name is derived
+from the Git repository: `runway` for this repository and `runway-<repository>` otherwise. Its
+Worker, Dynamic Workflow, and container use that exact name; its Durable Object namespaces append
+`-github` and `-sandbox`. The digest-pinned linux/amd64 Sandbox uses `standard-4`. Capacity remains an
+internal foundation choice, not a public workflow option.
 
 ```sh
 wrangler login
@@ -186,8 +188,8 @@ runway deploy
 ```
 
 In CI, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
-with `runway secrets set NAME ...`. Set `RUNWAY_SCRIPT_NAME=runway` when explicit naming is required;
-this repository also declares `"runway": { "name": "runway" }` in `package.json`.
+with `runway secrets set NAME ...`. `package.json` cannot configure Runway. `RUNWAY_NAME` is reserved
+for isolated deployments such as live smokes and must be `runway` or begin with `runway-`.
 
 ## GitHub App Setup
 

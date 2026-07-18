@@ -11,6 +11,7 @@ import type { GitHubRepository } from "../../trigger.ts";
 import { encodeWorkflowArtifact } from "../runtime/artifact.ts";
 import {
   DYNAMIC_WORKFLOW_CLASS,
+  DATA_BUCKET,
   RUNWAY_WORKFLOW_CLASS,
   SECRET_SNAPSHOT_KEY_BINDING,
   secretSnapshotBackupBinding,
@@ -48,7 +49,7 @@ const hostSource = (
   registry: Registry,
   opts: {
     accountId: string;
-    scriptName: string;
+    deploymentName: string;
     workflowArtifacts: Readonly<Record<string, string>>;
     deploymentId: string;
     secretSnapshotKey: string;
@@ -84,9 +85,9 @@ const hostSource = (
   });
   const config = JSON.stringify({
     accountId: opts.accountId,
-    cacheBucket: `runway-${opts.accountId}`,
+    cacheBucket: DATA_BUCKET,
     imageDigest: SANDBOX_IMAGE_DIGEST,
-    scriptName: opts.scriptName,
+    deploymentName: opts.deploymentName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,
     github: opts.github,
@@ -114,7 +115,7 @@ export default createHost(config);
 interface BuildContext {
   readonly accountId: string;
   readonly cwd: string;
-  readonly scriptName: string;
+  readonly deploymentName: string;
   readonly repository: RepositorySource;
   readonly snapshotKeyAvailable: boolean;
   readonly github?: { readonly repository: GitHubRepository; readonly installationId: number };
@@ -209,7 +210,7 @@ export const buildDeployment = async (
     registry.map(async (w) => {
       const source = new TextDecoder().decode(await buildDynamicWorker(w, opts));
       const contents = encodeWorkflowArtifact({
-        scriptName: opts.scriptName,
+        deploymentName: opts.deploymentName,
         workflowId: w.def.id,
         secrets: w.def.secrets,
         repository: opts.repository,
@@ -225,7 +226,7 @@ export const buildDeployment = async (
   const entry = path.join(opts.cwd, "worker.gen.ts");
   const host = hostSource(registry, {
     accountId: opts.accountId,
-    scriptName: opts.scriptName,
+    deploymentName: opts.deploymentName,
     workflowArtifacts,
     deploymentId,
     secretSnapshotKey,

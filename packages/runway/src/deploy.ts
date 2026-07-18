@@ -4,7 +4,7 @@ import process from "node:process";
 import type { CloudflareApi } from "./internal/cloudflare.ts";
 import { buildDeployment } from "./internal/deploy/artifacts.ts";
 import { resolveAuth } from "./internal/deploy/auth.ts";
-import { resolveScriptName } from "./internal/deploy/name.ts";
+import { deploymentNameOf } from "./internal/deploy/name.ts";
 import { cronsOf, secretNamesOf, type Registry } from "./internal/deploy/registry.ts";
 import { waitForRollout } from "./internal/deploy/rollout.ts";
 import { createGitHubProvider, type GitHubProvider } from "./internal/github/provider.ts";
@@ -12,7 +12,9 @@ import {
   GITHUB_APP_ID_BINDING,
   GITHUB_PRIVATE_KEY_BINDING,
   GITHUB_WEBHOOK_SECRET_BINDING,
+  DATA_BUCKET,
   SECRET_SNAPSHOT_KEY_BINDING,
+  STATE_BUCKET,
 } from "./internal/runtime/contract.ts";
 import { listScriptSecrets } from "./internal/secret/store.ts";
 import {
@@ -21,7 +23,6 @@ import {
   type RepositorySource,
 } from "./internal/source/repository.ts";
 import {
-  artifactBucketName,
   CloudflareStackControl,
   cloudflareStackManifest,
   validateBindings,
@@ -44,9 +45,10 @@ interface DeployContext {
 }
 
 interface DeployOutput {
-  readonly script: string;
+  readonly name: string;
   readonly artifactVersions: ReadonlyArray<string>;
   readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
+  readonly remove: () => Promise<void>;
 }
 
 interface DeployAdapters {
@@ -106,12 +108,13 @@ export const deployWithAdapters = async (
 ): Promise<DeployOutput> => {
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
-  const scriptName = await resolveScriptName({ cwd: opts.cwd, env });
+  let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
+  const deploymentName = deploymentNameOf(repository, env);
   const { accountId, cf } = await resolveAuth(
     { ...opts, ...(adapters.client ? { client: adapters.client } : {}) },
     env,
   );
-  const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
+  const remoteSecrets = await listScriptSecrets(cf, accountId, deploymentName);
   const missingSecrets = registry.flatMap((w) =>
     w.def.secrets
       .filter((name) => !env[name] && !remoteSecrets.has(name))
@@ -122,7 +125,6 @@ export const deployWithAdapters = async (
   }
 
   validateBindings(secrets);
-  let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
   const hasGitHubTrigger = registry.some(({ def }) => def.trigger.type === "github");
   const appId = env[GITHUB_APP_ID_BINDING];
   const privateKey = env[GITHUB_PRIVATE_KEY_BINDING];
@@ -204,7 +206,7 @@ export const deployWithAdapters = async (
   const deployment = await buildDeployment(registry, {
     accountId,
     ...opts,
-    scriptName,
+    deploymentName,
     repository,
     snapshotKeyAvailable,
     ...(hasGitHubTrigger && repository.authentication.type === "github"
@@ -225,8 +227,8 @@ export const deployWithAdapters = async (
     });
   }
   opts.onProgress?.({ step: "deploy", status: "start" });
-  const artifacts = artifactBucketName(accountId);
-  const stateBucket = `runway-state-${accountId}`;
+  const dataBucket = DATA_BUCKET;
+  const stateBucket = STATE_BUCKET;
   const repositoryId =
     repository.authentication.type === "github"
       ? `github:${repository.authentication.repository.id}`
@@ -238,12 +240,12 @@ export const deployWithAdapters = async (
   const manifest = cloudflareStackManifest({
     accountId,
     repositoryId,
-    name: scriptName,
+    name: deploymentName,
     deployment,
     schedules: cronsOf(registry),
     secretNames: allSecretNames,
     snapshotKeyBindings,
-    artifactBucket: artifacts,
+    dataBucket,
     stateBucket,
   });
   const control =
@@ -257,13 +259,17 @@ export const deployWithAdapters = async (
       stateBucket,
       ready: adapters.ready ?? waitUntilReady,
     });
-  await new Stack(manifest, control).sync();
+  const stack = new Stack(manifest, control);
+  await stack.sync();
 
   opts.onProgress?.({ step: "deploy", status: "done" });
   return {
-    script: scriptName,
+    name: deploymentName,
     artifactVersions: deployment.artifacts.map(({ artifactVersion }) => artifactVersion),
     urls: control.urls(),
+    remove: async () => {
+      await stack.remove();
+    },
   };
 };
 

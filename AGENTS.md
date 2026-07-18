@@ -109,7 +109,7 @@ export default workflow({
   does not alter an active run.
 - `Stack` is the sole owner of one repo-scoped orchestration Worker, one Worker Loader binding, one
   matching Dynamic Workflow resource, the internal container and Durable Object namespaces,
-  schedules/routes/bindings/secrets, exact owned objects, and one `RUNWAY_ARTIFACTS` binding to the
+  schedules/routes/bindings/secrets, exact owned objects, and one `RUNWAY_DATA` binding to the
   private shared account artifact bucket. Sync/remove re-inventory exact provider state and preserve
   unknown or shared resources.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
@@ -125,8 +125,10 @@ export default workflow({
 - Cache schema 2 and runner ABI `runway-sandbox-v2` use private content-addressed SquashFS objects
   with a bounded canonical hardlink trailer. Restore is staged and integrity-checked; only the
   durable winning success may publish. Cache is not Source, a checkpoint, or a public content store.
-- The deployed Stack is named exactly `runway` and uses the digest-pinned linux/amd64 image on
-  `standard-4`. The legacy `runway-monorepo` Stack and public bootstrap bucket are deleted.
+- A Stack derives one name from its Git repository. Its Worker, Dynamic Workflow, and container share
+  that name; its Durable Object namespaces append `-github` and `-sandbox`. Account data and state use
+  the shared `runway-data` and `runway-state` buckets. The digest-pinned linux/amd64 image runs on
+  `standard-4`.
 - Runway's root workflows use the mise provider for the Node/pnpm toolchain and keep application
   dependency installation uncached. Earlier evidence showed that transporting the pnpm store and
   `node_modules` costs more and runs slower than a clean install.

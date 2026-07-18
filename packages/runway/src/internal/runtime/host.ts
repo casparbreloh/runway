@@ -48,7 +48,7 @@ import { decodeWorkflowArtifact, workflowArtifactKey } from "./artifact.ts";
 import type { WorkflowArtifact } from "./artifact.ts";
 import type { RuntimeBinding } from "./binding.ts";
 import {
-  ARTIFACT_BUCKET_BINDING,
+  DATA_BUCKET_BINDING,
   CACHE_R2_ACCESS_KEY_ID_BINDING,
   CACHE_R2_SECRET_ACCESS_KEY_BINDING,
   CACHE_R2_SESSION_TOKEN_BINDING,
@@ -88,7 +88,7 @@ interface LoaderBinding {
 
 interface HostEnv {
   [LOADER_BINDING]: LoaderBinding;
-  [ARTIFACT_BUCKET_BINDING]: R2Bucket;
+  [DATA_BUCKET_BINDING]: R2Bucket;
   [SECRET_SNAPSHOT_KEY_BINDING]: string;
   [SANDBOX_BINDING]: DurableObjectNamespace<Sandbox>;
   [WORKFLOW_BINDING]: Workflow;
@@ -156,7 +156,7 @@ export interface HostConfig {
   readonly accountId: string;
   readonly cacheBucket: string;
   readonly imageDigest: string;
-  readonly scriptName: string;
+  readonly deploymentName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
   readonly routes: ReadonlyArray<HostRoute>;
@@ -344,7 +344,7 @@ export class RunwaySandboxBinding
             transport: sandbox.cacheTransfer(sourceRequest.runId, snapshotSecrets),
             objects: {
               head: async (key) => {
-                const object = await this.env[ARTIFACT_BUCKET_BINDING].head(key);
+                const object = await this.env[DATA_BUCKET_BINDING].head(key);
                 const digest = object?.customMetadata?.["runway-sha256"];
                 return object && typeof digest === "string"
                   ? { bytes: object.size, digest }
@@ -399,11 +399,11 @@ export class RunwaySandboxBinding
       },
       refs: {
         get: async (key) => {
-          const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
+          const object = await this.env[DATA_BUCKET_BINDING].get(key);
           return object ? { etag: object.etag, text: async () => await object.text() } : null;
         },
         list: async (prefix) => {
-          const page = await this.env[ARTIFACT_BUCKET_BINDING].list({ prefix, limit: 129 });
+          const page = await this.env[DATA_BUCKET_BINDING].list({ prefix, limit: 129 });
           return {
             candidates: page.objects.slice(0, 128).map((object) => ({
               key: object.key,
@@ -413,7 +413,7 @@ export class RunwaySandboxBinding
           };
         },
         put: async (key, text, options) => {
-          const object = await this.env[ARTIFACT_BUCKET_BINDING].put(key, text, {
+          const object = await this.env[DATA_BUCKET_BINDING].put(key, text, {
             onlyIf: options.onlyIf,
           });
           return object ? { etag: object.etag } : null;
@@ -683,16 +683,14 @@ const readArtifact = async (
   config: HostConfig,
 ): Promise<{ readonly artifact: WorkflowArtifact; readonly metadata: WorkflowMetadata }> => {
   const metadata = metadataOf(value);
-  const object = await env[ARTIFACT_BUCKET_BINDING].get(
-    workflowArtifactKey(metadata.artifactVersion),
-  );
+  const object = await env[DATA_BUCKET_BINDING].get(workflowArtifactKey(metadata.artifactVersion));
   if (!object) throw new Error("missing workflow artifact");
   const bytes = await object.arrayBuffer();
   if ((await sha256(bytes)) !== metadata.artifactVersion) {
     throw new Error("invalid workflow artifact hash");
   }
   const artifact = decodeWorkflowArtifact(bytes);
-  if (artifact.scriptName !== config.scriptName)
+  if (artifact.deploymentName !== config.deploymentName)
     throw new Error("workflow artifact does not match route");
   return { artifact, metadata };
 };
@@ -742,7 +740,7 @@ const loadWorker = async (
           ...(metadata.source ? { source: metadata.source } : {}),
           secretNames: artifact.secrets,
           secretSnapshotKey: config.secretSnapshotKey,
-          snapshotScope: `${config.scriptName}:${artifact.workflowId}:${metadata.artifactVersion}`,
+          snapshotScope: `${config.deploymentName}:${artifact.workflowId}:${metadata.artifactVersion}`,
           terminal: {
             accountId: config.accountId,
             repositoryId,
@@ -804,7 +802,7 @@ export const createHost = (config: HostConfig) => ({
     const url = new URL(req.url);
     const cache = req.method === "GET" ? CACHE_PATH.exec(url.pathname) : null;
     if (cache) {
-      const object = await env[ARTIFACT_BUCKET_BINDING].get(workflowCacheKey(cache[1]!));
+      const object = await env[DATA_BUCKET_BINDING].get(workflowCacheKey(cache[1]!));
       if (!object) return new Response("not found", { status: 404 });
       return new Response(object.body, {
         headers: {

@@ -7,7 +7,7 @@ import type { PreparedDeployment } from "../deploy/artifacts.ts";
 import type { Registry } from "../deploy/registry.ts";
 import { workflowArtifactKey } from "../runtime/artifact.ts";
 import {
-  ARTIFACT_BUCKET_BINDING,
+  DATA_BUCKET_BINDING,
   CACHE_SECRET_BINDINGS,
   COMPATIBILITY_DATE,
   DYNAMIC_WORKFLOW_CLASS,
@@ -106,13 +106,11 @@ const routeHostname = (pattern: string): string => {
     .toLowerCase();
 };
 
-export const artifactBucketName = (accountId: string): string => `runway-${accountId}`;
-
 export const validateBindings = (secrets: readonly string[]): void => {
   const names = new Map<string, string>([
     [WORKFLOW_BINDING, "Runway workflow binding"],
     [LOADER_BINDING, "Runway worker loader binding"],
-    [ARTIFACT_BUCKET_BINDING, "Runway workflow artifact binding"],
+    [DATA_BUCKET_BINDING, "Runway workflow artifact binding"],
     [SANDBOX_BINDING, "Runway sandbox binding"],
     [GITHUB_COORDINATOR_BINDING, "Runway GitHub coordinator binding"],
     ...GITHUB_SECRET_BINDINGS.map((name) => [name, "Runway GitHub App binding"] as const),
@@ -137,7 +135,7 @@ export const cloudflareStackManifest = (opts: {
   readonly schedules: readonly string[];
   readonly secretNames: readonly string[];
   readonly snapshotKeyBindings: readonly string[];
-  readonly artifactBucket: string;
+  readonly dataBucket: string;
   readonly stateBucket: string;
 }): StackManifest => {
   const imageDigest = SANDBOX_IMAGE_DIGEST;
@@ -162,7 +160,7 @@ export const cloudflareStackManifest = (opts: {
   )}`;
   const bindings = [
     { name: LOADER_BINDING, type: "worker_loader" },
-    { name: ARTIFACT_BUCKET_BINDING, type: "r2_bucket", target: opts.artifactBucket },
+    { name: DATA_BUCKET_BINDING, type: "r2_bucket", target: opts.dataBucket },
     {
       name: GITHUB_COORDINATOR_BINDING,
       type: "durable_object_namespace",
@@ -175,14 +173,14 @@ export const cloudflareStackManifest = (opts: {
     owner: {
       accountId: opts.accountId,
       repositoryId: opts.repositoryId,
-      stackId: stackIdOf(opts.accountId, opts.repositoryId),
+      stackId: stackIdOf(opts.accountId, opts.repositoryId, opts.name),
       name: opts.name,
     },
     generation,
     worker: { name: opts.name, moduleDigest },
     workflow: { name: opts.name, className: DYNAMIC_WORKFLOW_CLASS },
     container: {
-      name: `${opts.name}-${SANDBOX_CLASS}`,
+      name: opts.name,
       image: SANDBOX_CONTAINER.image,
       imageDigest,
       platform: { os: "linux", architecture: "amd64" },
@@ -197,9 +195,9 @@ export const cloudflareStackManifest = (opts: {
       {
         binding: GITHUB_COORDINATOR_BINDING,
         className: GITHUB_COORDINATOR_CLASS,
-        name: `${opts.name}_${GITHUB_COORDINATOR_CLASS}`,
+        name: `${opts.name}-github`,
       },
-      { binding: SANDBOX_BINDING, className: SANDBOX_CLASS, name: `${opts.name}_${SANDBOX_CLASS}` },
+      { binding: SANDBOX_BINDING, className: SANDBOX_CLASS, name: `${opts.name}-sandbox` },
     ].sort((left, right) => left.binding.localeCompare(right.binding)),
     schedules: [...opts.schedules].sort(),
     workersDev: true,
@@ -212,7 +210,7 @@ export const cloudflareStackManifest = (opts: {
     },
     buckets: [
       {
-        name: opts.artifactBucket,
+        name: opts.dataBucket,
         shared: true,
         lifecycle: "retain",
         publicAccess: false,
@@ -336,22 +334,22 @@ export class CloudflareStackControl implements StackControl {
     );
     const workerExists = scripts.some(({ id }) => id === manifest.worker.name);
 
-    const artifactBucket = manifest.buckets.find(({ lifecycle }) => lifecycle === "retain");
-    if (!artifactBucket) throw new Error("Stack has no artifact bucket");
+    const dataBucket = manifest.buckets.find(({ lifecycle }) => lifecycle === "retain");
+    if (!dataBucket) throw new Error("Stack has no data bucket");
     try {
       try {
-        await this.#opts.cf.r2.buckets.get(artifactBucket.name, {
+        await this.#opts.cf.r2.buckets.get(dataBucket.name, {
           account_id: this.#opts.accountId,
         });
       } catch (error) {
         if (!status(error, 404)) throw error;
         await this.#opts.cf.r2.buckets.create({
           account_id: this.#opts.accountId,
-          name: artifactBucket.name,
+          name: dataBucket.name,
         });
       }
       for (const artifact of this.#opts.deployment.artifacts) {
-        await this.#persistArtifact(artifactBucket, artifact);
+        await this.#persistArtifact(dataBucket, artifact);
       }
     } catch (error) {
       if (!status(error, 403)) throw error;
@@ -374,8 +372,8 @@ export class CloudflareStackControl implements StackControl {
         { type: "worker_loader" as const, name: LOADER_BINDING },
         {
           type: "r2_bucket" as const,
-          name: ARTIFACT_BUCKET_BINDING,
-          bucket_name: artifactBucket.name,
+          name: DATA_BUCKET_BINDING,
+          bucket_name: dataBucket.name,
         },
         {
           type: "workflow" as const,

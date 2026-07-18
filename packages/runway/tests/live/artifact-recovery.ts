@@ -12,9 +12,9 @@ import { deploy } from "../../src/deploy.ts";
 import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
 import type { Registry } from "../../src/internal/deploy/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
+import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { setScriptSecret } from "../../src/internal/secret/store.ts";
 import { resolveRepositorySource } from "../../src/internal/source/repository.ts";
-import { artifactBucketName } from "../../src/internal/stack/cloudflare.ts";
 import { fetchWorkersDev, nonGitHubDeployEnv } from "./support.ts";
 
 const execFileAsync = promisify(execFile);
@@ -365,11 +365,11 @@ const run = async (): Promise<void> => {
   const startedAt = Date.now();
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
   const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-artifact-smoke-${suffix}`;
-  const containerName = `${scriptName}-Sandbox`;
+  const containerName = scriptName;
   const token = await tokenOf();
   const cf = new Cloudflare({ apiToken: token, timeout: 15_000 });
   const accountId = await oneAccountId(cf);
-  const bucketName = artifactBucketName(accountId);
+  const bucketName = DATA_BUCKET;
   const collisions = [
     ...(await matchingScripts(cf, accountId, scriptName)).map((name) => `Worker ${name}`),
     ...(await relatedWorkflows(cf, accountId, scriptName)).map(
@@ -413,6 +413,7 @@ const run = async (): Promise<void> => {
   };
   let smokeError: unknown;
   let cleanupError: Error | undefined;
+  let removeStack: (() => Promise<void>) | undefined;
   let report: Record<string, unknown> | undefined;
   let bucketCreated = false;
 
@@ -426,7 +427,7 @@ const run = async (): Promise<void> => {
     const preparedV1 = await buildDeployment(registry(project), {
       accountId,
       cwd: project,
-      scriptName,
+      deploymentName: scriptName,
       repository,
       snapshotKeyAvailable: true,
     });
@@ -436,11 +437,12 @@ const run = async (): Promise<void> => {
     const v1 = await deploy(registry(project), {
       cwd: project,
       env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_SCRIPT_NAME: scriptName,
+        RUNWAY_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         SMOKE_SECRET: oldSecret,
       }),
     });
+    removeStack = v1.remove;
     timings.v1DeployMs = Date.now() - v1Started;
     const webhookUrl = v1.urls[0]?.url;
     if (!webhookUrl) throw new Error("Deploy returned no webhook URL");
@@ -494,7 +496,7 @@ const run = async (): Promise<void> => {
     const preparedV2 = await buildDeployment(registry(project), {
       accountId,
       cwd: project,
-      scriptName,
+      deploymentName: scriptName,
       repository,
       snapshotKeyAvailable: true,
     });
@@ -504,11 +506,12 @@ const run = async (): Promise<void> => {
     const v2 = await deploy(registry(project), {
       cwd: project,
       env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_SCRIPT_NAME: scriptName,
+        RUNWAY_NAME: scriptName,
         HOOK_SECRET: hookSecret,
         SMOKE_SECRET: oldSecret,
       }),
     });
+    removeStack = v2.remove;
     timings.v2DeployMs = Date.now() - v2Started;
     const v2WebhookUrl = v2.urls[0]?.url;
     if (!v2WebhookUrl) throw new Error("Second deploy returned no webhook URL");
@@ -661,6 +664,11 @@ const run = async (): Promise<void> => {
     smokeError = error;
   } finally {
     const cleanupErrors: string[] = [];
+    try {
+      await removeStack?.();
+    } catch (error) {
+      cleanupErrors.push(`Stack: ${String(error)}`);
+    }
     try {
       const application = (await containerApplications(token, accountId)).find(
         (candidate) => candidate.name === containerName,

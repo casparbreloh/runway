@@ -39,8 +39,5 @@
   "engines": {
     "node": "^26"
   },
-  "packageManager": "pnpm@11.5.0",
-  "runway": {
-    "name": "runway"
-  }
+  "packageManager": "pnpm@11.5.0"
 }

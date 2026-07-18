@@ -97,21 +97,21 @@ export default defineConfig({
       const generated = await buildDeployment(generatedHostRegistry, {
         accountId: "test-account",
         cwd: import.meta.dirname,
-        scriptName: "generated-runway-host",
+        deploymentName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const suspended = await buildDeployment(suspendedRunRegistry, {
         accountId: "test-account",
         cwd: import.meta.dirname,
-        scriptName: "generated-runway-host",
+        deploymentName: "generated-runway-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
       });
       const githubHost = await buildDeployment(githubRegistry, {
         accountId: "test-account",
         cwd: import.meta.dirname,
-        scriptName: "generated-github-host",
+        deploymentName: "generated-github-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
         github: {
@@ -128,7 +128,7 @@ export default defineConfig({
       const manyGithubHost = await buildDeployment(manyGithubRegistry, {
         accountId: "test-account",
         cwd: import.meta.dirname,
-        scriptName: "generated-many-github-host",
+        deploymentName: "generated-many-github-host",
         repository: repositoryFixture,
         snapshotKeyAvailable: true,
         github: {
@@ -196,7 +196,7 @@ export default defineConfig({
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
               },
               workerLoaders: { LOADER: {} },
-              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
               workflows: {
                 WORKFLOWS: {
                   name: "generated-workflow-test",
@@ -224,7 +224,7 @@ export default defineConfig({
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
               },
               workerLoaders: { LOADER: {} },
-              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
               serviceBindings: {
                 WORKFLOWS: {
                   name: "generated-workflow-capture",
@@ -272,7 +272,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
                   '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST","key":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
               },
               workerLoaders: { LOADER: {} },
-              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
               durableObjects: {
                 RUNWAY_GITHUB_COORDINATOR: "RunwayGitHubCoordinator",
               },
@@ -313,7 +313,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
               },
               workerLoaders: { LOADER: {} },
-              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
               durableObjects: {
                 RUNWAY_GITHUB_COORDINATOR: "RunwayGitHubCoordinator",
               },
@@ -344,7 +344,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
                 },
               ],
               workerLoaders: { LOADER: {} },
-              r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+              r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
               bindings: {
                 RUNWAY_SECRET_SNAPSHOT_KEY: '{"identity":"RUNWAY_SECRET_SNAPSHOT_KEY_TEST"}',
               },
@@ -374,7 +374,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
             GITHUB_TEST_ARTIFACT: new TextDecoder().decode(githubTestArtifact.contents),
             GITHUB_TEST_ARTIFACT_VERSION: githubTestArtifact.artifactVersion,
           },
-          r2Buckets: { RUNWAY_ARTIFACTS: "runway-test-artifacts" },
+          r2Buckets: { RUNWAY_DATA: "runway-test-artifacts" },
           serviceBindings: {
             GITHUB_HOST: {
               name: "generated-github-host",

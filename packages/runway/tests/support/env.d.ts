@@ -27,7 +27,7 @@ declare namespace Cloudflare {
       captured(): Promise<unknown>;
       reset(): Promise<void>;
     };
-    RUNWAY_ARTIFACTS: R2Bucket;
+    RUNWAY_DATA: R2Bucket;
     ACTIVE_ARTIFACT: string;
     ACTIVE_ARTIFACT_VERSION: string;
     ACTIVE_DEPLOYMENT_ID: string;

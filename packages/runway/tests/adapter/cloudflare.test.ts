@@ -24,7 +24,7 @@ test("Containers mutations never retry an ambiguous transport failure", async ()
   await expect(
     defaultClient("token", request).containers.applications.create({
       account_id: "account",
-      body: { name: "runway-Sandbox" },
+      body: { name: "runway" },
     }),
   ).rejects.toThrow("request failed");
   expect(request).toHaveBeenCalledOnce();
