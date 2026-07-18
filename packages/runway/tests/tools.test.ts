@@ -55,11 +55,8 @@ test("mise supports repository discovery and inline tools behind the same provid
   const inline = mise({ node: "24.5.0", pnpm: "10.13.1" });
 
   expect(discovered.id).toBe("mise");
-  expect(discovered.cache).toMatchObject({
-    paths: ["/cache/runway/tools/mise"],
-    key: { prefix: expect.stringContaining("repository") },
-  });
-  expect(inline.cache?.key).toEqual(expect.stringMatching(/^runway-mise-v2026\.7\.7-inline-/));
+  expect(discovered.cache).toBeUndefined();
+  expect(inline.cache).toBeUndefined();
   expect(inline.env).toMatchObject({
     MISE_CONFIG_FILE: "/cache/runway/tools/mise/config.toml",
   });

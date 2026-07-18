@@ -208,8 +208,9 @@ runway deploy
 ## Development Status
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows are
-ordinary Runway consumers. They use the mise provider for Node and pnpm; provider-owned tool caches
-remain adapters over the same generic cache foundation.
+ordinary Runway consumers. They use the mise provider for Node and pnpm. Mise installs tools fresh
+because transporting its whole data tree costs more than setup; providers use the generic cache only
+when measured restore cost wins.
 
 At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
 integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal

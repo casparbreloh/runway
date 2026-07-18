@@ -7,25 +7,7 @@ const ROOT = "/cache/runway/tools/mise";
 const LIBATOMIC_SHA256 = "56573c81b5dd84817882400cfea49fe671f5e6cfdd0f88b5d3a894c08b150462";
 const LIBATOMIC_URL =
   "https://security.ubuntu.com/ubuntu/pool/main/g/gcc-12/libatomic1_12.3.0-1ubuntu1~22.04.3_amd64.deb";
-const CONFIG_FILES = [
-  ".mise.toml",
-  ".mise/config.toml",
-  ".tool-versions",
-  "mise.local.toml",
-  "mise.lock",
-  "mise.toml",
-] as const;
-
 export type MiseTools = Readonly<Record<string, string>>;
-
-const fingerprint = (value: string): string => {
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of new TextEncoder().encode(value)) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return hash.toString(16).padStart(16, "0");
-};
 
 const inlineConfig = (tools: MiseTools): string => {
   const entries = Object.entries(tools).sort(([left], [right]) => left.localeCompare(right));
@@ -61,15 +43,8 @@ export const mise = (tools?: MiseTools): ToolProvider => {
     `${shell(`${ROOT}/bin/mise`)} reshim`,
     `rm -rf ${shell(`${ROOT}/mise.tar.gz`)} ${shell(`${ROOT}/libatomic.deb`)} ${shell(`${ROOT}/libatomic`)}`,
   ].join("\n");
-  const variant = config ? `inline-${fingerprint(config)}` : "repository";
-  const cachePrefix = `runway-mise-${VERSION}-${variant}-`;
   return defineToolProvider({
     id: "mise",
-    cache: {
-      paths: [ROOT],
-      key: config ? cachePrefix : { prefix: cachePrefix, files: [...CONFIG_FILES] },
-      ...(config ? {} : { restoreKeys: [cachePrefix] }),
-    },
     setup: install,
     paths: [`${ROOT}/bin`, `${ROOT}/data/shims`],
     env: {

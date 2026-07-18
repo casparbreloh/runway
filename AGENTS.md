@@ -67,8 +67,9 @@ export default workflow({
   `timeoutMs`.
 - Use `step.cache(id, declaration)` before any command for generic caller-owned filesystem trees.
   Foundation code must not infer package-manager, runtime, lockfile, or tool semantics.
-- `tools: mise()` discovers repository config; `mise({ ... })` defines inline tools. Provider caches
-  are automatic. Ordered arrays support mixed providers without a registry.
+- `tools: mise()` discovers repository config; `mise({ ... })` defines inline tools. Providers may
+  use the generic cache when transport is demonstrably cheaper than setup. Ordered arrays support
+  mixed providers without a registry.
 - Durable operation return values must be JSON-serializable and operation bodies idempotent.
 - Every sleep has a caller-provided stable id.
 - Caller-provided operation ids are 1–128 UTF-8 bytes and must not begin with `runway:`.
