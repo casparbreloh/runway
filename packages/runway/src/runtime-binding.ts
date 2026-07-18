@@ -1,8 +1,8 @@
-import type { PendingCache, PreparedCache } from "./cache.ts";
 import type { FailureDiagnostic } from "./diagnostic.ts";
-import type { CacheDeclaration, ExecResult } from "./run.ts";
-import type { CacheRecord, NormalizedExecOptions } from "./sandbox.ts";
-import type { PreparedSource, SourceIdentity } from "./source.ts";
+import type { PendingCache, PreparedCache } from "./internal/cache/cache.ts";
+import type { CacheRecord, NormalizedExecOptions } from "./internal/sandbox/sandbox.ts";
+import type { PreparedSource, SourceIdentity } from "./internal/source/source.ts";
+import type { CacheTreeDeclaration, ExecResult } from "./step.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 
 export interface RuntimeBinding {
@@ -28,10 +28,15 @@ export interface RuntimeBinding {
   restoreCache(request: {
     readonly runId: string;
     readonly id: string;
-    readonly declaration: CacheDeclaration;
+    readonly declaration: CacheTreeDeclaration;
     readonly secrets: Readonly<Record<string, string>>;
     readonly source: PreparedSource;
   }): Promise<CacheRecord>;
+  discardCaches(request: {
+    readonly runId: string;
+    readonly paths: readonly string[];
+    readonly secrets: Readonly<Record<string, string>>;
+  }): Promise<void>;
   quiesce(runId: string, secrets: Readonly<Record<string, string>>): Promise<void>;
   prepareCaches(request: {
     readonly runId: string;

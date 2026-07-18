@@ -6,10 +6,6 @@ import {
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
-import { Cache } from "./cache.ts";
-import { CloudflareCacheSnapshot } from "./cloudflare/cache-snapshot.ts";
-import { CloudflareCacheTransfer } from "./cloudflare/cache.ts";
-import { cloudflareSandbox } from "./cloudflare/sandbox.ts";
 import { parseFailureDiagnostic } from "./diagnostic.ts";
 import type { FailureDiagnostic } from "./diagnostic.ts";
 import type {
@@ -25,16 +21,11 @@ import {
   type GitHubEventFilter,
   type GitHubRepository,
 } from "./github.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
-import {
-  parseGitHubRunSource,
-  repositorySourceForRun,
-  sourceIdentity,
-  type GitHubRunSource,
-  type RepositorySource,
-} from "./repository-source.ts";
-import type { ExecResult } from "./run.ts";
-import type { RuntimeBinding } from "./runtime-binding.ts";
+import { Cache } from "./internal/cache/cache.ts";
+import { CloudflareCacheSnapshot } from "./internal/cache/cloudflare-snapshot.ts";
+import { CloudflareCacheTransfer } from "./internal/cache/cloudflare-transfer.ts";
+import { normalizedCacheTarget } from "./internal/cache/path.ts";
+import { cloudflareSandbox } from "./internal/sandbox/cloudflare.ts";
 import {
   CACHE_SCHEMA,
   CACHE_LIMITS,
@@ -42,9 +33,19 @@ import {
   SANDBOX_BINDING,
   SANDBOX_CAPACITY,
   SANDBOX_RUNNER_ABI,
-} from "./sandbox-config.ts";
+} from "./internal/sandbox/config.ts";
+import {
+  parseGitHubRunSource,
+  repositorySourceForRun,
+  sourceIdentity,
+  type GitHubRunSource,
+  type RepositorySource,
+} from "./internal/source/repository.ts";
+import type { PreparedSource, SourceIdentity } from "./internal/source/source.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
+import type { RuntimeBinding } from "./runtime-binding.ts";
 import { createSecretSnapshots } from "./secret-snapshot.ts";
-import type { PreparedSource, SourceIdentity } from "./source.ts";
+import type { ExecResult } from "./step.ts";
 import { parseFinalization, parseTerminalIdentity, parseTerminalRecord } from "./terminal.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "./terminal.ts";
 import {
@@ -402,6 +403,16 @@ export class RunwaySandboxBinding
           const object = await this.env[ARTIFACT_BUCKET_BINDING].get(key);
           return object ? { etag: object.etag, text: async () => await object.text() } : null;
         },
+        list: async (prefix) => {
+          const page = await this.env[ARTIFACT_BUCKET_BINDING].list({ prefix, limit: 129 });
+          return {
+            candidates: page.objects.slice(0, 128).map((object) => ({
+              key: object.key,
+              uploadedAtMs: object.uploaded.getTime(),
+            })),
+            truncated: page.truncated || page.objects.length > 128,
+          };
+        },
         put: async (key, text, options) => {
           const object = await this.env[ARTIFACT_BUCKET_BINDING].put(key, text, {
             onlyIf: options.onlyIf,
@@ -567,6 +578,19 @@ export class RunwaySandboxBinding
       return await cache.record(request.id, request.declaration);
     } finally {
       await cache.flushMeter();
+    }
+  }
+
+  async discardCaches(request: Parameters<RuntimeBinding["discardCaches"]>[0]): Promise<void> {
+    this.#assertRun(request.runId);
+    const process = await this.#sandbox().cacheProcess(
+      request.runId,
+      Object.values(this.#snapshotValues(request.secrets)),
+    );
+    try {
+      for (const path of request.paths) await process.remove(normalizedCacheTarget(path));
+    } finally {
+      await process.close();
     }
   }
 

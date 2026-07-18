@@ -2,6 +2,9 @@ export { ExecError } from "./exec-error.ts";
 
 export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
+export { mise } from "./mise.ts";
+export { release } from "./release.ts";
+export { defineToolProvider } from "./tools.ts";
 
 export type { SecretRef } from "./secrets.ts";
 export type {
@@ -23,8 +26,11 @@ export type {
   CacheResult,
   ExecOptions,
   ExecResult,
-  Run,
-} from "./run.ts";
+  Step,
+} from "./step.ts";
+export type { MiseTools } from "./mise.ts";
+export type { ReleaseOptions } from "./release.ts";
+export type { ToolProvider, Tools } from "./tools.ts";
 export type {
   CronParams,
   CronTrigger,

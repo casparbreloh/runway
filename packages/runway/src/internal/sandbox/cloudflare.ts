@@ -1,15 +1,18 @@
-import type { GitHubRepositoryAuthentication, RepositorySource } from "../repository-source.ts";
-import type { ExecResult } from "../run.ts";
+import { redactError, StreamingRedactor } from "../../secret-redaction.ts";
+import type { ExecResult } from "../../step.ts";
+import type { CacheSnapshotProcess } from "../cache/cloudflare-snapshot.ts";
+import type {
+  CacheTransferCapability,
+  CacheTransferSession,
+} from "../cache/cloudflare-transfer.ts";
+import type { GitHubRepositoryAuthentication, RepositorySource } from "../source/repository.ts";
+import type { PreparedSource } from "../source/source.ts";
 import {
   digestCommand,
   ExecTimeoutError,
   RunLostError,
   type NormalizedExecOptions,
-} from "../sandbox.ts";
-import { redactError, StreamingRedactor } from "../secret-redaction.ts";
-import type { PreparedSource } from "../source.ts";
-import type { CacheSnapshotProcess } from "./cache-snapshot.ts";
-import type { CacheTransferCapability, CacheTransferSession } from "./cache.ts";
+} from "./sandbox.ts";
 
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const REPOSITORY_CHECKOUT_TIMEOUT_MS = 5 * 60_000;

@@ -1,11 +1,11 @@
-import { cacheDeclarationEvidence } from "./cache.ts";
-import type { PendingCache, PreparedCache } from "./cache.ts";
-import { trustedExecError } from "./exec-error.ts";
-import type { Meter } from "./meter.ts";
-import type { CacheDeclaration, CacheResult, ExecOptions, ExecResult } from "./run.ts";
-import { redactSecrets } from "./secret-redaction.ts";
-import type { PreparedSource, Source } from "./source.ts";
-import type { Finalization, Terminal } from "./terminal.ts";
+import { trustedExecError } from "../../exec-error.ts";
+import type { Meter } from "../../meter.ts";
+import { redactSecrets } from "../../secret-redaction.ts";
+import type { CacheResult, CacheTreeDeclaration, ExecOptions, ExecResult } from "../../step.ts";
+import type { Finalization, Terminal } from "../../terminal.ts";
+import { cacheDeclarationEvidence } from "../cache/cache.ts";
+import type { PendingCache, PreparedCache } from "../cache/cache.ts";
+import type { PreparedSource, Source } from "../source/source.ts";
 
 const DEFAULT_EXEC_CWD = "/workspace";
 const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;
@@ -63,7 +63,7 @@ export interface Placement {
   cache?(request: {
     readonly runId: string;
     readonly id: string;
-    readonly declaration: CacheDeclaration;
+    readonly declaration: CacheTreeDeclaration;
     readonly source: PreparedSource;
     readonly secrets: ReadonlyArray<string>;
   }): Promise<CacheRecord>;
@@ -139,7 +139,7 @@ export class Sandbox {
     this.#meter = options.meter;
   }
 
-  async cache(step: DurableCache, declaration: CacheDeclaration): Promise<CacheResult> {
+  async cache(step: DurableCache, declaration: CacheTreeDeclaration): Promise<CacheResult> {
     if (this.#started) throw new Error("cache restore must be declared before command execution");
     const evidence = await cacheDeclarationEvidence(declaration);
     const previous = this.#cacheDeclarations.get(step.id);
@@ -428,11 +428,13 @@ const cacheResult = (value: unknown): CacheResult => {
   const result = value as Record<string, unknown>;
   if (
     result.state === "hit" &&
-    Object.keys(result).sort().join(",") === "bytes,state" &&
+    Object.keys(result).sort().join(",") === "bytes,key,match,state" &&
     Number.isSafeInteger(result.bytes) &&
-    (result.bytes as number) >= 0
+    (result.bytes as number) >= 0 &&
+    typeof result.key === "string" &&
+    (result.match === "exact" || result.match === "restore")
   ) {
-    return { state: "hit", bytes: result.bytes as number };
+    return result as unknown as CacheResult;
   }
   if (
     (result.state === "miss" || result.state === "skipped") &&

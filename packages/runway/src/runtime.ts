@@ -1,18 +1,20 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-import type { PreparedCache } from "./cache.ts";
 import { failureDiagnosticOf } from "./diagnostic.ts";
 import type { FailureDiagnostic } from "./diagnostic.ts";
+import type { PreparedCache } from "./internal/cache/cache.ts";
+import { normalizedCacheTarget } from "./internal/cache/path.ts";
+import { SANDBOX_CAPACITY } from "./internal/sandbox/config.ts";
+import { ExecTimeoutError, RunLostError, Sandbox } from "./internal/sandbox/sandbox.ts";
+import { source } from "./internal/source/source.ts";
+import type { SourceIdentity } from "./internal/source/source.ts";
+import { withTools } from "./internal/tools/coordinator.ts";
 import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
 import { createRouter } from "./router.ts";
-import { makeRun, secretsOf } from "./run.ts";
-import type { Run } from "./run.ts";
 import type { RuntimeBinding } from "./runtime-binding.ts";
-import { SANDBOX_CAPACITY } from "./sandbox-config.ts";
-import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
-import { source } from "./source.ts";
-import type { SourceIdentity } from "./source.ts";
+import { makeStep, secretsOf } from "./step.ts";
+import { validateCacheDeclaration, type Step } from "./step.ts";
 import { Terminal, TerminalError } from "./terminal.ts";
 import type { Finalization, TerminalRecord, TerminalState } from "./terminal.ts";
 import { RUNTIME_BINDING } from "./worker-contract.ts";
@@ -57,7 +59,9 @@ const cachePublicationIdentity = async (
       typeof key === "string" ? "string" : "files",
       ...(typeof key === "string"
         ? [key]
-        : [key.salt ?? "", String(key.files.length), ...key.files]),
+        : [key.prefix ?? "", String(key.files.length), ...key.files]),
+      String(pending.declaration.restoreKeys?.length ?? 0),
+      ...(pending.declaration.restoreKeys ?? []),
       pending.declaration.path,
       pending.declaration.budget?.maxBytes === undefined
         ? "maxBytes:unset"
@@ -72,6 +76,7 @@ const cachePublicationIdentity = async (
       pending.revision.declarationDigest,
       pending.revision.etag ?? "etag:missing",
       String(pending.revision.generation),
+      pending.revision.key,
       pending.revision.keyDigest,
       pending.revision.platformDigest,
       pending.revision.ref,
@@ -109,12 +114,21 @@ type DynamicWorkerEnv = Record<string, unknown> & {
   [RUNTIME_BINDING]?: RuntimeBinding;
 };
 
-interface RunRuntime extends Pick<Run, "do" | "exec" | "cache" | "sleep"> {
+interface StepRuntime extends Pick<Step, "do" | "exec" | "cache" | "sleep"> {
   cleanup(): Promise<void>;
   finish(finalization: Finalization): Promise<void>;
 }
 
-const makeRunRuntime = (
+const cacheTreeId = async (id: string, index: number, path: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(JSON.stringify([id, index, path]));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `runway:cache-tree:${hex}`;
+};
+
+const makeStepRuntime = (
   step: WorkflowStep,
   binding: RuntimeBinding,
   runId: string,
@@ -122,7 +136,7 @@ const makeRunRuntime = (
   identity: SourceIdentity,
   terminal: Terminal,
   meter: Meter,
-): RunRuntime => {
+): StepRuntime => {
   let preparedCaches: readonly PreparedCache[] = [];
   const exactSource = source(identity, {
     prepare: async (requested, options) =>
@@ -176,7 +190,7 @@ const makeRunRuntime = (
     terminal,
     meter,
   });
-  const operations: Pick<Run, "do" | "exec" | "cache" | "sleep"> = {
+  const operations: Pick<Step, "do" | "exec" | "cache" | "sleep"> = {
     do: <T>(id: string, work: () => T | Promise<T>): Promise<T> =>
       measuredWorkflowStep(
         meter,
@@ -250,35 +264,80 @@ const makeRunRuntime = (
         },
         command,
       ),
-    cache: (id, declaration) =>
-      sandbox.cache(
-        {
-          id,
-          run: async (digest, work) => {
-            const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-              step.do(
-                id,
-                { retries: { limit: 5, delay: 0 } },
-                async () => ({ digest, record: await work() }) as never,
-              ),
-            );
-            if (
-              !recorded ||
-              typeof recorded !== "object" ||
-              Array.isArray(recorded) ||
-              Object.keys(recorded).sort().join(",") !== "digest,record" ||
-              typeof (recorded as { digest?: unknown }).digest !== "string"
-            ) {
-              throw new Error("invalid durable cache evidence");
-            }
-            return recorded as {
-              readonly digest: string;
-              readonly record: Awaited<ReturnType<typeof work>>;
-            };
-          },
-        },
-        declaration,
-      ),
+    cache: async (id, declaration) => {
+      validateCacheDeclaration(declaration);
+      const results = [];
+      for (const [index, path] of declaration.paths.entries()) {
+        const treeId = declaration.paths.length === 1 ? id : await cacheTreeId(id, index, path);
+        results.push({
+          path,
+          result: await sandbox.cache(
+            {
+              id: treeId,
+              run: async (digest, work) => {
+                const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+                  step.do(
+                    treeId,
+                    { retries: { limit: 5, delay: 0 } },
+                    async () => ({ digest, record: await work() }) as never,
+                  ),
+                );
+                if (
+                  !recorded ||
+                  typeof recorded !== "object" ||
+                  Array.isArray(recorded) ||
+                  Object.keys(recorded).sort().join(",") !== "digest,record" ||
+                  typeof (recorded as { digest?: unknown }).digest !== "string"
+                ) {
+                  throw new Error("invalid durable cache evidence");
+                }
+                return recorded as {
+                  readonly digest: string;
+                  readonly record: Awaited<ReturnType<typeof work>>;
+                };
+              },
+            },
+            {
+              key: declaration.key,
+              path,
+              ...(declaration.restoreKeys ? { restoreKeys: declaration.restoreKeys } : {}),
+              ...(declaration.budget ? { budget: declaration.budget } : {}),
+            },
+          ),
+        });
+      }
+      const hits = results.filter(
+        (
+          entry,
+        ): entry is typeof entry & {
+          result: Extract<(typeof entry)["result"], { state: "hit" }>;
+        } => entry.result.state === "hit",
+      );
+      if (hits.length > 0 && hits.length !== results.length) {
+        await binding.discardCaches({
+          runId,
+          paths: hits.map((entry) => normalizedCacheTarget(entry.path)),
+          secrets,
+        });
+      }
+      const miss = results.find((entry) => entry.result.state !== "hit")?.result;
+      if (miss) return miss;
+      const first = hits[0]!.result;
+      if (hits.some((entry) => entry.result.key !== first.key)) {
+        await binding.discardCaches({
+          runId,
+          paths: hits.map((entry) => normalizedCacheTarget(entry.path)),
+          secrets,
+        });
+        return { state: "miss", reason: "absent" };
+      }
+      return {
+        state: "hit",
+        bytes: hits.reduce((total, entry) => total + entry.result.bytes, 0),
+        key: first.key,
+        match: hits.some((entry) => entry.result.match === "restore") ? "restore" : "exact",
+      };
+    },
     sleep: (id: string, durationMs: number): Promise<void> =>
       measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
   };
@@ -403,7 +462,7 @@ export const toEntrypoint = (
         await terminal.publish(await terminal.claim("failure"));
         throw error;
       }
-      const runtime = makeRunRuntime(
+      const runtime = makeStepRuntime(
         step,
         binding,
         event.instanceId,
@@ -417,10 +476,13 @@ export const toEntrypoint = (
       let failure: unknown;
       try {
         result = await def.run(
-          makeRun(runtime, {
-            runId: event.instanceId,
-            secrets,
-          }),
+          makeStep(
+            { ...runtime, ...withTools(runtime, def.tools) },
+            {
+              runId: event.instanceId,
+              secrets,
+            },
+          ),
           event.payload,
         );
       } catch (error) {

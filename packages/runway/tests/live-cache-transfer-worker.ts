@@ -5,7 +5,7 @@ import {
   CloudflareCacheTransfer,
   type CacheTransferCapability,
   type CacheTransferSession,
-} from "../src/cloudflare/cache.ts";
+} from "../src/internal/cache/cloudflare-transfer.ts";
 
 export { Sandbox };
 

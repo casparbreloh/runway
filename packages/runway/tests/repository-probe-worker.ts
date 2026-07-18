@@ -2,8 +2,8 @@ import { WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
 import { createDynamicWorkflow } from "../src/host-runtime.ts";
-import type { RepositorySource } from "../src/repository-source.ts";
-import type { PreparedSource, SourceIdentity } from "../src/source.ts";
+import type { RepositorySource } from "../src/internal/source/repository.ts";
+import type { PreparedSource, SourceIdentity } from "../src/internal/source/source.ts";
 import type { TerminalRecord } from "../src/terminal.ts";
 
 interface RepositoryProbeProps {

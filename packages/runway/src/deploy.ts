@@ -2,25 +2,25 @@ import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 
 import type { CloudflareApi } from "./cloudflare-api.ts";
-import { waitForDeploymentReadiness } from "./cloudflare/readiness.ts";
+import { resolveAuth } from "./deploy-auth.ts";
+import { buildDeployment } from "./deploy-build.ts";
+import { createGitHubProvider, type GitHubProvider } from "./github.ts";
+import { waitForDeploymentReadiness } from "./internal/deploy/readiness.ts";
+import {
+  assertRepositorySourceReachable,
+  resolveRepositorySource,
+  type RepositorySource,
+} from "./internal/source/repository.ts";
 import {
   artifactBucketName,
   CloudflareStackControl,
   cloudflareStackManifest,
   validateBindings,
-} from "./cloudflare/stack.ts";
-import { resolveAuth } from "./deploy-auth.ts";
-import { buildDeployment } from "./deploy-build.ts";
-import { createGitHubProvider, type GitHubProvider } from "./github.ts";
+} from "./internal/stack/cloudflare.ts";
+import { Stack, type StackControl, type StackManifest } from "./internal/stack/stack.ts";
 import { resolveScriptName } from "./naming.ts";
 import { cronsOf, secretNamesOf, type Registry } from "./registry.ts";
-import {
-  assertRepositorySourceReachable,
-  resolveRepositorySource,
-  type RepositorySource,
-} from "./repository-source.ts";
 import { listScriptSecrets } from "./secret-store.ts";
-import { Stack, type StackControl, type StackManifest } from "./stack.ts";
 import {
   GITHUB_APP_ID_BINDING,
   GITHUB_PRIVATE_KEY_BINDING,

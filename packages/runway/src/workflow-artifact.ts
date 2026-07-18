@@ -1,5 +1,5 @@
-import { parseRepositorySource } from "./repository-source.ts";
-import type { RepositorySource } from "./repository-source.ts";
+import { parseRepositorySource } from "./internal/source/repository.ts";
+import type { RepositorySource } from "./internal/source/repository.ts";
 
 export interface WorkflowArtifact {
   readonly scriptName: string;

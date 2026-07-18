@@ -11,7 +11,7 @@ import { expect, test } from "vitest";
 import {
   CloudflareCacheSnapshot,
   type CacheSnapshotProcess,
-} from "../src/cloudflare/cache-snapshot.ts";
+} from "../src/internal/cache/cloudflare-snapshot.ts";
 
 const execute = promisify(execFile);
 const archiveDigest = "95ff92053b19ae8bfea5ad1b1a8bb52b4d2e6793cba471f8588a864fdb53c0ed";

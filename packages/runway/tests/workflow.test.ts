@@ -3,8 +3,8 @@ import { cron, github, webhook, workflow } from "runway";
 import type { CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
-import { makeRun } from "../src/run.ts";
 import { secretNameOf } from "../src/secrets.ts";
+import { makeStep } from "../src/step.ts";
 
 const secretRef = <N extends string>(name: N): SecretRef<N> => {
   let ref: SecretRef<N> | undefined;
@@ -84,13 +84,20 @@ test("a cache miss permits the next authored operation", async () => {
       return { state: "miss", reason: "absent" };
     },
     sleep: async () => {},
-  } satisfies Parameters<typeof makeRun>[0];
-  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+  } satisfies Parameters<typeof makeStep>[0];
+  const run = makeStep(operations, { runId: "run-1", secrets: {} });
 
-  await expect(run.cache("build", { key: "v1", path: ".build" })).resolves.toEqual({
+  await expect(run.cache("build", { key: "v1", paths: [".build"] })).resolves.toEqual({
     state: "miss",
     reason: "absent",
   });
+  expect(() =>
+    run.cache("budgeted", {
+      key: "v1",
+      paths: [".one", ".two"],
+      budget: { maxBytes: 100 },
+    }),
+  ).toThrow("cache budgets require a single path");
   await run.exec("compile", "compile");
   expect(calls).toEqual(["build", "compile"]);
 });
@@ -329,8 +336,8 @@ test("run.exec delegates string and options commands with their durable ids", as
     },
     cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
-  } satisfies Parameters<typeof makeRun>[0];
-  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+  } satisfies Parameters<typeof makeStep>[0];
+  const run = makeStep(operations, { runId: "run-1", secrets: {} });
   const options = {
     command: "pnpm test",
     cwd: "packages/app",
@@ -352,8 +359,8 @@ test("workflow runs cannot use Runway's internal id namespace", () => {
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
     cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
-  } satisfies Parameters<typeof makeRun>[0];
-  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+  } satisfies Parameters<typeof makeStep>[0];
+  const run = makeStep(operations, { runId: "run-1", secrets: {} });
 
   expect(() => run.do("runway:secret-snapshot", () => undefined)).toThrow(
     'operation id "runway:secret-snapshot" is reserved by Runway',
@@ -361,7 +368,7 @@ test("workflow runs cannot use Runway's internal id namespace", () => {
   expect(() => run.exec("runway:command", "true")).toThrow(
     'operation id "runway:command" is reserved by Runway',
   );
-  expect(() => run.cache("runway:cache", { key: "v1", path: "/cache/tree" })).toThrow(
+  expect(() => run.cache("runway:cache", { key: "v1", paths: ["/cache/tree"] })).toThrow(
     'operation id "runway:cache" is reserved by Runway',
   );
   expect(() => run.sleep("runway:wait", 1)).toThrow(
@@ -379,8 +386,8 @@ test("operation ids contain between 1 and 128 UTF-8 bytes", async () => {
     exec: async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 0 }),
     cache: async () => ({ state: "miss", reason: "absent" }),
     sleep: async () => {},
-  } satisfies Parameters<typeof makeRun>[0];
-  const run = makeRun(operations, { runId: "run-1", secrets: {} });
+  } satisfies Parameters<typeof makeStep>[0];
+  const run = makeStep(operations, { runId: "run-1", secrets: {} });
   const multibyteBoundary = "é".repeat(64);
 
   await expect(run.do(multibyteBoundary, () => "ok")).resolves.toBe("ok");

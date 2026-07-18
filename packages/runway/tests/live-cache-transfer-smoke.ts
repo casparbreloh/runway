@@ -10,7 +10,7 @@ import { build as esbuild } from "esbuild";
 
 import type { CloudflareApi } from "../src/cloudflare-api.ts";
 import { collectResultItems, defaultClient, resultOf } from "../src/cloudflare-api.ts";
-import { SANDBOX_APPLICATION, SANDBOX_CLASS } from "../src/sandbox-config.ts";
+import { SANDBOX_APPLICATION, SANDBOX_CLASS } from "../src/internal/sandbox/config.ts";
 import { COMPATIBILITY_DATE } from "../src/worker-contract.ts";
 import { fetchWorkersDev } from "./live-smoke-helpers.ts";
 

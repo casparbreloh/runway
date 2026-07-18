@@ -448,6 +448,10 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
               name: "commands-test",
               className: "CommandWorkflow",
             },
+            TOOL_COMMANDS: {
+              name: "tool-commands-test",
+              className: "ToolCommandWorkflow",
+            },
             SECRET_SNAPSHOT: {
               name: "secret-snapshot-test",
               className: "SecretSnapshotWorkflow",

@@ -4,7 +4,7 @@ import {
   CloudflareCacheTransfer,
   type CacheTransferCapability,
   type CacheTransferSession,
-} from "../src/cloudflare/cache.ts";
+} from "../src/internal/cache/cloudflare-transfer.ts";
 
 const archiveDigest = "95ff92053b19ae8bfea5ad1b1a8bb52b4d2e6793cba471f8588a864fdb53c0ed";
 const archiveBytes = new TextEncoder().encode("cache-v1");

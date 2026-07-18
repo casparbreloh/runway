@@ -1,8 +1,8 @@
 import { expect, test, vi } from "vitest";
 
-import { cloudflareSandbox } from "../src/cloudflare/sandbox.ts";
-import { RunLostError, Sandbox } from "../src/sandbox.ts";
-import { source } from "../src/source.ts";
+import { cloudflareSandbox } from "../src/internal/sandbox/cloudflare.ts";
+import { RunLostError, Sandbox } from "../src/internal/sandbox/sandbox.ts";
+import { source } from "../src/internal/source/source.ts";
 import { authenticatedRepositoryFixture, repositoryFixture } from "./repository-fixture.ts";
 
 interface Process {

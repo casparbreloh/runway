@@ -6,10 +6,16 @@ measurement, and infrastructure ownership remain deep internal responsibilities.
 
 ## Language
 
-**Run**:
+**Step**:
 The author-facing durable capability for one workflow execution. It exposes only `runId`, declared
 secrets, and the flat `do`, `exec`, `cache`, and `sleep` primitives.
-_Avoid_: Context, step namespace, runner
+_Avoid_: Context, runner, public Sandbox
+
+**Tool Provider**:
+An ordered, declarative adapter that restores its private cache, prepares tools once before the first
+authored command, and contributes command environment. Providers do not execute authored steps and
+do not own cache transport.
+_Avoid_: Tool registry, setup step, plugin runner
 
 **Sandbox**:
 The run-bound owner of one exact Source, its mutable placement, processes, cache lifecycle, and
@@ -28,7 +34,7 @@ effect. Conflicting success, failure, cancellation, or supersession attempts can
 _Avoid_: Final status, completion callback
 
 **Cache**:
-One caller-named filesystem tree restored before command execution and eligible for publication only
+One caller-named set of filesystem trees restored before command execution and eligible for publication only
 after durable success. It is generic, trust-scoped, budgeted, integrity-checked, and never a Source,
 checkpoint, dependency graph, or tool preset.
 _Avoid_: Dependency cache, package cache, snapshot manager
@@ -46,8 +52,9 @@ _Avoid_: Deploy helpers, account inventory
 
 ## Foundation Invariants
 
-- Authors define `workflow({ id, secrets?, trigger }).run(...)` and use only
-  `run.do/exec/cache/sleep`; package managers, language runtimes, and tool presets are consumers.
+- Authors define `workflow({ id, secrets?, tools?, trigger }).run(...)` and use only
+  `step.do/exec/cache/sleep`. Tool providers are ordered consumers of the generic command and cache
+  foundation; Sandbox and checkout remain internal.
 - Source identity is exact and immutable. Placement loss after a command may have started is terminal
   unless the same placement, process, and command digest are proven.
 - Terminal is the one owner of the durable winner; only its winning success can authorize cache

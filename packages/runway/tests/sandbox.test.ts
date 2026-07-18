@@ -1,9 +1,14 @@
 import { expect, test } from "vitest";
 
+import {
+  RunLostError,
+  Sandbox,
+  type DurableCache,
+  type DurableStep,
+} from "../src/internal/sandbox/sandbox.ts";
+import { source } from "../src/internal/source/source.ts";
 import { Meter } from "../src/meter.ts";
-import { makeRun } from "../src/run.ts";
-import { RunLostError, Sandbox, type DurableCache, type DurableStep } from "../src/sandbox.ts";
-import { source } from "../src/source.ts";
+import { makeStep } from "../src/step.ts";
 import { Terminal } from "../src/terminal.ts";
 import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
 
@@ -318,7 +323,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
 
   await expect(
     sandbox.cache(recorded("one"), {
-      key: { files: ["inputs/a", "inputs/b"], salt: "v1" },
+      key: { files: ["inputs/a", "inputs/b"], prefix: "v1" },
       path: "./trees/one",
       budget: { maxDurationMs: 10, maxBytes: 20 },
     }),
@@ -327,7 +332,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
     sandbox.cache(recorded("one"), {
       path: "/workspace/trees/one",
       budget: { maxBytes: 20, maxDurationMs: 10 },
-      key: { salt: "v1", files: ["inputs/a", "inputs/b"] },
+      key: { prefix: "v1", files: ["inputs/a", "inputs/b"] },
     }),
   ).resolves.toMatchObject({ state: "miss" });
   await expect(
@@ -950,7 +955,7 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
       },
     },
   });
-  const run = makeRun(
+  const run = makeStep(
     {
       do: async (_id, work) => await work(),
       exec: async (id, command) =>
@@ -965,7 +970,8 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
                 ...command,
               },
         ),
-      cache: async (id, declaration) => await sandbox.cache(durableCache(id), declaration),
+      cache: async (id, declaration) =>
+        await sandbox.cache(durableCache(id), { ...declaration, path: declaration.paths[0] }),
       sleep: async () => {},
     },
     { runId: "run-1", secrets: {} },

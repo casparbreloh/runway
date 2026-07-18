@@ -1,4 +1,4 @@
-import type { ExecResult } from "./run.ts";
+import type { ExecResult } from "./step.ts";
 
 const trusted = new WeakSet<ExecError>();
 

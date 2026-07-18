@@ -21,24 +21,43 @@ export interface Budget {
 export type CacheKey =
   | string
   | {
+      readonly prefix?: string;
       readonly files: readonly [string, ...string[]];
-      readonly salt?: string;
     };
 
 export interface CacheDeclaration {
   readonly key: CacheKey;
-  readonly path: string;
+  readonly paths: readonly [string, ...string[]];
+  readonly restoreKeys?: readonly string[];
   readonly budget?: Partial<Budget>;
 }
 
+export interface CacheTreeDeclaration extends Omit<CacheDeclaration, "paths"> {
+  readonly path: string;
+}
+
 export type CacheResult =
-  | { readonly state: "hit"; readonly bytes: number }
+  | {
+      readonly state: "hit";
+      readonly bytes: number;
+      readonly key: string;
+      readonly match: "exact" | "restore";
+    }
   | {
       readonly state: "miss" | "skipped";
       readonly reason: "absent" | "budget" | "corrupt" | "unavailable" | "policy" | "target";
     };
 
-export interface Run<Secrets extends string = string> {
+export const validateCacheDeclaration = (declaration: CacheDeclaration): void => {
+  if (!Array.isArray(declaration.paths) || declaration.paths.length === 0) {
+    throw new Error("cache paths must not be empty");
+  }
+  if (declaration.paths.length > 1 && declaration.budget) {
+    throw new Error("cache budgets require a single path");
+  }
+};
+
+export interface Step<Secrets extends string = string> {
   readonly runId: string;
   readonly secrets: { readonly [Name in Secrets]: string };
 
@@ -59,18 +78,19 @@ const authorId = (id: string): string => {
   return id;
 };
 
-export const makeRun = <Secrets extends string>(
-  operations: Pick<Run, "do" | "exec" | "cache" | "sleep">,
+export const makeStep = <Secrets extends string>(
+  operations: Pick<Step, "do" | "exec" | "cache" | "sleep">,
   meta: {
     runId: string;
     secrets: { readonly [Name in Secrets]: string };
   },
-): Run<Secrets> => ({
+): Step<Secrets> => ({
   runId: meta.runId,
   secrets: meta.secrets,
   do: (id, work) => operations.do(authorId(id), () => Promise.resolve(work())),
   exec: (id, command) => operations.exec(authorId(id), command),
   cache: (id, declaration) => {
+    validateCacheDeclaration(declaration);
     return operations.cache(authorId(id), declaration);
   },
   sleep: (id, durationMs) => operations.sleep(authorId(id), durationMs),

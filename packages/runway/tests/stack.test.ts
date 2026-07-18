@@ -7,7 +7,7 @@ import {
   type StackManifest,
   type StackReceipt,
   type StackResource,
-} from "../src/stack.ts";
+} from "../src/internal/stack/stack.ts";
 
 class MemoryControl implements StackControl {
   readonly #inventories = new Map<string, unknown>();

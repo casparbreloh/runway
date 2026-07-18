@@ -1,4 +1,4 @@
-import type { RepositorySource } from "../src/repository-source.ts";
+import type { RepositorySource } from "../src/internal/source/repository.ts";
 
 export const repositoryFixture: RepositorySource = {
   remote: "https://github.com/casparbreloh/runway.git",

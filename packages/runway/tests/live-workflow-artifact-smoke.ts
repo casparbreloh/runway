@@ -8,11 +8,11 @@ import { promisify } from "node:util";
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
 
-import { artifactBucketName } from "../src/cloudflare/stack.ts";
 import { buildDeployment } from "../src/deploy-build.ts";
 import { deploy } from "../src/deploy.ts";
+import { resolveRepositorySource } from "../src/internal/source/repository.ts";
+import { artifactBucketName } from "../src/internal/stack/cloudflare.ts";
 import type { Registry } from "../src/registry.ts";
-import { resolveRepositorySource } from "../src/repository-source.ts";
 import { setScriptSecret } from "../src/secret-store.ts";
 import { workflowArtifactKey } from "../src/workflow-artifact.ts";
 import { fetchWorkersDev, nonGitHubDeployEnv } from "./live-smoke-helpers.ts";

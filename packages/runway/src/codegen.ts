@@ -1,8 +1,8 @@
 import path from "node:path";
 
 import type { GitHubRepository } from "./github.ts";
+import { SANDBOX_IMAGE_DIGEST } from "./internal/sandbox/config.ts";
 import type { RegisteredWorkflow, Registry } from "./registry.ts";
-import { SANDBOX_IMAGE_DIGEST } from "./sandbox-config.ts";
 import { validateRegistry } from "./validate.ts";
 import { DYNAMIC_WORKFLOW_CLASS, RUNWAY_WORKFLOW_CLASS } from "./worker-contract.ts";
 

@@ -28,6 +28,43 @@ test("generated workers expose only the workflow runtime API", () => {
   expect(Object.keys(runtime).sort()).toEqual(["createWorkflowWorker", "toEntrypoint"]);
 });
 
+test("workflow tools restore caches, prepare once, and shape authored commands", async () => {
+  const introspector = await introspectWorkflow(env.TOOL_COMMANDS);
+  try {
+    await env.TOOL_COMMANDS.create({ params: {} });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using cacheStateResult = disposable(
+      exports
+        .TestHost({
+          props: {
+            secrets: {
+              API_KEY: "test-api-key",
+              HOOK_SECRET: "test-secret",
+              SANDBOX_SECRET: "sandbox-secret",
+            },
+          },
+        })
+        .cacheState(),
+    );
+    const cacheState = (await cacheStateResult) as { requests: unknown[] };
+    expect(cacheState.requests).toEqual([
+      expect.objectContaining({
+        id: "runway:tools:native:cache",
+        declaration: expect.objectContaining({ path: "/cache/native" }),
+      }),
+    ]);
+    using stateResult = disposable(testSandbox.state());
+    const commands = (await stateResult).executions.map((execution) => execution.options.command);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toContain("setup-native");
+    expect(commands[1]).toContain("native --version");
+    expect(commands[1]).toContain("NATIVE_HOME");
+  } finally {
+    await introspector.dispose();
+  }
+});
+
 test("exec supports shorthand, options, defaults, and declared-secret redaction input", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
@@ -152,11 +189,11 @@ test("a cache hit inspects the exact run source and completes before the first e
           {
             id: "tree",
             declaration: {
-              key: { files: ["missing.input", "present.input"], salt: "v1" },
-              path: "/cache/tree",
+              key: { files: ["missing.input", "present.input"], prefix: "v1" },
+              paths: ["/cache/tree"],
             },
           },
-          { id: "archive", declaration: { key: "hit", path: "/cache/archive" } },
+          { id: "archive", declaration: { key: "hit", paths: ["/cache/archive"] } },
         ],
         commands: ["true"],
       },
@@ -171,7 +208,10 @@ test("a cache hit inspects the exact run source and completes before the first e
     expect(state.requests).toHaveLength(2);
     expect(state.requests[0]).toMatchObject({
       id: "tree",
-      declaration: { key: { files: ["missing.input", "present.input"], salt: "v1" } },
+      declaration: {
+        key: { files: ["missing.input", "present.input"], prefix: "v1" },
+        path: "/cache/tree",
+      },
       source: { result: { revision: repositoryFixture.commit } },
     });
     expect(state.fileInspections).toEqual([
@@ -184,6 +224,86 @@ test("a cache hit inspects the exact run source and completes before the first e
     expect(lifecycle.indexOf("exec:true")).toBeGreaterThan(
       lifecycle.indexOf(`cache:hit:${repositoryFixture.commit}`),
     );
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("a multi-path cache uses reserved tree identities", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  const host = exports.TestHost({
+    props: {
+      secrets: {
+        API_KEY: "test-api-key",
+        HOOK_SECRET: "test-secret",
+        SANDBOX_SECRET: "sandbox-secret",
+      },
+    },
+  });
+  try {
+    await env.COMMANDS.create({
+      params: {
+        caches: [
+          {
+            id: "dependencies",
+            declaration: {
+              key: "dependencies-v1",
+              paths: [".one", "/cache/two"],
+            },
+          },
+        ],
+        commands: ["true"],
+      },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using cacheStateResult = disposable(host.cacheState());
+    const state = (await cacheStateResult) as { requests: Array<Record<string, unknown>> };
+    expect(state.requests).toHaveLength(2);
+    expect(state.requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: expect.stringMatching(/^runway:cache-tree:[0-9a-f]{64}$/),
+          declaration: expect.objectContaining({ key: "dependencies-v1" }),
+        }),
+      ]),
+    );
+    expect(new Set(state.requests.map((request) => request.id)).size).toBe(2);
+  } finally {
+    await introspector.dispose();
+  }
+});
+
+test("a partial multi-path restore is discarded before authored commands", async () => {
+  const introspector = await introspectWorkflow(env.COMMANDS);
+  const host = exports.TestHost({
+    props: {
+      secrets: {
+        API_KEY: "test-api-key",
+        HOOK_SECRET: "test-secret",
+        SANDBOX_SECRET: "sandbox-secret",
+      },
+    },
+  });
+  try {
+    await env.COMMANDS.create({
+      params: {
+        caches: [
+          {
+            id: "partial",
+            declaration: {
+              key: "partial-hit",
+              paths: [".one", "/cache/two"],
+            },
+          },
+        ],
+        commands: ["true"],
+      },
+    });
+    const [instance] = introspector.get();
+    await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
+    using lifecycleResult = disposable(host.lifecycleEvents());
+    expect(await lifecycleResult).toContain("cache:discard:/workspace/.one");
   } finally {
     await introspector.dispose();
   }

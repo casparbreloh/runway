@@ -1,14 +1,16 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { cron, ExecError, github, webhook, workflow } from "runway";
+import { cron, defineToolProvider, ExecError, github, webhook, workflow } from "runway";
 import type { CacheDeclaration, ExecOptions, ExecResult } from "runway";
 import { toEntrypoint } from "runway/runtime";
 
-import { Cache, normalizedCacheTarget } from "../src/cache.ts";
 import type { FailureDiagnostic } from "../src/diagnostic.ts";
+import { Cache } from "../src/internal/cache/cache.ts";
+import { normalizedCacheTarget } from "../src/internal/cache/path.ts";
+import type { PreparedSource, SourceIdentity } from "../src/internal/source/source.ts";
 import { createRouter } from "../src/router.ts";
 import type { RuntimeBinding } from "../src/runtime-binding.ts";
-import type { PreparedSource, SourceIdentity } from "../src/source.ts";
+import type { CacheTreeDeclaration } from "../src/step.ts";
 import type { Finalization, TerminalIdentity, TerminalRecord } from "../src/terminal.ts";
 import { repositoryFixture } from "./repository-fixture.ts";
 
@@ -386,6 +388,15 @@ class RuntimeCacheRefs {
     return object ? { etag: object.etag, text: async () => object.text } : null;
   }
 
+  async list(prefix: string) {
+    return {
+      candidates: [...this.objects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .map((key, uploadedAtMs) => ({ key, uploadedAtMs })),
+      truncated: false,
+    };
+  }
+
   async put(
     key: string,
     text: string,
@@ -649,7 +660,7 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
   async restoreCache(request: {
     runId: string;
     id: string;
-    declaration: CacheDeclaration;
+    declaration: CacheTreeDeclaration;
     secrets: Readonly<Record<string, string>>;
     source: PreparedSource;
   }) {
@@ -699,7 +710,10 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
         },
       });
     cacheSessions.set(request.runId, cache);
-    if (request.declaration.key === "hit") {
+    if (
+      request.declaration.key === "hit" ||
+      (request.declaration.key === "partial-hit" && request.declaration.path === "/workspace/.one")
+    ) {
       const lookup = await cache.lookup(request.id, request.declaration);
       if (lookup.revision) {
         const archiveDigest = "9".repeat(64);
@@ -758,6 +772,10 @@ export class TestHost extends WorkerEntrypoint<Cloudflare.Env, TestHostProps> {
 
   async quiesce(): Promise<void> {
     runtimeLifecycleEvents.push("cache:quiesce");
+  }
+
+  async discardCaches(request: Parameters<RuntimeBinding["discardCaches"]>[0]): Promise<void> {
+    runtimeLifecycleEvents.push(`cache:discard:${request.paths.join(",")}`);
   }
 
   async prepareCaches(request: Parameters<RuntimeBinding["prepareCaches"]>[0]) {
@@ -976,6 +994,24 @@ const commands = workflow({
 });
 
 export class CommandWorkflow extends toEntrypoint(commands) {}
+
+const toolCommands = workflow({
+  id: "tool-commands",
+  tools: [
+    defineToolProvider({
+      id: "native",
+      cache: { key: "native-v1", paths: ["/cache/native"] },
+      setup: "setup-native",
+      paths: ["/cache/native/bin"],
+      env: { NATIVE_HOME: "/cache/native" },
+    }),
+  ],
+  trigger: () => cron("0 0 * * *"),
+}).run(async (step) => {
+  await step.exec("authored", "native --version");
+});
+
+export class ToolCommandWorkflow extends toEntrypoint(toolCommands) {}
 
 const secretSnapshot = workflow({
   id: "secret-snapshot",

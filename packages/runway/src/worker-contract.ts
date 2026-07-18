@@ -27,4 +27,4 @@ export const isSecretSnapshotKeyBinding = (name: string): boolean =>
   name === SECRET_SNAPSHOT_KEY_BINDING || name.startsWith(SECRET_SNAPSHOT_KEY_PREFIX);
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
 export const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
-export { GITHUB_COORDINATOR_BINDING, GITHUB_COORDINATOR_CLASS } from "./sandbox-config.ts";
+export { GITHUB_COORDINATOR_BINDING, GITHUB_COORDINATOR_CLASS } from "./internal/sandbox/config.ts";

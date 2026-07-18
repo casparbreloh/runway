@@ -1,7 +1,8 @@
 const encoder = new TextEncoder();
 
-import type { Meter } from "./meter.ts";
-import type { CacheDeclaration, CacheKey } from "./run.ts";
+import type { Meter } from "../../meter.ts";
+import type { CacheKey, CacheTreeDeclaration } from "../../step.ts";
+import { normalizedCacheTarget } from "./path.ts";
 
 interface CacheContext {
   readonly repositoryId: string;
@@ -36,6 +37,10 @@ interface CacheFiles {
 
 interface CacheRefs {
   get(key: string): Promise<{ readonly etag: string; readonly text: () => Promise<string> } | null>;
+  list(prefix: string): Promise<{
+    readonly candidates: readonly { readonly key: string; readonly uploadedAtMs: number }[];
+    readonly truncated: boolean;
+  }>;
   put(
     key: string,
     text: string,
@@ -72,7 +77,7 @@ interface CacheRestore {
       readonly uniqueInodes: number;
     };
     readonly path: string;
-    readonly budget: CacheDeclaration["budget"];
+    readonly budget: CacheTreeDeclaration["budget"];
   }): Promise<
     | {
         readonly state: "ready";
@@ -119,7 +124,7 @@ interface CacheSnapshots {
   capture(request: {
     readonly target: string;
     readonly path: string;
-    readonly budget: CacheDeclaration["budget"];
+    readonly budget: CacheTreeDeclaration["budget"];
   }): Promise<
     | SnapshotCapture
     | {
@@ -185,7 +190,7 @@ const invalid = (): never => {
 };
 
 const validateId = (id: string): void => {
-  if (!validText(id, 1, 128) || id.startsWith("runway:")) invalid();
+  if (!validText(id, 1, 128)) invalid();
 };
 
 const validateFilePaths = (paths: readonly string[]): void => {
@@ -211,41 +216,21 @@ const validateKeyDefinition = (key: CacheKey): void => {
     return;
   }
   validateFilePaths(key.files);
-  if (key.salt !== undefined && !validText(key.salt, 0, 512)) invalid();
-};
-
-export const normalizedCacheTarget = (target: string): string => {
-  if (!validText(target, 1, 512) || target.includes("\\")) invalid();
-  const relative = !target.startsWith("/");
-  const parts = (relative ? `/workspace/${target}` : target).split("/");
-  const normalized: string[] = [];
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") invalid();
-    normalized.push(part);
-  }
-  const result = `/${normalized.join("/")}`;
-  if (
-    !(
-      (result.startsWith("/workspace/") && result !== "/workspace") ||
-      (result.startsWith("/cache/") && result !== "/cache")
-    ) ||
-    normalized.some((part) => part === ".git" || part === ".runway")
-  ) {
-    invalid();
-  }
-  return result;
+  if (key.prefix !== undefined && !validText(key.prefix, 0, 512)) invalid();
 };
 
 const keyDefinition = (key: CacheKey): Array<string> =>
   typeof key === "string"
     ? ["string", key]
-    : ["files", key.salt ?? "", String(key.files.length), ...key.files];
+    : ["files", key.prefix ?? "", String(key.files.length), ...key.files];
 
 export const cacheDeclarationEvidence = async (
-  declaration: CacheDeclaration,
+  declaration: CacheTreeDeclaration,
 ): Promise<{ readonly digest: string; readonly target: string }> => {
   validateKeyDefinition(declaration.key);
+  for (const restoreKey of declaration.restoreKeys ?? []) {
+    if (!validText(restoreKey, 1, 512)) invalid();
+  }
   const target = normalizedCacheTarget(declaration.path);
   const budget = declaration.budget;
   if (budget) {
@@ -264,6 +249,8 @@ export const cacheDeclarationEvidence = async (
       "cache-declaration",
       target,
       ...keyDefinition(declaration.key),
+      String(declaration.restoreKeys?.length ?? 0),
+      ...(declaration.restoreKeys ?? []),
       budget?.maxBytes === undefined ? "maxBytes:unset" : `maxBytes:${budget.maxBytes}`,
       budget?.maxDurationMs === undefined
         ? "maxDurationMs:unset"
@@ -284,6 +271,7 @@ interface CacheRef {
   readonly cacheIdDigest: string;
   readonly declarationDigest: string;
   readonly generation: number;
+  readonly key: string;
   readonly keyDigest: string;
   readonly manifest: string;
   readonly objectDigest: string;
@@ -304,7 +292,7 @@ interface CacheRevision extends Omit<
 export interface PendingCache {
   readonly schema: 1;
   readonly id: string;
-  readonly declaration: CacheDeclaration;
+  readonly declaration: CacheTreeDeclaration;
   readonly target: string;
   readonly revision: CacheRevision;
 }
@@ -334,6 +322,7 @@ const canonicalRef = (ref: CacheRef): string =>
     cacheIdDigest: ref.cacheIdDigest,
     declarationDigest: ref.declarationDigest,
     generation: ref.generation,
+    key: ref.key,
     keyDigest: ref.keyDigest,
     manifest: ref.manifest,
     objectDigest: ref.objectDigest,
@@ -370,7 +359,7 @@ const parseRef = (text: string): CacheRef => {
   const record = value as Record<string, unknown>;
   if (
     Object.keys(record).sort().join(",") !==
-      "archiveBytes,archiveDigest,cacheIdDigest,declarationDigest,generation,keyDigest,manifest,objectDigest,platformDigest,repositoryDigest,schema,scopeDigest" ||
+      "archiveBytes,archiveDigest,cacheIdDigest,declarationDigest,generation,key,keyDigest,manifest,objectDigest,platformDigest,repositoryDigest,schema,scopeDigest" ||
     !Number.isSafeInteger(record.archiveBytes) ||
     (record.archiveBytes as number) < 0 ||
     typeof record.archiveDigest !== "string" ||
@@ -378,6 +367,8 @@ const parseRef = (text: string): CacheRef => {
     typeof record.declarationDigest !== "string" ||
     !Number.isSafeInteger(record.generation) ||
     (record.generation as number) < 1 ||
+    typeof record.key !== "string" ||
+    !validText(record.key, 1, 1024) ||
     typeof record.keyDigest !== "string" ||
     typeof record.manifest !== "string" ||
     byteLength(record.manifest) > 16 * 1024 ||
@@ -446,25 +437,41 @@ const scopes = (
   throw new CacheError("invalid cache trust context");
 };
 
-const keyDigest = async (key: CacheKey, files: CacheFiles): Promise<string> => {
+const cacheKey = async (key: CacheKey, files: CacheFiles): Promise<string> => {
   validateKeyDefinition(key);
-  if (typeof key === "string") return digest(["string", key]);
-  const fields: Array<string | Uint8Array> = ["files", key.salt ?? "", String(key.files.length)];
+  if (typeof key === "string") return key;
+  const fields: Array<string | Uint8Array> = ["files", String(key.files.length)];
   for (const path of key.files) {
     const entry = await files.inspect(path);
     if (entry.type !== "file" && entry.type !== "missing") invalid();
     fields.push(path, entry.type);
     if (entry.type === "file") fields.push(entry.bytes);
   }
-  return digest(fields);
+  return `${key.prefix ?? ""}${await digest(fields)}`;
 };
+
+const keyDigest = async (key: string): Promise<string> => await digest(["string", key]);
+
+const encodedKey = (key: string): string =>
+  [...encoder.encode(key)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const refPath = (
+  repository: string,
+  scope: string,
+  cacheId: string,
+  platform: string,
+  key: string,
+): string => `refs/${repository}/${scope}/${cacheId}/${platform}/${encodedKey(key)}.json`;
 
 const sameArchive = (left: SnapshotArchive, right: SnapshotArchive): boolean =>
   left.path === right.path && left.bytes === right.bytes && left.digest === right.digest;
 
 const safeInteger = (value: number): boolean => Number.isSafeInteger(value) && value >= 0;
 
-const validateCapture = (capture: SnapshotCapture, budget: CacheDeclaration["budget"]): void => {
+const validateCapture = (
+  capture: SnapshotCapture,
+  budget: CacheTreeDeclaration["budget"],
+): void => {
   if (
     !safeInteger(capture.archive.bytes) ||
     !SHA256.test(capture.archive.digest) ||
@@ -602,6 +609,7 @@ export class Cache {
     {
       readonly cacheIdDigest?: string;
       readonly declarationDigest: string;
+      readonly key?: string;
       readonly keyDigest?: string;
       readonly target: string;
     }
@@ -625,7 +633,7 @@ export class Cache {
     this.#meter = options.meter;
   }
 
-  async record(id: string, declaration: CacheDeclaration) {
+  async record(id: string, declaration: CacheTreeDeclaration) {
     const result = await this.restore(id, declaration);
     const pending = this.#pending.get(id);
     return pending ? { result, pending } : { result };
@@ -643,7 +651,14 @@ export class Cache {
       throw new CacheError("invalid pending cache");
     }
     const declarationKeys = Object.keys(pending.declaration).sort().join(",");
-    if (!(["key,path", "budget,key,path"] as const).includes(declarationKeys as never)) {
+    if (
+      ![
+        "key,path",
+        "budget,key,path",
+        "key,path,restoreKeys",
+        "budget,key,path,restoreKeys",
+      ].includes(declarationKeys)
+    ) {
       throw new CacheError("invalid pending cache");
     }
     const budget = pending.declaration.budget;
@@ -668,7 +683,8 @@ export class Cache {
       !pending.revision ||
       typeof pending.revision !== "object" ||
       Object.keys(pending.revision).sort().join(",") !==
-        "cacheIdDigest,declarationDigest,etag,generation,keyDigest,platformDigest,ref,repositoryDigest,schema,scopeDigest" ||
+        "cacheIdDigest,declarationDigest,etag,generation,key,keyDigest,platformDigest,ref,repositoryDigest,schema,scopeDigest" ||
+      !validText(pending.revision.key, 1, 1024) ||
       !SHA256.test(pending.revision.keyDigest)
     ) {
       throw new CacheError("invalid pending cache");
@@ -688,13 +704,7 @@ export class Cache {
           this.#context.platform.imageDigest ?? "",
           this.#context.platform.runnerAbi,
         ]),
-        digest([
-          "declaration",
-          pending.id,
-          pending.target,
-          ...keyDefinition(pending.declaration.key),
-          String(this.#context.platform.schema),
-        ]),
+        digest(["declaration", pending.id, pending.target, String(this.#context.platform.schema)]),
       ]);
     const expected = {
       cacheIdDigest,
@@ -704,7 +714,13 @@ export class Cache {
       repositoryDigest,
       schema: this.#context.platform.schema,
       scopeDigest,
-      ref: `refs/${repositoryDigest}/${scopeDigest}/${cacheIdDigest}/${pending.revision.keyDigest}/${platformDigest}.json`,
+      ref: refPath(
+        repositoryDigest,
+        scopeDigest,
+        cacheIdDigest,
+        platformDigest,
+        pending.revision.key,
+      ),
     };
     if (
       Object.entries(expected).some(
@@ -716,6 +732,7 @@ export class Cache {
     this.#declarations.set(pending.id, {
       cacheIdDigest,
       declarationDigest,
+      key: pending.revision.key,
       keyDigest: pending.revision.keyDigest,
       target: pending.target,
     });
@@ -878,7 +895,7 @@ export class Cache {
     }
   }
 
-  async restore(id: string, declaration: CacheDeclaration) {
+  async restore(id: string, declaration: CacheTreeDeclaration) {
     validateId(id);
     await cacheDeclarationEvidence(declaration);
     let lookup: Awaited<ReturnType<Cache["lookup"]>>;
@@ -1007,10 +1024,15 @@ export class Cache {
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "unavailable" as const };
     }
-    return { state: "hit" as const, bytes: staged.byteCount };
+    return {
+      state: "hit" as const,
+      bytes: staged.byteCount,
+      key: lookup.key,
+      match: lookup.match,
+    };
   }
 
-  #admitCost(declaration: CacheDeclaration, phase: "save" | "restore"): void {
+  #admitCost(declaration: CacheTreeDeclaration, phase: "save" | "restore"): void {
     const limit = declaration.budget?.maxEstimatedCostUsd;
     if (limit === undefined) return;
     if (!this.#meter) throw new CacheError("cache snapshot exceeds budget");
@@ -1035,7 +1057,7 @@ export class Cache {
     return started === undefined ? 0 : Math.max(0, Math.round(this.#meter!.now() - started));
   }
 
-  async lookup(id: string, declaration: CacheDeclaration) {
+  async lookup(id: string, declaration: CacheTreeDeclaration) {
     validateId(id);
     validateKeyDefinition(declaration.key);
     const scopePlan = scopes(this.#context);
@@ -1050,7 +1072,6 @@ export class Cache {
       "declaration",
       id,
       target,
-      ...keyDefinition(declaration.key),
       String(this.#context.platform.schema),
     ]);
     const previous = this.#declarations.get(id);
@@ -1060,13 +1081,22 @@ export class Cache {
     const reservation = previous ?? { declarationDigest, target };
     if (!previous) this.#declarations.set(id, reservation);
     let key: string;
+    let primaryKeyDigest: string;
     try {
-      key = await keyDigest(declaration.key, this.#files);
+      key = await cacheKey(declaration.key, this.#files);
+      primaryKeyDigest = await keyDigest(key);
     } catch (error) {
       if (this.#declarations.get(id) === reservation && !reservation.keyDigest) {
         this.#declarations.delete(id);
       }
       throw error;
+    }
+    const declared = this.#declarations.get(id);
+    if (
+      (previous?.key !== undefined && previous.key !== key) ||
+      (declared?.key !== undefined && declared.key !== key)
+    ) {
+      throw new CacheError(`cache declaration collision for ${id}`);
     }
     const [repository, cacheId, platform] = await Promise.all([
       digest(["repository", this.#context.repositoryId]),
@@ -1083,18 +1113,21 @@ export class Cache {
     this.#declarations.set(id, {
       cacheIdDigest: cacheId,
       declarationDigest,
-      keyDigest: key,
+      key,
+      keyDigest: primaryKeyDigest,
       target,
     });
     const refs = await Promise.all(
       scopePlan.reads.map(async (scope) => {
         const scopeDigest = await digest(["scope", this.#context.repositoryId, scope]);
+        const ref = refPath(repository, scopeDigest, cacheId, platform, key);
         return {
-          ref: `refs/${repository}/${scopeDigest}/${cacheId}/${key}/${platform}.json`,
+          ref,
           identity: {
             cacheIdDigest: cacheId,
             declarationDigest,
-            keyDigest: key,
+            key,
+            keyDigest: primaryKeyDigest,
             platformDigest: platform,
             repositoryDigest: repository,
             schema: this.#context.platform.schema,
@@ -1119,6 +1152,8 @@ export class Cache {
       );
       return {
         state: "hit" as const,
+        key: stored.key,
+        match: "exact" as const,
         object: {
           digest: stored.objectDigest,
           archiveBytes: stored.archiveBytes,
@@ -1134,6 +1169,93 @@ export class Cache {
         },
         source: { ref: candidate.ref, etag: observed.etag },
       };
+    }
+    for (const candidate of refs) {
+      for (const restoreKey of declaration.restoreKeys ?? []) {
+        const base = candidate.ref.slice(0, candidate.ref.lastIndexOf("/") + 1);
+        const listed = await this.#listRefs(`${base}${encodedKey(restoreKey)}`);
+        if (listed.truncated) continue;
+        let winner:
+          | {
+              readonly ref: string;
+              readonly uploadedAtMs: number;
+              readonly observed: NonNullable<Awaited<ReturnType<CacheRefs["get"]>>>;
+              readonly stored: CacheRef;
+            }
+          | undefined;
+        for (const listedCandidate of listed.candidates) {
+          const observed = await this.#getRef(listedCandidate.key);
+          if (!observed) continue;
+          const stored = parseRef(await observed.text());
+          if (!stored.key.startsWith(restoreKey)) continue;
+          if (
+            listedCandidate.key !==
+            refPath(
+              repository,
+              stored.scopeDigest,
+              stored.cacheIdDigest,
+              stored.platformDigest,
+              stored.key,
+            )
+          ) {
+            throw new CacheError("cache ref identity mismatch");
+          }
+          if ((await keyDigest(stored.key)) !== stored.keyDigest) {
+            throw new CacheError("cache ref identity mismatch");
+          }
+          const identity = {
+            ...candidate.identity,
+            key: stored.key,
+            keyDigest: stored.keyDigest,
+          };
+          assertRefIdentity(stored, identity);
+          if (
+            !winner ||
+            listedCandidate.uploadedAtMs > winner.uploadedAtMs ||
+            (listedCandidate.uploadedAtMs === winner.uploadedAtMs &&
+              listedCandidate.key > winner.ref)
+          ) {
+            winner = {
+              ref: listedCandidate.key,
+              uploadedAtMs: listedCandidate.uploadedAtMs,
+              observed,
+              stored,
+            };
+          }
+        }
+        if (!winner) continue;
+        const identity = {
+          ...candidate.identity,
+          key: winner.stored.key,
+          keyDigest: winner.stored.keyDigest,
+        };
+        const manifest = await validateStoredObject(
+          winner.stored,
+          identity,
+          id,
+          target,
+          this.#context,
+        );
+        return {
+          state: "hit" as const,
+          key: winner.stored.key,
+          match: "restore" as const,
+          object: {
+            digest: winner.stored.objectDigest,
+            archiveBytes: winner.stored.archiveBytes,
+            archiveDigest: winner.stored.archiveDigest,
+            ...manifest,
+            manifest: winner.stored.manifest,
+          },
+          revision: {
+            ...refs[0]!.identity,
+            ref: refs[0]!.ref,
+            etag: writeEtag,
+            generation: this.#context.generation,
+          },
+          source: { ref: winner.ref, etag: winner.observed.etag },
+        };
+      }
     }
     return {
       state: "miss" as const,
@@ -1193,13 +1315,20 @@ export class Cache {
     const expected = {
       cacheIdDigest: revision.cacheIdDigest,
       declarationDigest: revision.declarationDigest,
+      key: revision.key,
       keyDigest: revision.keyDigest,
       platformDigest,
       repositoryDigest,
       schema: this.#context.platform.schema,
       scopeDigest,
     };
-    const expectedRef = `refs/${repositoryDigest}/${scopeDigest}/${revision.cacheIdDigest}/${revision.keyDigest}/${platformDigest}.json`;
+    const expectedRef = refPath(
+      repositoryDigest,
+      scopeDigest,
+      revision.cacheIdDigest,
+      platformDigest,
+      revision.key,
+    );
     if (
       revision.ref !== expectedRef ||
       revision.generation !== this.#context.generation ||
@@ -1244,6 +1373,14 @@ export class Cache {
   async #getRef(key: string): ReturnType<CacheRefs["get"]> {
     try {
       return await this.#refs.get(key);
+    } finally {
+      this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
+    }
+  }
+
+  async #listRefs(prefix: string): ReturnType<CacheRefs["list"]> {
+    try {
+      return await this.#refs.list(prefix);
     } finally {
       this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
     }

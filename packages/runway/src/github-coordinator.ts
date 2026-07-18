@@ -12,7 +12,7 @@ import {
   type GitHubProvider,
   type GitHubRepository,
 } from "./github.ts";
-import { parseGitHubRunSource, type GitHubRunSource } from "./repository-source.ts";
+import { parseGitHubRunSource, type GitHubRunSource } from "./internal/source/repository.ts";
 import { parseFinalization, parseTerminalRecord } from "./terminal.ts";
 import type { Finalization, TerminalRecord } from "./terminal.ts";
 

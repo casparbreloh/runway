@@ -1,9 +1,8 @@
-import { github, workflow } from "runway";
-
-import { prepareRepository, repositoryCommand } from "../repository.ts";
+import { github, mise, workflow } from "runway";
 
 export default workflow({
   id: "check",
+  tools: mise({ node: "26.5.0", pnpm: "11.5.0" }),
   trigger: () =>
     github({
       checkName: "Check",
@@ -12,10 +11,13 @@ export default workflow({
         { type: "pull_request", actions: ["opened", "reopened", "synchronize"] },
       ],
     }),
-}).run(async (run) => {
-  await prepareRepository(run);
-  await run.exec("format-check", repositoryCommand("pnpm format-check"));
-  await run.exec("lint", repositoryCommand("pnpm lint"));
-  await run.exec("typecheck", repositoryCommand("pnpm typecheck"));
-  await run.exec("fallow", repositoryCommand("pnpm fallow"));
+}).run(async (step) => {
+  await step.exec("install", {
+    command: "pnpm install --frozen-lockfile --reporter=append-only",
+    env: { NODE_OPTIONS: "--max-old-space-size=128" },
+  });
+  await step.exec("format-check", "pnpm format-check");
+  await step.exec("lint", "pnpm lint");
+  await step.exec("typecheck", "pnpm typecheck");
+  await step.exec("fallow", "pnpm fallow");
 });

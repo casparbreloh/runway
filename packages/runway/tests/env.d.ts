@@ -7,6 +7,7 @@ declare namespace Cloudflare {
     DAILY: Workflow;
     ISSUE_CREATED: Workflow;
     COMMANDS: Workflow;
+    TOOL_COMMANDS: Workflow;
     SECRET_SNAPSHOT: Workflow;
     GENERATED_ISSUE_HOST: {
       terminal(runId: string): Promise<import("../src/terminal.ts").TerminalIdentity>;

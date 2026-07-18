@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { expect, test } from "vitest";
 
-import { Cache } from "../src/cache.ts";
+import { Cache } from "../src/internal/cache/cache.ts";
 import { Meter } from "../src/meter.ts";
 
 const cacheMeter = (classAUsd = 0): Meter =>
@@ -56,6 +56,15 @@ class MemoryRefs {
     return object ? { etag: object.etag, text: async () => object.text } : null;
   }
 
+  async list(prefix: string) {
+    return {
+      candidates: [...this.objects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .map((key, uploadedAtMs) => ({ key, uploadedAtMs })),
+      truncated: false,
+    };
+  }
+
   async put(
     key: string,
     text: string,
@@ -98,6 +107,7 @@ interface ObservedRevision {
   readonly cacheIdDigest: string;
   readonly declarationDigest: string;
   readonly generation: number;
+  readonly key: string;
   readonly keyDigest: string;
   readonly platformDigest: string;
   readonly repositoryDigest: string;
@@ -186,6 +196,7 @@ const refRecord = (
   cacheIdDigest: revision.cacheIdDigest,
   declarationDigest: revision.declarationDigest,
   generation: revision.generation,
+  key: revision.key,
   keyDigest: revision.keyDigest,
   manifest: objectFixture(revision, variant, name, target).manifest,
   objectDigest: objectFixture(revision, variant, name, target).digest,
@@ -250,11 +261,11 @@ test("string and exact-source file keys have stable canonical identities, includ
   const stringOne = await create().lookup("tools", { key: "v1", path: "/cache/tools" });
   const stringTwo = await create().lookup("tools", { key: "v1", path: "/cache/tools" });
   const filesOne = await create().lookup("dependencies", {
-    key: { files: ["missing.lock", "pnpm-lock.yaml"], salt: "linux" },
+    key: { files: ["missing.lock", "pnpm-lock.yaml"], prefix: "linux" },
     path: "/cache/dependencies",
   });
   const filesTwo = await create().lookup("dependencies", {
-    key: { files: ["missing.lock", "pnpm-lock.yaml"], salt: "linux" },
+    key: { files: ["missing.lock", "pnpm-lock.yaml"], prefix: "linux" },
     path: "/cache/dependencies",
   });
   const stringOneRevision = revisionOf(stringOne);
@@ -269,17 +280,66 @@ test("string and exact-source file keys have stable canonical identities, includ
 
   files.set("pnpm-lock.yaml", new TextEncoder().encode("lockfile-v2"));
   const changed = await create().lookup("dependencies", {
-    key: { files: ["missing.lock", "pnpm-lock.yaml"], salt: "linux" },
+    key: { files: ["missing.lock", "pnpm-lock.yaml"], prefix: "linux" },
     path: "/cache/dependencies",
   });
   files.set("missing.lock", new Uint8Array());
   const present = await create().lookup("dependencies", {
-    key: { files: ["missing.lock", "pnpm-lock.yaml"], salt: "linux" },
+    key: { files: ["missing.lock", "pnpm-lock.yaml"], prefix: "linux" },
     path: "/cache/dependencies",
   });
 
   expect(revisionOf(changed).ref).not.toBe(filesOneRevision.ref);
   expect(revisionOf(present).ref).not.toBe(revisionOf(changed).ref);
+});
+
+test("restore keys choose the newest matching prefix while preserving the primary publication key", async () => {
+  const refs = new MemoryRefs();
+  const create = (generation: number) =>
+    new Cache({
+      context: { ...context, generation },
+      refs,
+      files: { inspect: async () => ({ type: "missing" as const }) },
+      current: async () => true,
+    });
+  const older = revisionOf(
+    await create(1).lookup("dependencies", {
+      key: "dependencies-linux-old",
+      path: "/cache/dependencies",
+    }),
+  );
+  seed(refs, older, {
+    name: "dependencies",
+    target: "/cache/dependencies",
+  });
+  const newer = revisionOf(
+    await create(1).lookup("dependencies", {
+      key: "dependencies-linux-new",
+      path: "/cache/dependencies",
+    }),
+  );
+  seed(refs, newer, {
+    etag: "version-2",
+    name: "dependencies",
+    target: "/cache/dependencies",
+  });
+
+  const lookup = await create(1).lookup("dependencies", {
+    key: "dependencies-linux-current",
+    restoreKeys: ["dependencies-linux-"],
+    path: "/cache/dependencies",
+  });
+
+  expect(lookup).toMatchObject({
+    state: "hit",
+    key: "dependencies-linux-new",
+    match: "restore",
+    revision: {
+      key: "dependencies-linux-current",
+      etag: null,
+    },
+    source: { ref: newer.ref },
+  });
 });
 
 test("a hit stages beside its target and becomes visible only after verified rename", async () => {
@@ -327,7 +387,12 @@ test("a hit stages beside its target and becomes visible only after verified ren
   if (!miss.revision) throw new Error("expected observation");
   seed(refs, miss.revision, { variant: "c", name: "tree", target: "/cache/tree" });
 
-  await expect(create().restore("tree", declaration)).resolves.toEqual({ state: "hit", bytes: 12 });
+  await expect(create().restore("tree", declaration)).resolves.toEqual({
+    state: "hit",
+    bytes: 12,
+    key: "v1",
+    match: "exact",
+  });
   expect(events[0]).toBe("inspect:/cache/tree:absent");
   expect(events[1]).toMatch(
     new RegExp(
@@ -573,7 +638,6 @@ test("cache identifiers and file keys reject invalid lengths, paths, and file ki
   const invalid: ReadonlyArray<readonly [string, Parameters<Cache["lookup"]>[1]]> = [
     ["", { key: "valid", path: "/cache/x" }],
     [`x${"é".repeat(64)}`, { key: "valid", path: "/cache/x" }],
-    ["runway:owned", { key: "valid", path: "/cache/x" }],
     ["valid", { key: "", path: "/cache/x" }],
     ["valid", { key: "é".repeat(257), path: "/cache/x" }],
     ["valid", { key: { files: [] as never }, path: "/cache/x" }],
