@@ -5,16 +5,16 @@ import { build as esbuild } from "esbuild";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
-import { buildDeployment } from "./src/deploy-build.ts";
-import type { Registry } from "./src/registry.ts";
-import { secretRef } from "./src/secrets.ts";
+import { buildDeployment } from "./src/internal/deploy/artifacts.ts";
+import type { Registry } from "./src/internal/deploy/registry.ts";
+import { COMPATIBILITY_DATE } from "./src/internal/runtime/contract.ts";
+import { secretRef } from "./src/secret.ts";
 import { cron, github, webhook } from "./src/trigger.ts";
-import { COMPATIBILITY_DATE } from "./src/worker-contract.ts";
-import { repositoryFixture } from "./tests/repository-fixture.ts";
+import { repositoryFixture } from "./tests/support/repository.ts";
 
 const generatedHostRegistry: Registry = [
   {
-    path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+    path: path.resolve(import.meta.dirname, "tests/support/runtime-worker.ts"),
     exportName: "issueCreated",
     def: {
       __kind: "workflow",
@@ -53,7 +53,7 @@ const githubEvents = [
 
 const githubRegistry: Registry = [
   {
-    path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+    path: path.resolve(import.meta.dirname, "tests/support/runtime-worker.ts"),
     exportName: "githubCheck",
     def: {
       __kind: "workflow",
@@ -64,7 +64,7 @@ const githubRegistry: Registry = [
     },
   },
   {
-    path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+    path: path.resolve(import.meta.dirname, "tests/support/runtime-worker.ts"),
     exportName: "githubTest",
     def: {
       __kind: "workflow",
@@ -77,7 +77,7 @@ const githubRegistry: Registry = [
 ];
 
 const manyGithubRegistry: Registry = Array.from({ length: 40 }, (_, index) => ({
-  path: path.resolve(import.meta.dirname, "tests/runtime-worker.ts"),
+  path: path.resolve(import.meta.dirname, "tests/support/runtime-worker.ts"),
   exportName: "githubCheck",
   def: {
     __kind: "workflow" as const,
@@ -138,7 +138,9 @@ export default defineConfig({
       });
       const probe = await esbuild({
         bundle: true,
-        entryPoints: [path.resolve(import.meta.dirname, "tests/repository-probe-worker.ts")],
+        entryPoints: [
+          path.resolve(import.meta.dirname, "tests/support/repository-probe-worker.ts"),
+        ],
         external: ["cloudflare:*", "node:*"],
         format: "esm",
         platform: "browser",
@@ -148,7 +150,7 @@ export default defineConfig({
       if (!probeWorker) throw new Error("esbuild returned no repository probe worker");
       const effects = await esbuild({
         bundle: true,
-        entryPoints: [path.resolve(import.meta.dirname, "tests/runtime-worker.ts")],
+        entryPoints: [path.resolve(import.meta.dirname, "tests/support/runtime-worker.ts")],
         external: ["cloudflare:*", "node:*"],
         format: "esm",
         platform: "browser",
@@ -159,7 +161,7 @@ export default defineConfig({
       const activeArtifact = generated.artifacts[0]!;
       const suspendedArtifact = suspended.artifacts[0]!;
       return {
-        main: "./tests/runtime-worker.ts",
+        main: "./tests/support/runtime-worker.ts",
         miniflare: {
           workers: [
             {
@@ -478,7 +480,7 @@ export class TestWorkflowCapture extends WorkerEntrypoint {
   ],
   test: {
     name: "runway-workers",
-    include: ["tests/sandbox.workers.test.ts", "tests/worker.test.ts"],
+    include: ["tests/adapter/sandbox.workers.test.ts", "tests/runtime.workers.test.ts"],
     testTimeout: 20_000,
   },
 });

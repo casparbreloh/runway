@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 
 import { toFile } from "cloudflare";
 
-import { collectResultItems, resultOf, type CloudflareApi } from "../../cloudflare-api.ts";
-import type { PreparedDeployment } from "../../deploy-build.ts";
-import type { Registry } from "../../registry.ts";
+import { collectResultItems, resultOf, type CloudflareApi } from "../cloudflare.ts";
+import type { PreparedDeployment } from "../deploy/artifacts.ts";
+import type { Registry } from "../deploy/registry.ts";
+import { workflowArtifactKey } from "../runtime/artifact.ts";
 import {
   ARTIFACT_BUCKET_BINDING,
   CACHE_SECRET_BINDINGS,
@@ -15,8 +16,7 @@ import {
   LOADER_BINDING,
   SECRET_SNAPSHOT_KEY_BINDING,
   WORKFLOW_BINDING,
-} from "../../worker-contract.ts";
-import { workflowArtifactKey } from "../../workflow-artifact.ts";
+} from "../runtime/contract.ts";
 import {
   SANDBOX_RUNNER_ABI,
   GITHUB_COORDINATOR_BINDING,

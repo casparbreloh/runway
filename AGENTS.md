@@ -16,29 +16,15 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 ## Layout
 
 - `packages/runway/` — SDK and `runway` CLI.
-  - `src/secrets.ts` — secret references.
-  - `src/workflow.ts` — `workflow()` and workflow contracts.
-  - `src/trigger.ts` — webhook and cron triggers and contracts.
-  - `src/github.ts` — GitHub trigger contracts and delivery normalization.
-  - `src/registry.ts` — discovered workflow registry contracts and loading.
-  - `src/step.ts` — public `Step`, cache, and command contracts.
-  - `src/tools.ts`, `src/mise.ts`, and `src/release.ts` — provider seam and built-in adapters.
-  - `src/internal/cache/` — private generic cache identity, policy, refs, transfer, and snapshots.
-  - `src/internal/source/` — exact credential-free source identity and repository resolution.
-  - `src/internal/sandbox/` — run-bound lifecycle, provider placement, and configuration.
-  - `src/terminal.ts` — one durable terminal winner and external terminal authority.
-  - `src/meter.ts` — bounded latency, usage, provenance, and cost estimation.
-  - `src/internal/stack/` — exact desired resources and Cloudflare ownership receipts.
-  - `src/runtime-binding.ts` — internal Worker RPC contract.
-  - `src/runtime.ts` — workflow artifact runtime adapter.
-  - `src/host-runtime.ts` — repo Worker host, artifact loading, routing, and runtime binding.
-  - `src/workflow-artifact.ts` — immutable content-addressed artifact contract.
-  - `src/secret-snapshot.ts` — encrypted durable run-secret snapshots.
-  - `src/router.ts` — webhook and cron routing.
-  - `src/deploy.ts` — validation and deployment orchestration.
-  - `src/codegen.ts` — thin generated host configuration and workflow entry modules.
-  - `src/validate.ts` — registry validation.
-  - `tests/worker.test.ts` — Workers-runtime integration tests using Cloudflare's Vitest pool.
+  - Keep the author-facing modules flat in `src/`; `runtime.ts` is the intentional host-only
+    package subpath.
+  - Put substantial private domains in singular `src/internal/<domain>/` folders. A folder should
+    contain multiple collaborating implementations behind one small interface; otherwise keep the
+    implementation in one file.
+  - Prefer singular, responsibility-based filenames. Split for a real runtime, adapter, dependency,
+    or invariant seam—not line count—and merge shallow helpers into the module that owns them.
+  - Tests attach to public or deep internal interfaces and carry behavior across implementations;
+    do not create one test file per source file or test private helpers directly.
 - `.runway/workflows/` — Runway's own GitHub-triggered `Check` and `Test` workflows.
 
 ## Commands

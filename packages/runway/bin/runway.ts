@@ -7,10 +7,13 @@ import { toFile } from "cloudflare";
 import pkg from "../package.json" with { type: "json" };
 import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
 import type { ProgressEvent } from "../src/deploy.ts";
-import { resolveScriptName } from "../src/naming.ts";
-import { loadRegistry } from "../src/registry.ts";
-import { setScriptSecret } from "../src/secret-store.ts";
-import { COMPATIBILITY_DATE, isSecretSnapshotKeyBinding } from "../src/worker-contract.ts";
+import { resolveScriptName } from "../src/internal/deploy/name.ts";
+import { loadRegistry } from "../src/internal/deploy/registry.ts";
+import {
+  COMPATIBILITY_DATE,
+  isSecretSnapshotKeyBinding,
+} from "../src/internal/runtime/contract.ts";
+import { setScriptSecret } from "../src/internal/secret/store.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {

@@ -9,6 +9,7 @@ import { expect, test } from "vitest";
 
 import { deployWithAdapters } from "../src/deploy.ts";
 import type { CloudflareApi, ProgressEvent } from "../src/deploy.ts";
+import type { Registry } from "../src/internal/deploy/registry.ts";
 import type { RepositorySource } from "../src/internal/source/repository.ts";
 import { assertRepositorySourceReachable } from "../src/internal/source/repository.ts";
 import type {
@@ -17,8 +18,7 @@ import type {
   StackReceipt,
   StackResource,
 } from "../src/internal/stack/stack.ts";
-import type { Registry } from "../src/registry.ts";
-import { authenticatedRepositoryFixture, repositoryFixture } from "./repository-fixture.ts";
+import { authenticatedRepositoryFixture, repositoryFixture } from "./support/repository.ts";
 
 const execFileAsync = promisify(execFile);
 

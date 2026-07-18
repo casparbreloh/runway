@@ -1,10 +1,7 @@
-import { redactError, StreamingRedactor } from "../../secret-redaction.ts";
 import type { ExecResult } from "../../step.ts";
-import type { CacheSnapshotProcess } from "../cache/cloudflare-snapshot.ts";
-import type {
-  CacheTransferCapability,
-  CacheTransferSession,
-} from "../cache/cloudflare-transfer.ts";
+import type { CacheSnapshotProcess } from "../cache/snapshot.ts";
+import type { CacheTransferCapability, CacheTransferSession } from "../cache/transfer.ts";
+import { redactError, StreamingRedactor } from "../secret/redaction.ts";
 import type { GitHubRepositoryAuthentication, RepositorySource } from "../source/repository.ts";
 import type { PreparedSource } from "../source/source.ts";
 import {

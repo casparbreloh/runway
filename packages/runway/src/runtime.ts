@@ -1,23 +1,23 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-import { failureDiagnosticOf } from "./diagnostic.ts";
-import type { FailureDiagnostic } from "./diagnostic.ts";
 import type { PreparedCache } from "./internal/cache/cache.ts";
 import { normalizedCacheTarget } from "./internal/cache/path.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./internal/meter.ts";
+import type { RuntimeBinding } from "./internal/runtime/binding.ts";
+import { RUNTIME_BINDING } from "./internal/runtime/contract.ts";
+import { failureDiagnosticOf } from "./internal/runtime/diagnostic.ts";
+import type { FailureDiagnostic } from "./internal/runtime/diagnostic.ts";
+import { createRouter } from "./internal/runtime/router.ts";
 import { SANDBOX_CAPACITY } from "./internal/sandbox/config.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./internal/sandbox/sandbox.ts";
 import { source } from "./internal/source/source.ts";
 import type { SourceIdentity } from "./internal/source/source.ts";
-import { withTools } from "./internal/tools/coordinator.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
-import { createRouter } from "./router.ts";
-import type { RuntimeBinding } from "./runtime-binding.ts";
+import { Terminal, TerminalError } from "./internal/terminal.ts";
+import type { Finalization, TerminalRecord, TerminalState } from "./internal/terminal.ts";
+import { withTools } from "./internal/tool/execution.ts";
 import { makeStep, secretsOf } from "./step.ts";
 import { validateCacheDeclaration, type Step } from "./step.ts";
-import { Terminal, TerminalError } from "./terminal.ts";
-import type { Finalization, TerminalRecord, TerminalState } from "./terminal.ts";
-import { RUNTIME_BINDING } from "./worker-contract.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";

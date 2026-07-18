@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
 
 import { Cache } from "../src/internal/cache/cache.ts";
-import { Meter } from "../src/meter.ts";
+import { Meter } from "../src/internal/meter.ts";
 
 const cacheMeter = (classAUsd = 0): Meter =>
   new Meter({

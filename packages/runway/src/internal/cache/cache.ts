@@ -1,7 +1,7 @@
 const encoder = new TextEncoder();
 
-import type { Meter } from "../../meter.ts";
 import type { CacheKey, CacheTreeDeclaration } from "../../step.ts";
+import type { Meter } from "../meter.ts";
 import { normalizedCacheTarget } from "./path.ts";
 
 interface CacheContext {

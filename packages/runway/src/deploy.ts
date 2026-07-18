@@ -1,11 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 
-import type { CloudflareApi } from "./cloudflare-api.ts";
-import { resolveAuth } from "./deploy-auth.ts";
-import { buildDeployment } from "./deploy-build.ts";
-import { createGitHubProvider, type GitHubProvider } from "./github.ts";
-import { waitForDeploymentReadiness } from "./internal/deploy/readiness.ts";
+import type { CloudflareApi } from "./internal/cloudflare.ts";
+import { buildDeployment } from "./internal/deploy/artifacts.ts";
+import { resolveAuth } from "./internal/deploy/auth.ts";
+import { resolveScriptName } from "./internal/deploy/name.ts";
+import { cronsOf, secretNamesOf, type Registry } from "./internal/deploy/registry.ts";
+import { waitForRollout } from "./internal/deploy/rollout.ts";
+import { createGitHubProvider, type GitHubProvider } from "./internal/github/provider.ts";
+import {
+  GITHUB_APP_ID_BINDING,
+  GITHUB_PRIVATE_KEY_BINDING,
+  GITHUB_WEBHOOK_SECRET_BINDING,
+  SECRET_SNAPSHOT_KEY_BINDING,
+} from "./internal/runtime/contract.ts";
+import { listScriptSecrets } from "./internal/secret/store.ts";
 import {
   assertRepositorySourceReachable,
   resolveRepositorySource,
@@ -18,18 +27,9 @@ import {
   validateBindings,
 } from "./internal/stack/cloudflare.ts";
 import { Stack, type StackControl, type StackManifest } from "./internal/stack/stack.ts";
-import { resolveScriptName } from "./naming.ts";
-import { cronsOf, secretNamesOf, type Registry } from "./registry.ts";
-import { listScriptSecrets } from "./secret-store.ts";
-import {
-  GITHUB_APP_ID_BINDING,
-  GITHUB_PRIVATE_KEY_BINDING,
-  GITHUB_WEBHOOK_SECRET_BINDING,
-  SECRET_SNAPSHOT_KEY_BINDING,
-} from "./worker-contract.ts";
 
-export type { CloudflareApi } from "./cloudflare-api.ts";
-export { resolveAuth } from "./deploy-auth.ts";
+export type { CloudflareApi } from "./internal/cloudflare.ts";
+export { resolveAuth } from "./internal/deploy/auth.ts";
 
 export interface ProgressEvent {
   readonly step: "load" | "build" | "deploy";
@@ -93,7 +93,7 @@ const waitUntilReady = async (opts: {
   readonly scriptName: string;
   readonly deploymentId: string;
 }): Promise<void> =>
-  await waitForDeploymentReadiness({
+  await waitForRollout({
     fetch: globalThis.fetch,
     wait: (durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)),
     ...opts,

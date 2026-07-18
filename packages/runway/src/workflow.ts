@@ -1,9 +1,8 @@
-import type { GitHubTrigger } from "./github.ts";
-import { secretNameOf, secretRef, type SecretRef } from "./secrets.ts";
+import { secretNameOf, secretRef, type SecretRef } from "./secret.ts";
 import type { Step } from "./step.ts";
 import { toolProviders, type Tools } from "./tools.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type { CronTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
+import type { CronTrigger, GitHubTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
 
 export type TriggerContext<S extends string> = {
   readonly secrets: { readonly [K in S]: SecretRef<K> };

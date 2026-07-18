@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 
+import { Meter } from "../src/internal/meter.ts";
 import {
   RunLostError,
   Sandbox,
@@ -7,10 +8,9 @@ import {
   type DurableStep,
 } from "../src/internal/sandbox/sandbox.ts";
 import { source } from "../src/internal/source/source.ts";
-import { Meter } from "../src/meter.ts";
+import { Terminal } from "../src/internal/terminal.ts";
+import type { TerminalRecord, TerminalState } from "../src/internal/terminal.ts";
 import { makeStep } from "../src/step.ts";
-import { Terminal } from "../src/terminal.ts";
-import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
 
 const durable = (id: string, events?: string[]) => ({
   id,
@@ -350,7 +350,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
     ".runway/state",
   ]) {
     await expect(sandbox.cache(recorded(`unsafe-${path}`), { key: "v1", path })).rejects.toThrow(
-      "invalid cache declaration",
+      "invalid cache target",
     );
   }
   await sandbox.exec(durable("execute"), "execute");

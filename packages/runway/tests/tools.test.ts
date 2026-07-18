@@ -1,10 +1,8 @@
+import { defineToolProvider, mise, release } from "runway";
 import { expect, test } from "vitest";
 
-import { withTools } from "../src/internal/tools/coordinator.ts";
-import { mise } from "../src/mise.ts";
-import { release } from "../src/release.ts";
+import { withTools } from "../src/internal/tool/execution.ts";
 import type { CacheDeclaration, ExecOptions, ExecResult } from "../src/step.ts";
-import { defineToolProvider } from "../src/tools.ts";
 
 test("tool providers restore every private cache before setup and prepare once", async () => {
   const calls: string[] = [];

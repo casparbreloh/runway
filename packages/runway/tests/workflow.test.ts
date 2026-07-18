@@ -3,7 +3,7 @@ import { cron, github, webhook, workflow } from "runway";
 import type { CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
-import { secretNameOf } from "../src/secrets.ts";
+import { secretNameOf } from "../src/secret.ts";
 import { makeStep } from "../src/step.ts";
 
 const secretRef = <N extends string>(name: N): SecretRef<N> => {

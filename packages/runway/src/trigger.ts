@@ -1,13 +1,72 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 
-import type { GitHubEventFilter, GitHubEventOf, GitHubOptions, GitHubTrigger } from "./github.ts";
-import { secretNameOf, type SecretRef } from "./secrets.ts";
+import { secretNameOf, type SecretRef } from "./secret.ts";
 import type { WorkflowTrigger } from "./workflow.ts";
 
 declare const EVENT: unique symbol;
 
 export interface Trigger<E> {
   readonly [EVENT]: E;
+}
+
+export interface GitHubRepository {
+  readonly id: number;
+  readonly name: string;
+  readonly fullName: string;
+}
+
+export interface GitHubPushEvent {
+  readonly type: "push";
+  readonly repository: GitHubRepository;
+  readonly ref: string;
+  readonly sha: string;
+}
+
+export type GitHubPullRequestAction = "opened" | "reopened" | "synchronize";
+
+export interface GitHubPullRequestEvent<
+  A extends GitHubPullRequestAction = GitHubPullRequestAction,
+> {
+  readonly type: "pull_request";
+  readonly action: A;
+  readonly repository: GitHubRepository;
+  readonly number: number;
+  readonly ref: string;
+  readonly sha: string;
+}
+
+export interface GitHubPushFilter {
+  readonly type: "push";
+  readonly branches: readonly [string, ...string[]];
+}
+
+export interface GitHubPullRequestFilter<
+  A extends readonly [GitHubPullRequestAction, ...GitHubPullRequestAction[]] = readonly [
+    GitHubPullRequestAction,
+    ...GitHubPullRequestAction[],
+  ],
+> {
+  readonly type: "pull_request";
+  readonly actions: A;
+}
+
+export type GitHubEventFilter = GitHubPushFilter | GitHubPullRequestFilter;
+
+export type GitHubEventOf<F extends GitHubEventFilter> = F extends GitHubPushFilter
+  ? GitHubPushEvent
+  : F extends GitHubPullRequestFilter<infer A>
+    ? GitHubPullRequestEvent<A[number]>
+    : never;
+
+export interface GitHubOptions<F extends readonly [GitHubEventFilter, ...GitHubEventFilter[]]> {
+  readonly checkName: string;
+  readonly events: F;
+}
+
+export interface GitHubTrigger<E> extends Trigger<E> {
+  readonly type: "github";
+  readonly checkName: string;
+  readonly events: readonly GitHubEventFilter[];
 }
 
 export interface WebhookTimestamp {

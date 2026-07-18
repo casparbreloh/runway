@@ -1,11 +1,11 @@
-import { trustedExecError } from "../../exec-error.ts";
-import type { Meter } from "../../meter.ts";
-import { redactSecrets } from "../../secret-redaction.ts";
+import { trustedExecError } from "../../step.ts";
 import type { CacheResult, CacheTreeDeclaration, ExecOptions, ExecResult } from "../../step.ts";
-import type { Finalization, Terminal } from "../../terminal.ts";
 import { cacheDeclarationEvidence } from "../cache/cache.ts";
 import type { PendingCache, PreparedCache } from "../cache/cache.ts";
+import type { Meter } from "../meter.ts";
+import { redactSecrets } from "../secret/redaction.ts";
 import type { PreparedSource, Source } from "../source/source.ts";
+import type { Finalization, Terminal } from "../terminal.ts";
 
 const DEFAULT_EXEC_CWD = "/workspace";
 const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;

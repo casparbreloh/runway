@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { SECRET_SNAPSHOT_KEY_BINDING } from "../../worker-contract.ts";
+import { SECRET_SNAPSHOT_KEY_BINDING } from "../runtime/contract.ts";
 
 export interface StackOwner {
   readonly accountId: string;

@@ -3,13 +3,15 @@ import { createHmac, createPublicKey, verify } from "node:crypto";
 import { describe, expect, test } from "vitest";
 
 import {
-  createGitHubProvider,
   GITHUB_WEBHOOK_MAX_BYTES,
-  GitHubRepositoryUnavailableError,
   matchGitHubDelivery,
   normalizeGitHubDelivery,
   parseGitHubDelivery,
-} from "../src/github.ts";
+} from "../src/internal/github/delivery.ts";
+import {
+  createGitHubProvider,
+  GitHubRepositoryUnavailableError,
+} from "../src/internal/github/provider.ts";
 
 const repository = { id: 17, name: "runway", fullName: "acme/runway" } as const;
 const forkRepository = {
