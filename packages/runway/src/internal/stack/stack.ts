@@ -1086,20 +1086,24 @@ export class Stack {
   }
 
   async #publishClaims(claims: readonly OwnershipRef[]): Promise<void> {
-    for (const claim of claims) {
-      await this.#control.writeOnce(Stack.refKey(claim), canonicalJson(claim));
-    }
+    await Promise.all(
+      claims.map(async (claim) => {
+        await this.#control.writeOnce(Stack.refKey(claim), canonicalJson(claim));
+      }),
+    );
     await this.#verifyClaims(claims);
   }
 
   async #verifyClaims(claims: readonly OwnershipRef[]): Promise<void> {
-    for (const claim of claims) {
-      const records = await this.#control.list(Stack.refPrefix(claim.kind, claim.name));
-      if (!records.some(({ value }) => value === canonicalJson(claim))) {
-        throw new Error("Stack ownership claim persistence failed");
-      }
-      for (const record of records) mergeClaim(claim, ownershipRefOf(record.value));
-    }
+    await Promise.all(
+      claims.map(async (claim) => {
+        const records = await this.#control.list(Stack.refPrefix(claim.kind, claim.name));
+        if (!records.some(({ value }) => value === canonicalJson(claim))) {
+          throw new Error("Stack ownership claim persistence failed");
+        }
+        for (const record of records) mergeClaim(claim, ownershipRefOf(record.value));
+      }),
+    );
   }
 
   async #receipts(): Promise<

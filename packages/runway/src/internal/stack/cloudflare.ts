@@ -296,7 +296,7 @@ const bytesOf = async (value: unknown): Promise<Uint8Array> => {
 
 export class CloudflareStackControl implements StackControl {
   readonly #opts: CloudflareStackOptions;
-  #stateReady = false;
+  #statePreparation: Promise<void> | undefined;
   #urls: readonly { readonly id: string; readonly url: string }[] = [];
 
   constructor(opts: CloudflareStackOptions) {
@@ -1327,7 +1327,16 @@ export class CloudflareStackControl implements StackControl {
   }
 
   async #ensureStateBucket(): Promise<void> {
-    if (this.#stateReady) return;
+    const preparation = (this.#statePreparation ??= this.#prepareStateBucket());
+    try {
+      await preparation;
+    } catch (error) {
+      if (this.#statePreparation === preparation) this.#statePreparation = undefined;
+      throw error;
+    }
+  }
+
+  async #prepareStateBucket(): Promise<void> {
     try {
       await this.#opts.cf.r2.buckets.get(this.#opts.stateBucket, {
         account_id: this.#opts.accountId,
@@ -1341,7 +1350,6 @@ export class CloudflareStackControl implements StackControl {
       });
     }
     await this.#assertPrivateRetainedStateBucket();
-    this.#stateReady = true;
   }
 
   async #assertPrivateRetainedStateBucket(): Promise<void> {

@@ -933,9 +933,14 @@ test("apply reconciles stale container configuration and surfaces rollout failur
 
 const stateApi = (
   initial: Readonly<Record<string, string>> | undefined,
-  config: { readonly publicAccess?: boolean; readonly deleteObjects?: boolean } = {},
+  config: {
+    readonly publicAccess?: boolean;
+    readonly deleteObjects?: boolean;
+    readonly preparationFailures?: number;
+  } = {},
 ) => {
   let exists = initial !== undefined;
+  let preparationFailures = config.preparationFailures ?? 0;
   const objects = new Map(Object.entries(initial ?? {}));
   let creates = 0;
   let uploads = 0;
@@ -951,11 +956,17 @@ const stateApi = (
           creates += 1;
         },
         lifecycle: {
-          get: async () => ({
-            rules: config.deleteObjects
-              ? [{ enabled: true, deleteObjectsTransition: { condition: { type: "Age" } } }]
-              : [],
-          }),
+          get: async () => {
+            if (preparationFailures > 0) {
+              preparationFailures -= 1;
+              throw new Error("transient state preparation failure");
+            }
+            return {
+              rules: config.deleteObjects
+                ? [{ enabled: true, deleteObjectsTransition: { condition: { type: "Age" } } }]
+                : [],
+            };
+          },
         },
         domains: {
           managed: { list: async () => ({ enabled: config.publicAccess ?? false }) },
@@ -981,15 +992,32 @@ const stateApi = (
   return { cf, objects, creates: () => creates, uploads: () => uploads };
 };
 
-test("append-only state creates a missing dedicated bucket once and rereads its write", async () => {
+test("append-only state shares missing bucket preparation across concurrent writes", async () => {
   const state = stateApi(undefined);
   const stack = control(state.cf);
-  await stack.writeOnce("stack/v2/receipts/owner/generation.json", "one");
-  await stack.writeOnce("stack/v2/receipts/owner/generation.json", "one");
+  await Promise.all([
+    stack.writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+    stack.writeOnce("stack/v2/claims/worker/runway.json", "two"),
+  ]);
   expect(state.creates()).toBe(1);
   await expect(stack.read("stack/v2/receipts/owner/generation.json")).resolves.toMatchObject({
     value: "one",
   });
+});
+
+test("append-only state shares a failed preparation and retries it", async () => {
+  const state = stateApi(undefined, { preparationFailures: 1 });
+  const stack = control(state.cf);
+  const first = await Promise.allSettled([
+    stack.writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+    stack.writeOnce("stack/v2/claims/worker/runway.json", "two"),
+  ]);
+  expect(first.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+  await Promise.all([
+    stack.writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+    stack.writeOnce("stack/v2/claims/worker/runway.json", "two"),
+  ]);
+  expect(state.creates()).toBe(1);
 });
 
 test("append-only state adopts an empty shared bucket and rejects conflicting storage", async () => {
