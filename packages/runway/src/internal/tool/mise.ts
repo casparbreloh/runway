@@ -1,4 +1,5 @@
 import { defineToolProvider, type ToolProvider } from "../../tools.ts";
+import { shell } from "./execution.ts";
 
 const VERSION = "v2026.7.7";
 const SHA256 = "0953810c2785eb4a75159f67f8b5721c4f3c80b8a6a812015d5af7d7fbd1b8a4";
@@ -16,8 +17,6 @@ const CONFIG_FILES = [
 ] as const;
 
 export type MiseTools = Readonly<Record<string, string>>;
-
-const shell = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const fingerprint = (value: string): string => {
   let hash = 0xcbf29ce484222325n;

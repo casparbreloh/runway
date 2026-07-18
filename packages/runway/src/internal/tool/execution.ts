@@ -3,7 +3,7 @@ import { toolProviders, type Tools } from "../../tools.ts";
 
 type Operations = Pick<Step, "exec" | "cache">;
 
-const shell = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+export const shell = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const withEnvironment = (
   command: string | ExecOptions,

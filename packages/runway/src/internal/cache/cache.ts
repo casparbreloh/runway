@@ -206,18 +206,18 @@ const validateId = (id: string): void => {
 
 const validateFilePaths = (paths: readonly string[]): void => {
   if (paths.length < 1 || paths.length > 64) invalid();
-  let previous: string | undefined;
+  const unique = new Set<string>();
   for (const path of paths) {
     if (
       !validText(path, 1, 512) ||
       path.startsWith("/") ||
       path.includes("\\") ||
       path.split("/").some((segment) => !segment || segment === "." || segment === "..") ||
-      (previous !== undefined && previous >= path)
+      unique.has(path)
     ) {
       invalid();
     }
-    previous = path;
+    unique.add(path);
   }
 };
 
@@ -233,7 +233,7 @@ const validateKeyDefinition = (key: CacheKey): void => {
 const keyDefinition = (key: CacheKey): Array<string> =>
   typeof key === "string"
     ? ["string", key]
-    : ["files", key.prefix ?? "", String(key.files.length), ...key.files];
+    : ["files", key.prefix ?? "", String(key.files.length), ...key.files.toSorted()];
 
 export const cacheDeclarationEvidence = async (
   declaration: CacheTreeDeclaration,
@@ -452,7 +452,7 @@ const cacheKey = async (key: CacheKey, files: CacheFiles): Promise<string> => {
   validateKeyDefinition(key);
   if (typeof key === "string") return key;
   const fields: Array<string | Uint8Array> = ["files", String(key.files.length)];
-  for (const path of key.files) {
+  for (const path of key.files.toSorted()) {
     const entry = await files.inspect(path);
     if (entry.type !== "file" && entry.type !== "missing") invalid();
     fields.push(path, entry.type);

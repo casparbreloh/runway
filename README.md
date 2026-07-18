@@ -188,8 +188,8 @@ runway deploy
 ```
 
 In CI, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
-with `runway secrets set NAME ...`. `package.json` cannot configure Runway. `RUNWAY_NAME` is reserved
-for isolated deployments such as live smokes and must be `runway` or begin with `runway-`.
+with `runway secrets set NAME ...`. Deployment identity cannot be configured through `package.json`
+or environment variables.
 
 ## GitHub App Setup
 

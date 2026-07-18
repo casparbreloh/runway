@@ -992,10 +992,12 @@ test("append-only state creates a missing dedicated bucket once and rereads its 
   });
 });
 
-test("append-only state fails closed on unowned or conflicting pre-existing storage", async () => {
+test("append-only state adopts an empty shared bucket and rejects conflicting storage", async () => {
+  const empty = stateApi({});
   await expect(
-    control(stateApi({}).cf).writeOnce("stack/v2/receipts/owner/generation.json", "one"),
-  ).rejects.toThrow("unowned");
+    control(empty.cf).writeOnce("stack/v2/receipts/owner/generation.json", "one"),
+  ).resolves.toBeUndefined();
+  expect(empty.creates()).toBe(0);
 
   const logical = "stack/v2/receipts/owner/generation.json";
   const conflicting = stateApi({

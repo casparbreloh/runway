@@ -265,7 +265,7 @@ test("string and exact-source file keys have stable canonical identities, includ
     path: "/cache/dependencies",
   });
   const filesTwo = await create().lookup("dependencies", {
-    key: { files: ["missing.lock", "pnpm-lock.yaml"], prefix: "linux" },
+    key: { files: ["pnpm-lock.yaml", "missing.lock"], prefix: "linux" },
     path: "/cache/dependencies",
   });
   const stringOneRevision = revisionOf(stringOne);
@@ -649,7 +649,6 @@ test("cache identifiers and file keys reject invalid lengths, paths, and file ki
       },
     ],
     ["valid", { key: { files: ["a", "a"] }, path: "/cache/x" }],
-    ["valid", { key: { files: ["b", "a"] }, path: "/cache/x" }],
     ["valid", { key: { files: ["/absolute"] }, path: "/cache/x" }],
     ["valid", { key: { files: ["../escape"] }, path: "/cache/x" }],
     ["valid", { key: { files: ["a/../escape"] }, path: "/cache/x" }],

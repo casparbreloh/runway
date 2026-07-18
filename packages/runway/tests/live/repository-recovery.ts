@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
 
-import { deploy } from "../../src/deploy.ts";
+import { deployWithAdapters } from "../../src/deploy.ts";
 import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
 import type { Registry } from "../../src/internal/deploy/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
@@ -435,14 +435,17 @@ const run = async (): Promise<void> => {
       }
       createdObjectKeys.add(key);
     }
-    const deployment = await deploy(registry(project), {
-      cwd: project,
-      env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_NAME: scriptName,
-        HOOK_SECRET: hookSecret,
-        DRIVER_TOKEN: driverToken,
-      }),
-    });
+    const deployment = await deployWithAdapters(
+      registry(project),
+      {
+        cwd: project,
+        env: nonGitHubDeployEnv(process.env, {
+          HOOK_SECRET: hookSecret,
+          DRIVER_TOKEN: driverToken,
+        }),
+      },
+      { deploymentName: scriptName },
+    );
     removeStack = deployment.remove;
     if (
       JSON.stringify(deployment.artifactVersions) !==

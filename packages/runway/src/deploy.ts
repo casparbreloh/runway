@@ -52,6 +52,7 @@ interface DeployOutput {
 }
 
 interface DeployAdapters {
+  readonly deploymentName?: string;
   readonly client?: (opts: { apiToken: string }) => CloudflareApi;
   readonly repository?: RepositorySource;
   readonly reachable?: (repository: RepositorySource) => Promise<void>;
@@ -109,7 +110,7 @@ export const deployWithAdapters = async (
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
   let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
-  const deploymentName = deploymentNameOf(repository, env);
+  const deploymentName = adapters.deploymentName ?? deploymentNameOf(repository);
   const { accountId, cf } = await resolveAuth(
     { ...opts, ...(adapters.client ? { client: adapters.client } : {}) },
     env,

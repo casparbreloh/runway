@@ -21,19 +21,9 @@ const slugOf = (value: string): string => {
   return slug;
 };
 
-export const deploymentNameOf = (
-  source: RepositorySource,
-  env: Readonly<Record<string, string | undefined>> = {},
-): string => {
+export const deploymentNameOf = (source: RepositorySource): string => {
   const repository = slugOf(repositoryNameOf(source));
-  const name = env.RUNWAY_NAME
-    ? slugOf(env.RUNWAY_NAME)
-    : repository === "runway"
-      ? "runway"
-      : `runway-${repository}`;
-  if (name !== "runway" && !name.startsWith("runway-")) {
-    throw new Error("RUNWAY_NAME must be runway or begin with runway-");
-  }
+  const name = repository === "runway" ? "runway" : `runway-${repository}`;
   if (name.length > MAX_NAME_LENGTH) {
     throw new Error(`repository name produces a deployment name longer than ${MAX_NAME_LENGTH}`);
   }

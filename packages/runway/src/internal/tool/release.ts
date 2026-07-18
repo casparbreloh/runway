@@ -1,4 +1,5 @@
 import { defineToolProvider, type ToolProvider } from "../../tools.ts";
+import { shell } from "./execution.ts";
 
 export interface ReleaseOptions {
   readonly name: string;
@@ -10,8 +11,6 @@ export interface ReleaseOptions {
 
 const NAME = /^[a-z][a-z0-9-]*$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const shell = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
-
 export const release = (options: ReleaseOptions): ToolProvider => {
   if (!NAME.test(options.name))
     throw new Error(`invalid release name ${JSON.stringify(options.name)}`);

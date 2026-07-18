@@ -243,7 +243,7 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
   }
 });
 
-test("package metadata cannot configure deployment identity", async () => {
+test("package metadata and environment variables cannot configure deployment identity", async () => {
   const project = await writeProject({
     name: "unrelated-package-name",
     runway: { name: "ignored-package-configuration" },
@@ -254,7 +254,7 @@ test("package metadata cannot configure deployment identity", async () => {
     await expect(
       deployWithAdapters(
         registry,
-        { cwd: project.cwd, env: environment },
+        { cwd: project.cwd, env: { ...environment, RUNWAY_NAME: "runway-ignored" } },
         {
           client: () => cloudflare(),
           repository: repositoryFixture,
@@ -267,22 +267,7 @@ test("package metadata cannot configure deployment identity", async () => {
       ),
     ).resolves.toMatchObject({ name: "runway" });
 
-    await expect(
-      deployWithAdapters(
-        registry,
-        { cwd: project.cwd, env: { ...environment, RUNWAY_NAME: "runway-smoke" } },
-        {
-          client: () => cloudflare(),
-          repository: repositoryFixture,
-          reachable: async () => {},
-          stack: (manifest) => {
-            manifests.push(manifest);
-            return new MemoryStack();
-          },
-        },
-      ),
-    ).resolves.toMatchObject({ name: "runway-smoke" });
-    expect(manifests[0]?.owner.stackId).not.toBe(manifests[1]?.owner.stackId);
+    expect(manifests).toHaveLength(1);
   } finally {
     await project.cleanup();
   }

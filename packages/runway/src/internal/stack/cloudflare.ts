@@ -1332,9 +1332,7 @@ export class CloudflareStackControl implements StackControl {
       await this.#opts.cf.r2.buckets.get(this.#opts.stateBucket, {
         account_id: this.#opts.accountId,
       });
-      const objects = await this.#stateObjects("");
-      if (objects.length === 0)
-        throw new Error("pre-existing Cloudflare Stack state bucket is unowned");
+      await this.#stateObjects("");
     } catch (error) {
       if (!status(error, 404)) throw error;
       await this.#opts.cf.r2.buckets.create({

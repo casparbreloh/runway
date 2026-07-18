@@ -105,7 +105,7 @@ const runSecrets = async (args: ReadonlyArray<string>): Promise<void> => {
   const [command, ...rest] = args;
   if (command !== "set") throw new Error("usage: runway secrets set <name> <value>");
   const { name, value } = parseSecretsSet(rest);
-  const scriptName = deploymentNameOf(await resolveRepositorySource(process.cwd()), process.env);
+  const scriptName = deploymentNameOf(await resolveRepositorySource(process.cwd()));
   const { accountId, cf } = await resolveAuth(
     { cwd: process.cwd(), env: process.env },
     process.env,

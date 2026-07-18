@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
 
-import { deploy } from "../../src/deploy.ts";
+import { deployWithAdapters } from "../../src/deploy.ts";
 import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
 import type { Registry } from "../../src/internal/deploy/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
@@ -434,14 +434,17 @@ const run = async (): Promise<void> => {
     const expectedV1Artifacts = preparedV1.artifacts.map(({ artifactVersion }) => artifactVersion);
     await ownPreparedArtifacts(expectedV1Artifacts);
     const v1Started = Date.now();
-    const v1 = await deploy(registry(project), {
-      cwd: project,
-      env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_NAME: scriptName,
-        HOOK_SECRET: hookSecret,
-        SMOKE_SECRET: oldSecret,
-      }),
-    });
+    const v1 = await deployWithAdapters(
+      registry(project),
+      {
+        cwd: project,
+        env: nonGitHubDeployEnv(process.env, {
+          HOOK_SECRET: hookSecret,
+          SMOKE_SECRET: oldSecret,
+        }),
+      },
+      { deploymentName: scriptName },
+    );
     removeStack = v1.remove;
     timings.v1DeployMs = Date.now() - v1Started;
     const webhookUrl = v1.urls[0]?.url;
@@ -503,14 +506,17 @@ const run = async (): Promise<void> => {
     const expectedV2Artifacts = preparedV2.artifacts.map(({ artifactVersion }) => artifactVersion);
     await ownPreparedArtifacts(expectedV2Artifacts);
     const v2Started = Date.now();
-    const v2 = await deploy(registry(project), {
-      cwd: project,
-      env: nonGitHubDeployEnv(process.env, {
-        RUNWAY_NAME: scriptName,
-        HOOK_SECRET: hookSecret,
-        SMOKE_SECRET: oldSecret,
-      }),
-    });
+    const v2 = await deployWithAdapters(
+      registry(project),
+      {
+        cwd: project,
+        env: nonGitHubDeployEnv(process.env, {
+          HOOK_SECRET: hookSecret,
+          SMOKE_SECRET: oldSecret,
+        }),
+      },
+      { deploymentName: scriptName },
+    );
     removeStack = v2.remove;
     timings.v2DeployMs = Date.now() - v2Started;
     const v2WebhookUrl = v2.urls[0]?.url;
