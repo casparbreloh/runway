@@ -220,8 +220,14 @@ const durableCache = (id: string): DurableCache => ({
 
 const cacheSandbox = (options: {
   readonly cache?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["cache"]>;
+  readonly discardCaches?: NonNullable<
+    ConstructorParameters<typeof Sandbox>[0]["placement"]["discardCaches"]
+  >;
   readonly destroy?: () => void;
   readonly exec?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["exec"]>;
+  readonly prepareCaches?: NonNullable<
+    ConstructorParameters<typeof Sandbox>[0]["placement"]["prepareCaches"]
+  >;
   readonly terminal?: Terminal;
 }) => {
   const revision = "e".repeat(40);
@@ -239,6 +245,8 @@ const cacheSandbox = (options: {
     ),
     placement: {
       ...(options.cache ? { cache: options.cache } : {}),
+      ...(options.discardCaches ? { discardCaches: options.discardCaches } : {}),
+      ...(options.prepareCaches ? { prepareCaches: options.prepareCaches } : {}),
       exec: options.exec ?? (async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 })),
       destroy: async () => options.destroy?.(),
     },
@@ -292,6 +300,85 @@ test("an unavailable cache placement is an advisory miss", async () => {
   await expect(
     sandbox.cache(durableCache("unavailable"), { key: "v1", path: "/cache/unavailable" }),
   ).resolves.toEqual({ state: "miss", reason: "unavailable" });
+});
+
+test("a single exact cache tree does not schedule redundant publication", async () => {
+  let preparations = 0;
+  const sandbox = cacheSandbox({
+    cache: async ({ id }) => ({
+      result: { state: "hit", bytes: 12, key: "v1", match: "exact" },
+      pending: { schema: 1, id } as never,
+    }),
+    prepareCaches: async () => {
+      preparations += 1;
+      return [];
+    },
+  });
+
+  await expect(
+    sandbox.cacheSet("tools", { key: "v1", paths: ["/cache/tools"] }, durableCache),
+  ).resolves.toMatchObject({ state: "hit", match: "exact" });
+  await expect(sandbox.prepare()).resolves.toEqual([]);
+  expect(preparations).toBe(0);
+});
+
+test("multi-tree, fallback, and partial sets retain every tree needed for publication", async () => {
+  const prepared: string[][] = [];
+  const multi = cacheSandbox({
+    cache: async ({ id }) => ({
+      result: { state: "hit", bytes: 12, key: "v1", match: "exact" },
+      pending: { schema: 1, id } as never,
+    }),
+    prepareCaches: async ({ pending }) => {
+      prepared.push(pending.map(({ id }) => id));
+      return [];
+    },
+  });
+  await multi.cacheSet("multi", { key: "v1", paths: ["/cache/one", "/cache/two"] }, durableCache);
+  await multi.prepare();
+
+  const fallback = cacheSandbox({
+    cache: async ({ id }) => ({
+      result: { state: "hit", bytes: 12, key: "v0", match: "restore" },
+      pending: { schema: 1, id } as never,
+    }),
+    prepareCaches: async ({ pending }) => {
+      prepared.push(pending.map(({ id }) => id));
+      return [];
+    },
+  });
+  await fallback.cacheSet(
+    "fallback",
+    { key: "v1", restoreKeys: ["v"], paths: ["/cache/fallback"] },
+    durableCache,
+  );
+  await fallback.prepare();
+
+  let restores = 0;
+  const discarded: string[][] = [];
+  const partial = cacheSandbox({
+    cache: async ({ id }) => ({
+      result:
+        restores++ === 0
+          ? { state: "hit", bytes: 12, key: "v1", match: "exact" }
+          : { state: "miss", reason: "absent" },
+      pending: { schema: 1, id } as never,
+    }),
+    discardCaches: async ({ paths }) => {
+      discarded.push([...paths]);
+    },
+    prepareCaches: async ({ pending }) => {
+      prepared.push(pending.map(({ id }) => id));
+      return [];
+    },
+  });
+  await expect(
+    partial.cacheSet("partial", { key: "v1", paths: ["/cache/one", "/cache/two"] }, durableCache),
+  ).resolves.toMatchObject({ state: "miss" });
+  await partial.prepare();
+
+  expect(prepared.map((ids) => ids.length)).toEqual([2, 1, 2]);
+  expect(discarded).toEqual([["/cache/one"]]);
 });
 
 test("cache declarations are canonical, retryable, disjoint, safe, and ordered before exec", async () => {
