@@ -360,6 +360,57 @@ test("deploy validates required and reserved secrets before Stack state or provi
   }
 });
 
+test("deploy binds complete cache transport credentials and rejects partial configuration", async () => {
+  const project = await writeProject();
+  let manifest: StackManifest | undefined;
+  try {
+    await deployWithAdapters(
+      registry,
+      {
+        cwd: project.cwd,
+        env: {
+          ...environment,
+          RUNWAY_CACHE_R2_ACCESS_KEY_ID: "access-key",
+          RUNWAY_CACHE_R2_SECRET_ACCESS_KEY: "secret-key",
+        },
+      },
+      {
+        client: () => cloudflare(),
+        repository: repositoryFixture,
+        reachable: async () => {},
+        stack: (value) => {
+          manifest = value;
+          return new MemoryStack();
+        },
+      },
+    );
+    expect(manifest!.secretNames).toEqual(
+      expect.arrayContaining([
+        "RUNWAY_CACHE_R2_ACCESS_KEY_ID",
+        "RUNWAY_CACHE_R2_SECRET_ACCESS_KEY",
+      ]),
+    );
+
+    await expect(
+      deployWithAdapters(
+        registry,
+        {
+          cwd: project.cwd,
+          env: { ...environment, RUNWAY_CACHE_R2_ACCESS_KEY_ID: "access-key" },
+        },
+        {
+          client: () => cloudflare(),
+          repository: repositoryFixture,
+          reachable: async () => {},
+          stack: () => new MemoryStack(),
+        },
+      ),
+    ).rejects.toThrow("RUNWAY_CACHE_R2_SECRET_ACCESS_KEY");
+  } finally {
+    await project.cleanup();
+  }
+});
+
 test("deploy emits final progress only after Stack verification", async () => {
   const project = await writeProject();
   const progress: ProgressEvent[] = [];

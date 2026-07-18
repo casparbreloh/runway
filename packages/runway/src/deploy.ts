@@ -9,6 +9,9 @@ import { cronsOf, secretNamesOf, type Registry } from "./internal/deploy/registr
 import { waitForRollout } from "./internal/deploy/rollout.ts";
 import { createGitHubProvider, type GitHubProvider } from "./internal/github/provider.ts";
 import {
+  CACHE_R2_ACCESS_KEY_ID_BINDING,
+  CACHE_R2_SECRET_ACCESS_KEY_BINDING,
+  CACHE_SECRET_BINDINGS,
   GITHUB_APP_ID_BINDING,
   GITHUB_PRIVATE_KEY_BINDING,
   GITHUB_WEBHOOK_SECRET_BINDING,
@@ -202,6 +205,27 @@ export const deployWithAdapters = async (
   const webhookSecret = env[GITHUB_WEBHOOK_SECRET_BINDING];
   if (hasGitHubTrigger && webhookSecret) {
     secretBindings[GITHUB_WEBHOOK_SECRET_BINDING] = webhookSecret;
+  }
+  const cacheConfigured = CACHE_SECRET_BINDINGS.some(
+    (name) => env[name] !== undefined || remoteSecrets.has(name),
+  );
+  if (
+    cacheConfigured &&
+    !env[CACHE_R2_ACCESS_KEY_ID_BINDING] &&
+    !remoteSecrets.has(CACHE_R2_ACCESS_KEY_ID_BINDING)
+  ) {
+    throw new Error(`missing Runway cache binding: ${CACHE_R2_ACCESS_KEY_ID_BINDING}`);
+  }
+  if (
+    cacheConfigured &&
+    !env[CACHE_R2_SECRET_ACCESS_KEY_BINDING] &&
+    !remoteSecrets.has(CACHE_R2_SECRET_ACCESS_KEY_BINDING)
+  ) {
+    throw new Error(`missing Runway cache binding: ${CACHE_R2_SECRET_ACCESS_KEY_BINDING}`);
+  }
+  for (const name of CACHE_SECRET_BINDINGS) {
+    const value = env[name];
+    if (value) secretBindings[name] = value;
   }
   const snapshotKeyAvailable = remoteSecrets.has(SECRET_SNAPSHOT_KEY_BINDING);
   const deployment = await buildDeployment(registry, {
