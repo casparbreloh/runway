@@ -2,7 +2,7 @@
 
 Runway is a TypeScript-first authoring layer over a language-neutral workflow and repository-runner
 foundation on Cloudflare. Author workflows with
-`workflow({ id, secrets?, trigger }).run(async (run, event) => { ... })`, export them from
+`workflow({ id, secrets?, tools?, trigger }).run(async (step, event) => { ... })`, export them from
 `.runway/workflows/**/*.ts`, and deploy them with `runway deploy`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox, cache transport, credentials,
@@ -19,20 +19,22 @@ For the domain vocabulary see [`CONTEXT.md`](CONTEXT.md). For direction and non-
 
 ```ts
 // .runway/workflows/hello.ts
-import { cron, workflow } from "runway";
+import { cron, mise, workflow } from "runway";
 
 export default workflow({
   id: "hello",
+  tools: mise(),
   trigger: () => cron("0 9 * * *"),
-}).run(async (run, event) => {
-  await run.cache("runtime", {
-    key: { files: ["runtime.lock"] },
-    path: "/cache/runtime",
+}).run(async (step, event) => {
+  await step.cache("runtime", {
+    key: { prefix: "runtime-linux-", files: ["runtime.lock"] },
+    restoreKeys: ["runtime-linux-"],
+    paths: ["/cache/runtime", ".runtime"],
   });
-  const greeting = await run.do("greet", () => "hello");
-  await run.exec("check", "./scripts/check");
-  await run.sleep("wait", 5000);
-  await run.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
+  const greeting = await step.do("greet", () => "hello");
+  await step.exec("check", "./scripts/check");
+  await step.sleep("wait", 5000);
+  await step.do("finish", () => `${greeting} world at ${event.scheduledTime}`);
 });
 ```
 
@@ -40,7 +42,7 @@ Default exports, named exports, and barrel re-exports are supported. The run cal
 typed trigger event and one flat author surface:
 
 ```ts
-interface Run<Secrets extends string = string> {
+interface Step<Secrets extends string = string> {
   readonly runId: string;
   readonly secrets: { readonly [Name in Secrets]: string };
   do<T>(id: string, work: () => T | Promise<T>): Promise<T>;
@@ -50,13 +52,13 @@ interface Run<Secrets extends string = string> {
 }
 ```
 
-Use `run.do()` for replayable work, `run.exec()` for managed commands, `run.cache()` for one generic
-filesystem tree, and `run.sleep()` for durable waits. Give every operation a stable 1–128 UTF-8 byte
+Use `step.do()` for replayable work, `step.exec()` for managed commands, `step.cache()` for generic
+filesystem trees, and `step.sleep()` for durable waits. Give every operation a stable 1–128 UTF-8 byte
 id that does not begin with `runway:`. Durable operation bodies must be idempotent and return
 JSON-serializable values.
 
 ```ts
-await run.exec("check", {
+await step.exec("check", {
   command: "./scripts/check",
   cwd: "packages/app",
   env: { MODE: "ci" },
@@ -81,19 +83,46 @@ Runway can reconstruct the same Source. Once a command has started or may have s
 placement loss fails the run instead of replaying possible filesystem or external side effects.
 Caches do not change this rule and are not workspace checkpoints.
 
-## Generic Cache
+## Tools And Generic Cache
 
-`run.cache()` declares one caller-named tree before command execution:
+Mise is the common-case provider. It discovers repository configuration by default, or accepts a
+small inline tool map. Its pinned mise binary, installed tools, shims, and required runtime files are
+cached automatically:
 
 ```ts
-const result = await run.cache("compiler-state", {
-  key: { files: ["compiler.lock", "project.json"], salt: "v1" },
-  path: "/cache/compiler-state",
-  budget: {
-    maxBytes: 1024 * 1024 * 1024,
-    maxDurationMs: 5 * 60_000,
-    maxEstimatedCostUsd: 0.02,
-  },
+tools: mise();
+tools: mise({ node: "26.5.0", pnpm: "11.5.0" });
+```
+
+Providers are ordered, so a workflow can mix mise with a native release or a provider built with
+`defineToolProvider()`:
+
+```ts
+workflow({
+  id: "check",
+  tools: [
+    mise(),
+    release({
+      name: "aube",
+      version: "1.2.3",
+      url: "https://example.com/aube-1.2.3-linux-amd64.tar.gz",
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+      executable: "aube",
+    }),
+  ],
+  trigger: () => cron("0 9 * * *"),
+}).run(async (step) => {
+  await step.exec("check", "aube check");
+});
+```
+
+`step.cache()` declares caller-owned trees before command execution:
+
+```ts
+const result = await step.cache("compiler-state", {
+  key: { prefix: "compiler-linux-", files: ["compiler.lock", "project.json"] },
+  restoreKeys: ["compiler-linux-"],
+  paths: ["/cache/compiler-state", ".compiler"],
 });
 ```
 
@@ -130,7 +159,7 @@ Triggers are explicit; there is no default public start endpoint.
 - `.filter(typeGuard)` narrows and gates a trigger event after validation.
 
 Declare every workflow secret, including webhook signing secrets. In `trigger(ctx)`,
-`ctx.secrets.X` is a branded name reference; in the run callback, `run.secrets.X` is the captured
+`ctx.secrets.X` is a branded name reference; in the run callback, `step.secrets.X` is the captured
 runtime string. Deploy fails before upload when a declared secret is missing.
 
 GitHub triggers use internal `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and
@@ -146,9 +175,11 @@ namespaces, schedules, routes, bindings, secret names, workers.dev state, and ex
 objects. Sync and removal re-inventory the provider and fail closed on drift. Unknown state and shared
 objects are preserved.
 
-The account artifact bucket is private and shared; Stack removal must preserve it and any object not
-claimed by exact ownership evidence. The developer app and Worker/Workflow resource name is exactly
-`runway`, not `runway-ci` or `runway-monorepo`. Its deployed digest-pinned linux/amd64 Sandbox uses
+The private `runway-data` and `runway-state` buckets are shared by the account; Stack removal must
+preserve them and any object not claimed by exact ownership evidence. A deployment name is derived
+from the Git repository: `runway` for this repository and `runway-<repository>` otherwise. Its
+Worker, Dynamic Workflow, and container use that exact name. Cloudflare derives its Durable Object
+namespace names from the Worker and class names. The digest-pinned linux/amd64 Sandbox uses
 `standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
 
 ```sh
@@ -157,8 +188,8 @@ runway deploy
 ```
 
 In CI, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
-with `runway secrets set NAME ...`. Set `RUNWAY_SCRIPT_NAME=runway` when explicit naming is required;
-this repository also declares `"runway": { "name": "runway" }` in `package.json`.
+with `runway secrets set NAME ...`. Deployment identity cannot be configured through `package.json`
+or environment variables.
 
 ## GitHub App Setup
 
@@ -177,8 +208,8 @@ runway deploy
 ## Development Status
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows are
-ordinary Runway consumers. They explicitly own this repository's Node/pnpm setup through generic
-exec calls; those ecosystem details do not enter foundation source.
+ordinary Runway consumers. They use the mise provider for Node and pnpm; provider-owned tool caches
+remain adapters over the same generic cache foundation.
 
 At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
 integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
@@ -186,13 +217,10 @@ P50/P95 of 96s/105s, with no cache operations. The earlier whole-tree cache expe
 2m23s/3m25s cold and 3m28s/4m14s warm, plus about $0.013 of cache work per warm run, so it was
 removed rather than abstracted into the foundation.
 
-The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`. The legacy
-`runway-monorepo` Worker, Workflow, container, Durable Object namespaces, public bootstrap bucket,
-and migration receipt are deleted. The private shared artifact bucket and unclaimed objects remain.
+The exact `runway` Stack runs the digest-pinned linux/amd64 Sandbox on `standard-4`.
 
-Runway's Check/Test cutover removed the duplicate GitHub Actions workflow only after an earlier live
-evidence gate. Do not restore a `.github/workflows` fallback without a new explicit migration and
-evidence gate.
+Runway's Check/Test workflows are the only repository CI. Do not add a duplicate GitHub Actions
+fallback.
 
 ## Scope
 
@@ -201,7 +229,7 @@ run-bound Sandbox execution, one Terminal authority, generic cache identity/rest
 Meter quantities, immutable workflow artifacts, GitHub delivery and Checks coordination, and exact
 Stack ownership/reconciliation.
 
-Still intentionally deferred: comparative release benchmarking, tool-native cache adapters, and final
+Still intentionally deferred: comparative release benchmarking, ecosystem-specific application cache adapters, and final
 publication. Cloudflare Artifacts is a future evidence-gated Source implementation only; it is not the
 cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are later consumers.
 

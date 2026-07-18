@@ -1,21 +1,22 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-import type { PreparedCache } from "./cache.ts";
-import { failureDiagnosticOf } from "./diagnostic.ts";
-import type { FailureDiagnostic } from "./diagnostic.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "./meter.ts";
-import { createRouter } from "./router.ts";
-import { makeRun, secretsOf } from "./run.ts";
-import type { Run } from "./run.ts";
-import type { RuntimeBinding } from "./runtime-binding.ts";
-import { SANDBOX_CAPACITY } from "./sandbox-config.ts";
-import { ExecTimeoutError, RunLostError, Sandbox } from "./sandbox.ts";
-import { source } from "./source.ts";
-import type { SourceIdentity } from "./source.ts";
-import { Terminal, TerminalError } from "./terminal.ts";
-import type { Finalization, TerminalRecord, TerminalState } from "./terminal.ts";
-import { RUNTIME_BINDING } from "./worker-contract.ts";
+import type { PreparedCache } from "./internal/cache/cache.ts";
+import { CLOUDFLARE_PRICE_TABLE, Meter } from "./internal/meter.ts";
+import type { RuntimeBinding } from "./internal/runtime/binding.ts";
+import { RUNTIME_BINDING } from "./internal/runtime/contract.ts";
+import { failureDiagnosticOf } from "./internal/runtime/diagnostic.ts";
+import type { FailureDiagnostic } from "./internal/runtime/diagnostic.ts";
+import { createRouter } from "./internal/runtime/router.ts";
+import { SANDBOX_CAPACITY } from "./internal/sandbox/config.ts";
+import { ExecTimeoutError, RunLostError, Sandbox } from "./internal/sandbox/sandbox.ts";
+import { source } from "./internal/source/source.ts";
+import type { SourceIdentity } from "./internal/source/source.ts";
+import { Terminal, TerminalError } from "./internal/terminal.ts";
+import type { Finalization, TerminalRecord, TerminalState } from "./internal/terminal.ts";
+import { withTools } from "./internal/tool.ts";
+import { makeStep, secretsOf } from "./step.ts";
+import type { Step } from "./step.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
 
 const SECRET_SNAPSHOT_STEP = "runway:secret-snapshot";
@@ -57,7 +58,9 @@ const cachePublicationIdentity = async (
       typeof key === "string" ? "string" : "files",
       ...(typeof key === "string"
         ? [key]
-        : [key.salt ?? "", String(key.files.length), ...key.files]),
+        : [key.prefix ?? "", String(key.files.length), ...key.files]),
+      String(pending.declaration.restoreKeys?.length ?? 0),
+      ...(pending.declaration.restoreKeys ?? []),
       pending.declaration.path,
       pending.declaration.budget?.maxBytes === undefined
         ? "maxBytes:unset"
@@ -72,6 +75,7 @@ const cachePublicationIdentity = async (
       pending.revision.declarationDigest,
       pending.revision.etag ?? "etag:missing",
       String(pending.revision.generation),
+      pending.revision.key,
       pending.revision.keyDigest,
       pending.revision.platformDigest,
       pending.revision.ref,
@@ -109,12 +113,12 @@ type DynamicWorkerEnv = Record<string, unknown> & {
   [RUNTIME_BINDING]?: RuntimeBinding;
 };
 
-interface RunRuntime extends Pick<Run, "do" | "exec" | "cache" | "sleep"> {
+interface StepRuntime extends Pick<Step, "do" | "exec" | "cache" | "sleep"> {
   cleanup(): Promise<void>;
   finish(finalization: Finalization): Promise<void>;
 }
 
-const makeRunRuntime = (
+const makeStepRuntime = (
   step: WorkflowStep,
   binding: RuntimeBinding,
   runId: string,
@@ -122,7 +126,7 @@ const makeRunRuntime = (
   identity: SourceIdentity,
   terminal: Terminal,
   meter: Meter,
-): RunRuntime => {
+): StepRuntime => {
   let preparedCaches: readonly PreparedCache[] = [];
   const exactSource = source(identity, {
     prepare: async (requested, options) =>
@@ -135,6 +139,8 @@ const makeRunRuntime = (
     placement: {
       cache: async ({ secrets: _secrets, ...request }) =>
         await binding.restoreCache({ ...request, secrets }),
+      discardCaches: async ({ secrets: _secrets, ...request }) =>
+        await binding.discardCaches({ ...request, secrets }),
       quiesce: async () => await binding.quiesce(runId, secrets),
       prepareCaches: async ({ secrets: _secrets, ...request }) =>
         await binding.prepareCaches({ ...request, secrets }),
@@ -176,7 +182,7 @@ const makeRunRuntime = (
     terminal,
     meter,
   });
-  const operations: Pick<Run, "do" | "exec" | "cache" | "sleep"> = {
+  const operations: Pick<Step, "do" | "exec" | "cache" | "sleep"> = {
     do: <T>(id: string, work: () => T | Promise<T>): Promise<T> =>
       measuredWorkflowStep(
         meter,
@@ -250,35 +256,33 @@ const makeRunRuntime = (
         },
         command,
       ),
-    cache: (id, declaration) =>
-      sandbox.cache(
-        {
-          id,
-          run: async (digest, work) => {
-            const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-              step.do(
-                id,
-                { retries: { limit: 5, delay: 0 } },
-                async () => ({ digest, record: await work() }) as never,
-              ),
-            );
-            if (
-              !recorded ||
-              typeof recorded !== "object" ||
-              Array.isArray(recorded) ||
-              Object.keys(recorded).sort().join(",") !== "digest,record" ||
-              typeof (recorded as { digest?: unknown }).digest !== "string"
-            ) {
-              throw new Error("invalid durable cache evidence");
-            }
-            return recorded as {
-              readonly digest: string;
-              readonly record: Awaited<ReturnType<typeof work>>;
-            };
-          },
+    cache: async (id, declaration) => {
+      return await sandbox.cacheSet(id, declaration, (treeId) => ({
+        id: treeId,
+        run: async (digest, work) => {
+          const recorded: unknown = await measuredWorkflowStep(meter, async () =>
+            step.do(
+              treeId,
+              { retries: { limit: 5, delay: 0 } },
+              async () => ({ digest, record: await work() }) as never,
+            ),
+          );
+          if (
+            !recorded ||
+            typeof recorded !== "object" ||
+            Array.isArray(recorded) ||
+            Object.keys(recorded).sort().join(",") !== "digest,record" ||
+            typeof (recorded as { digest?: unknown }).digest !== "string"
+          ) {
+            throw new Error("invalid durable cache evidence");
+          }
+          return recorded as {
+            readonly digest: string;
+            readonly record: Awaited<ReturnType<typeof work>>;
+          };
         },
-        declaration,
-      ),
+      }));
+    },
     sleep: (id: string, durationMs: number): Promise<void> =>
       measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
   };
@@ -403,7 +407,7 @@ export const toEntrypoint = (
         await terminal.publish(await terminal.claim("failure"));
         throw error;
       }
-      const runtime = makeRunRuntime(
+      const runtime = makeStepRuntime(
         step,
         binding,
         event.instanceId,
@@ -417,10 +421,13 @@ export const toEntrypoint = (
       let failure: unknown;
       try {
         result = await def.run(
-          makeRun(runtime, {
-            runId: event.instanceId,
-            secrets,
-          }),
+          makeStep(
+            { ...runtime, ...withTools(runtime, def.tools) },
+            {
+              runId: event.instanceId,
+              secrets,
+            },
+          ),
           event.payload,
         );
       } catch (error) {

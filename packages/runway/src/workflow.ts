@@ -1,8 +1,8 @@
-import type { GitHubTrigger } from "./github.ts";
-import type { Run } from "./run.ts";
-import { secretNameOf, secretRef, type SecretRef } from "./secrets.ts";
+import { secretNameOf, secretRef, type SecretRef } from "./secret.ts";
+import type { Step } from "./step.ts";
+import { toolProviders, type ToolProvider, type Tools } from "./tools.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type { CronTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
+import type { CronTrigger, GitHubTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
 
 export type TriggerContext<S extends string> = {
   readonly secrets: { readonly [K in S]: SecretRef<K> };
@@ -15,7 +15,8 @@ export interface WorkflowDefinition {
   readonly id: string;
   readonly trigger: WorkflowTrigger;
   readonly secrets: ReadonlyArray<string>;
-  readonly run: (run: Run, event: unknown) => void | Promise<void>;
+  readonly tools?: readonly ToolProvider[];
+  readonly run: (step: Step, event: unknown) => void | Promise<void>;
 }
 
 const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -44,12 +45,14 @@ export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): voi
 export function workflow<const S extends readonly string[] = readonly [], E = unknown>(opts: {
   id: string;
   secrets?: S;
+  tools?: Tools;
   trigger: (ctx: TriggerContext<S[number]>) => Trigger<E>;
 }): {
-  run(fn: (run: Run<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
+  run(fn: (run: Step<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
 } {
   validateWorkflowId(opts.id);
   validateSecrets(opts.secrets);
+  const tools = toolProviders(opts.tools);
   const secrets: ReadonlyArray<string> = opts.secrets ?? [];
   const context = {
     secrets: Object.fromEntries(secrets.map((name) => [name, secretRef(name)])),
@@ -67,6 +70,7 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
       id: opts.id,
       trigger,
       secrets,
+      ...(tools.length > 0 ? { tools } : {}),
       run: fn as unknown as WorkflowDefinition["run"],
     }),
   };

@@ -1,11 +1,16 @@
 import { expect, test } from "vitest";
 
-import { Meter } from "../src/meter.ts";
-import { makeRun } from "../src/run.ts";
-import { RunLostError, Sandbox, type DurableCache, type DurableStep } from "../src/sandbox.ts";
-import { source } from "../src/source.ts";
-import { Terminal } from "../src/terminal.ts";
-import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
+import { Meter } from "../src/internal/meter.ts";
+import {
+  RunLostError,
+  Sandbox,
+  type DurableCache,
+  type DurableStep,
+} from "../src/internal/sandbox/sandbox.ts";
+import { source } from "../src/internal/source/source.ts";
+import { Terminal } from "../src/internal/terminal.ts";
+import type { TerminalRecord, TerminalState } from "../src/internal/terminal.ts";
+import { makeStep } from "../src/step.ts";
 
 const durable = (id: string, events?: string[]) => ({
   id,
@@ -215,8 +220,14 @@ const durableCache = (id: string): DurableCache => ({
 
 const cacheSandbox = (options: {
   readonly cache?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["cache"]>;
+  readonly discardCaches?: NonNullable<
+    ConstructorParameters<typeof Sandbox>[0]["placement"]["discardCaches"]
+  >;
   readonly destroy?: () => void;
   readonly exec?: NonNullable<ConstructorParameters<typeof Sandbox>[0]["placement"]["exec"]>;
+  readonly prepareCaches?: NonNullable<
+    ConstructorParameters<typeof Sandbox>[0]["placement"]["prepareCaches"]
+  >;
   readonly terminal?: Terminal;
 }) => {
   const revision = "e".repeat(40);
@@ -234,6 +245,8 @@ const cacheSandbox = (options: {
     ),
     placement: {
       ...(options.cache ? { cache: options.cache } : {}),
+      ...(options.discardCaches ? { discardCaches: options.discardCaches } : {}),
+      ...(options.prepareCaches ? { prepareCaches: options.prepareCaches } : {}),
       exec: options.exec ?? (async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 })),
       destroy: async () => options.destroy?.(),
     },
@@ -289,6 +302,53 @@ test("an unavailable cache placement is an advisory miss", async () => {
   ).resolves.toEqual({ state: "miss", reason: "unavailable" });
 });
 
+test("cache sets retain only the trees needed for publication", async () => {
+  const exact = { state: "hit", bytes: 12, key: "v1", match: "exact" } as const;
+  const scenarios = [
+    { results: [exact], prepared: 0, discarded: [] },
+    { results: [exact, exact], prepared: 2, discarded: [] },
+    {
+      results: [{ ...exact, key: "v0", match: "restore" as const }],
+      prepared: 1,
+      discarded: [],
+    },
+    {
+      results: [exact, { state: "miss", reason: "absent" } as const],
+      prepared: 2,
+      discarded: ["/cache/0"],
+    },
+  ];
+  for (const scenario of scenarios) {
+    let result = 0;
+    let prepared = 0;
+    const discarded: string[] = [];
+    const sandbox = cacheSandbox({
+      cache: async ({ id }) => ({
+        result: scenario.results[result++]!,
+        pending: { schema: 1, id } as never,
+      }),
+      discardCaches: async ({ paths }) => {
+        discarded.push(...paths);
+      },
+      prepareCaches: async ({ pending }) => {
+        prepared = pending.length;
+        return [];
+      },
+    });
+    const paths = scenario.results.map((_, index) => `/cache/${index}`);
+    await sandbox.cacheSet(
+      "tree",
+      { key: "v1", restoreKeys: ["v"], paths: [paths[0]!, ...paths.slice(1)] },
+      durableCache,
+    );
+    await sandbox.prepare();
+    expect({ prepared, discarded }).toEqual({
+      prepared: scenario.prepared,
+      discarded: scenario.discarded,
+    });
+  }
+});
+
 test("cache declarations are canonical, retryable, disjoint, safe, and ordered before exec", async () => {
   const stored = new Map<
     string,
@@ -318,7 +378,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
 
   await expect(
     sandbox.cache(recorded("one"), {
-      key: { files: ["inputs/a", "inputs/b"], salt: "v1" },
+      key: { files: ["inputs/a", "inputs/b"], prefix: "v1" },
       path: "./trees/one",
       budget: { maxDurationMs: 10, maxBytes: 20 },
     }),
@@ -327,7 +387,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
     sandbox.cache(recorded("one"), {
       path: "/workspace/trees/one",
       budget: { maxBytes: 20, maxDurationMs: 10 },
-      key: { salt: "v1", files: ["inputs/a", "inputs/b"] },
+      key: { prefix: "v1", files: ["inputs/a", "inputs/b"] },
     }),
   ).resolves.toMatchObject({ state: "miss" });
   await expect(
@@ -345,7 +405,7 @@ test("cache declarations are canonical, retryable, disjoint, safe, and ordered b
     ".runway/state",
   ]) {
     await expect(sandbox.cache(recorded(`unsafe-${path}`), { key: "v1", path })).rejects.toThrow(
-      "invalid cache declaration",
+      "invalid cache target",
     );
   }
   await sandbox.exec(durable("execute"), "execute");
@@ -950,7 +1010,7 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
       },
     },
   });
-  const run = makeRun(
+  const run = makeStep(
     {
       do: async (_id, work) => await work(),
       exec: async (id, command) =>
@@ -965,7 +1025,8 @@ test("do and sleep allocate no placement and cleanup destroys a lazy command pla
                 ...command,
               },
         ),
-      cache: async (id, declaration) => await sandbox.cache(durableCache(id), declaration),
+      cache: async (id, declaration) =>
+        await sandbox.cache(durableCache(id), { ...declaration, path: declaration.paths[0] }),
       sleep: async () => {},
     },
     { runId: "run-1", secrets: {} },

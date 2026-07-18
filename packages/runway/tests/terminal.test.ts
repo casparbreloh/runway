@@ -1,8 +1,8 @@
 import { expect, test } from "vitest";
 
-import { Meter } from "../src/meter.ts";
-import { Terminal } from "../src/terminal.ts";
-import type { TerminalRecord, TerminalState } from "../src/terminal.ts";
+import { Meter } from "../src/internal/meter.ts";
+import { Terminal } from "../src/internal/terminal.ts";
+import type { TerminalRecord, TerminalState } from "../src/internal/terminal.ts";
 
 const identity = {
   accountId: "account-1",

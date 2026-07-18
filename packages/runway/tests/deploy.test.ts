@@ -9,11 +9,16 @@ import { expect, test } from "vitest";
 
 import { deployWithAdapters } from "../src/deploy.ts";
 import type { CloudflareApi, ProgressEvent } from "../src/deploy.ts";
-import type { Registry } from "../src/registry.ts";
-import type { RepositorySource } from "../src/repository-source.ts";
-import { assertRepositorySourceReachable } from "../src/repository-source.ts";
-import type { StackControl, StackManifest, StackReceipt, StackResource } from "../src/stack.ts";
-import { authenticatedRepositoryFixture, repositoryFixture } from "./repository-fixture.ts";
+import type { Registry } from "../src/internal/deploy/registry.ts";
+import type { RepositorySource } from "../src/internal/source/repository.ts";
+import { assertRepositorySourceReachable } from "../src/internal/source/repository.ts";
+import type {
+  StackControl,
+  StackManifest,
+  StackReceipt,
+  StackResource,
+} from "../src/internal/stack/stack.ts";
+import { authenticatedRepositoryFixture, repositoryFixture } from "./support/repository.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,15 +58,12 @@ const githubRegistry: Registry = [
 const moduleOf = (name: string, definition: WorkflowDefinition): string =>
   `export ${name === "default" ? "default" : `const ${name} =`} { ...${JSON.stringify({ ...definition, run: undefined })}, run: async () => {} };\n`;
 
-const writeProject = async (runwayName?: string) => {
+const writeProject = async (packageJson: object = { name: "ship-it" }) => {
   const cwd = await mkdtemp(
     path.join(path.resolve(import.meta.dirname, ".."), ".tmp-deploy-test-"),
   );
   await mkdir(path.join(cwd, ".runway", "workflows"), { recursive: true });
-  await writeFile(
-    path.join(cwd, "package.json"),
-    JSON.stringify({ name: "ship-it", ...(runwayName ? { runway: { name: runwayName } } : {}) }),
-  );
+  await writeFile(path.join(cwd, "package.json"), JSON.stringify(packageJson));
   for (const item of [...registry, ...githubRegistry]) {
     await writeFile(path.join(cwd, item.path), moduleOf(item.exportName, item.def));
   }
@@ -202,7 +204,10 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
       { cwd: project.cwd, env: environment },
       {
         client: () => cloudflare(),
-        repository: repositoryFixture,
+        repository: {
+          ...repositoryFixture,
+          remote: "https://github.com/casparbreloh/ship-it",
+        },
         reachable: async () => {},
         stack: (value) => {
           manifest = value;
@@ -212,13 +217,14 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
     );
 
     expect(stack.applied).toBe(1);
-    expect(result.script).toBe("runway-ship-it");
+    expect(result.name).toBe("runway-ship-it");
     expect(result.urls).toEqual([
       { id: "hello", url: "https://runway-ship-it.example.workers.dev/hello" },
     ]);
     expect(manifest).toMatchObject({
       owner: { name: "runway-ship-it" },
       container: {
+        name: "runway-ship-it",
         image:
           "docker.io/cloudflare/sandbox@sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
         imageDigest: "sha256:23f67e16131b780865a5fa5aa3c8607408a730105c248836409f4e02bb6bf042",
@@ -226,46 +232,42 @@ test("deploy builds and syncs one exact digest-pinned Stack", async () => {
         instanceType: "standard-4",
       },
       schedules: ["0 9 * * *"],
+      namespaces: expect.arrayContaining([
+        expect.objectContaining({ name: "runway-ship-it_RunwayGitHubCoordinator" }),
+        expect.objectContaining({ name: "runway-ship-it_Sandbox" }),
+      ]),
     });
-    expect(manifest!.buckets.map(({ name }) => name)).toEqual([
-      "runway-account",
-      "runway-state-account",
-    ]);
+    expect(manifest!.buckets.map(({ name }) => name)).toEqual(["runway-data", "runway-state"]);
   } finally {
     await project.cleanup();
   }
 });
 
-test("repository config selects exact runway identity while explicit override still wins", async () => {
-  const project = await writeProject("runway");
+test("package metadata and environment variables cannot configure deployment identity", async () => {
+  const project = await writeProject({
+    name: "unrelated-package-name",
+    runway: { name: "ignored-package-configuration" },
+  });
   try {
-    const configured = new MemoryStack();
+    const manifests: StackManifest[] = [];
+    const stack = new MemoryStack();
     await expect(
       deployWithAdapters(
         registry,
-        { cwd: project.cwd, env: environment },
+        { cwd: project.cwd, env: { ...environment, RUNWAY_NAME: "runway-ignored" } },
         {
           client: () => cloudflare(),
           repository: repositoryFixture,
           reachable: async () => {},
-          stack: () => configured,
+          stack: (manifest) => {
+            manifests.push(manifest);
+            return stack;
+          },
         },
       ),
-    ).resolves.toMatchObject({ script: "runway" });
+    ).resolves.toMatchObject({ name: "runway" });
 
-    const overridden = new MemoryStack();
-    await expect(
-      deployWithAdapters(
-        registry,
-        { cwd: project.cwd, env: { ...environment, RUNWAY_SCRIPT_NAME: "another-stack" } },
-        {
-          client: () => cloudflare(),
-          repository: repositoryFixture,
-          reachable: async () => {},
-          stack: () => overridden,
-        },
-      ),
-    ).resolves.toMatchObject({ script: "another-stack" });
+    expect(manifests).toHaveLength(1);
   } finally {
     await project.cleanup();
   }
@@ -353,6 +355,57 @@ test("deploy validates required and reserved secrets before Stack state or provi
       ),
     ).rejects.toThrow("used by Runway GitHub App binding");
     expect(stack.applied).toBe(0);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("deploy binds complete cache transport credentials and rejects partial configuration", async () => {
+  const project = await writeProject();
+  let manifest: StackManifest | undefined;
+  try {
+    await deployWithAdapters(
+      registry,
+      {
+        cwd: project.cwd,
+        env: {
+          ...environment,
+          RUNWAY_CACHE_R2_ACCESS_KEY_ID: "access-key",
+          RUNWAY_CACHE_R2_SECRET_ACCESS_KEY: "secret-key",
+        },
+      },
+      {
+        client: () => cloudflare(),
+        repository: repositoryFixture,
+        reachable: async () => {},
+        stack: (value) => {
+          manifest = value;
+          return new MemoryStack();
+        },
+      },
+    );
+    expect(manifest!.secretNames).toEqual(
+      expect.arrayContaining([
+        "RUNWAY_CACHE_R2_ACCESS_KEY_ID",
+        "RUNWAY_CACHE_R2_SECRET_ACCESS_KEY",
+      ]),
+    );
+
+    await expect(
+      deployWithAdapters(
+        registry,
+        {
+          cwd: project.cwd,
+          env: { ...environment, RUNWAY_CACHE_R2_ACCESS_KEY_ID: "access-key" },
+        },
+        {
+          client: () => cloudflare(),
+          repository: repositoryFixture,
+          reachable: async () => {},
+          stack: () => new MemoryStack(),
+        },
+      ),
+    ).rejects.toThrow("RUNWAY_CACHE_R2_SECRET_ACCESS_KEY");
   } finally {
     await project.cleanup();
   }

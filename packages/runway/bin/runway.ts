@@ -7,10 +7,14 @@ import { toFile } from "cloudflare";
 import pkg from "../package.json" with { type: "json" };
 import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
 import type { ProgressEvent } from "../src/deploy.ts";
-import { resolveScriptName } from "../src/naming.ts";
-import { loadRegistry } from "../src/registry.ts";
-import { setScriptSecret } from "../src/secret-store.ts";
-import { COMPATIBILITY_DATE, isSecretSnapshotKeyBinding } from "../src/worker-contract.ts";
+import { deploymentNameOf } from "../src/internal/deploy/name.ts";
+import { loadRegistry } from "../src/internal/deploy/registry.ts";
+import {
+  COMPATIBILITY_DATE,
+  isSecretSnapshotKeyBinding,
+} from "../src/internal/runtime/contract.ts";
+import { setScriptSecret } from "../src/internal/secret/store.ts";
+import { resolveRepositorySource } from "../src/internal/source/repository.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
 const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
@@ -101,10 +105,7 @@ const runSecrets = async (args: ReadonlyArray<string>): Promise<void> => {
   const [command, ...rest] = args;
   if (command !== "set") throw new Error("usage: runway secrets set <name> <value>");
   const { name, value } = parseSecretsSet(rest);
-  const scriptName = await resolveScriptName({
-    cwd: process.cwd(),
-    env: process.env,
-  });
+  const scriptName = deploymentNameOf(await resolveRepositorySource(process.cwd()));
   const { accountId, cf } = await resolveAuth(
     { cwd: process.cwd(), env: process.env },
     process.env,
@@ -149,7 +150,7 @@ const deploy = defineCommand({
         env: process.env,
         onProgress: (event) => out.event(event),
       });
-      console.log(`Deployed ${registry.length} workflow(s) as ${result.script}`);
+      console.log(`Deployed ${registry.length} workflow(s) as ${result.name}`);
       for (const { id, url } of result.urls) {
         console.log(`  ${id}: POST ${url}`);
       }

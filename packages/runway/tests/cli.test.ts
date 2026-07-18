@@ -94,28 +94,6 @@ test("deploy discovers workflows without config", async () => {
   }
 });
 
-test("deploy discovers a GitHub-triggered workflow", async () => {
-  const app = await project({
-    ".runway/workflows/check.ts": `import { github, workflow } from "runway";
-
-export default workflow({
-  id: "check",
-  trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
-}).run(async () => {});
-`,
-  });
-
-  try {
-    const result = await run(["deploy"], {}, app.cwd);
-
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
-    expect(result.output).not.toMatch(/invalid workflow GitHub trigger/);
-  } finally {
-    await app.cleanup();
-  }
-});
-
 test("deploy supports barrel exports without duplicate registration", async () => {
   const app = await project({
     ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),

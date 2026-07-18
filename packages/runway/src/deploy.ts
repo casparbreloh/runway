@@ -1,35 +1,39 @@
 import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 
-import type { CloudflareApi } from "./cloudflare-api.ts";
-import { waitForDeploymentReadiness } from "./cloudflare/readiness.ts";
+import type { CloudflareApi } from "./internal/cloudflare.ts";
+import { buildDeployment } from "./internal/deploy/artifacts.ts";
+import { resolveAuth } from "./internal/deploy/auth.ts";
+import { deploymentNameOf } from "./internal/deploy/name.ts";
+import { cronsOf, secretNamesOf, type Registry } from "./internal/deploy/registry.ts";
+import { waitForRollout } from "./internal/deploy/rollout.ts";
+import { createGitHubProvider, type GitHubProvider } from "./internal/github/provider.ts";
 import {
-  artifactBucketName,
-  CloudflareStackControl,
-  cloudflareStackManifest,
-  validateBindings,
-} from "./cloudflare/stack.ts";
-import { resolveAuth } from "./deploy-auth.ts";
-import { buildDeployment } from "./deploy-build.ts";
-import { createGitHubProvider, type GitHubProvider } from "./github.ts";
-import { resolveScriptName } from "./naming.ts";
-import { cronsOf, secretNamesOf, type Registry } from "./registry.ts";
+  CACHE_R2_ACCESS_KEY_ID_BINDING,
+  CACHE_R2_SECRET_ACCESS_KEY_BINDING,
+  CACHE_SECRET_BINDINGS,
+  GITHUB_APP_ID_BINDING,
+  GITHUB_PRIVATE_KEY_BINDING,
+  GITHUB_WEBHOOK_SECRET_BINDING,
+  DATA_BUCKET,
+  SECRET_SNAPSHOT_KEY_BINDING,
+  STATE_BUCKET,
+} from "./internal/runtime/contract.ts";
+import { listScriptSecrets } from "./internal/secret/store.ts";
 import {
   assertRepositorySourceReachable,
   resolveRepositorySource,
   type RepositorySource,
-} from "./repository-source.ts";
-import { listScriptSecrets } from "./secret-store.ts";
-import { Stack, type StackControl, type StackManifest } from "./stack.ts";
+} from "./internal/source/repository.ts";
 import {
-  GITHUB_APP_ID_BINDING,
-  GITHUB_PRIVATE_KEY_BINDING,
-  GITHUB_WEBHOOK_SECRET_BINDING,
-  SECRET_SNAPSHOT_KEY_BINDING,
-} from "./worker-contract.ts";
+  CloudflareStackControl,
+  cloudflareStackManifest,
+  validateBindings,
+} from "./internal/stack/cloudflare.ts";
+import { Stack, type StackControl, type StackManifest } from "./internal/stack/stack.ts";
 
-export type { CloudflareApi } from "./cloudflare-api.ts";
-export { resolveAuth } from "./deploy-auth.ts";
+export type { CloudflareApi } from "./internal/cloudflare.ts";
+export { resolveAuth } from "./internal/deploy/auth.ts";
 
 export interface ProgressEvent {
   readonly step: "load" | "build" | "deploy";
@@ -44,12 +48,14 @@ interface DeployContext {
 }
 
 interface DeployOutput {
-  readonly script: string;
+  readonly name: string;
   readonly artifactVersions: ReadonlyArray<string>;
   readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
+  readonly remove: () => Promise<void>;
 }
 
 interface DeployAdapters {
+  readonly deploymentName?: string;
   readonly client?: (opts: { apiToken: string }) => CloudflareApi;
   readonly repository?: RepositorySource;
   readonly reachable?: (repository: RepositorySource) => Promise<void>;
@@ -93,7 +99,7 @@ const waitUntilReady = async (opts: {
   readonly scriptName: string;
   readonly deploymentId: string;
 }): Promise<void> =>
-  await waitForDeploymentReadiness({
+  await waitForRollout({
     fetch: globalThis.fetch,
     wait: (durationMs) => new Promise((resolve) => setTimeout(resolve, durationMs)),
     ...opts,
@@ -106,12 +112,13 @@ export const deployWithAdapters = async (
 ): Promise<DeployOutput> => {
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
-  const scriptName = await resolveScriptName({ cwd: opts.cwd, env });
+  let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
+  const deploymentName = adapters.deploymentName ?? deploymentNameOf(repository);
   const { accountId, cf } = await resolveAuth(
     { ...opts, ...(adapters.client ? { client: adapters.client } : {}) },
     env,
   );
-  const remoteSecrets = await listScriptSecrets(cf, accountId, scriptName);
+  const remoteSecrets = await listScriptSecrets(cf, accountId, deploymentName);
   const missingSecrets = registry.flatMap((w) =>
     w.def.secrets
       .filter((name) => !env[name] && !remoteSecrets.has(name))
@@ -122,7 +129,6 @@ export const deployWithAdapters = async (
   }
 
   validateBindings(secrets);
-  let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
   const hasGitHubTrigger = registry.some(({ def }) => def.trigger.type === "github");
   const appId = env[GITHUB_APP_ID_BINDING];
   const privateKey = env[GITHUB_PRIVATE_KEY_BINDING];
@@ -200,11 +206,32 @@ export const deployWithAdapters = async (
   if (hasGitHubTrigger && webhookSecret) {
     secretBindings[GITHUB_WEBHOOK_SECRET_BINDING] = webhookSecret;
   }
+  const cacheConfigured = CACHE_SECRET_BINDINGS.some(
+    (name) => env[name] !== undefined || remoteSecrets.has(name),
+  );
+  if (
+    cacheConfigured &&
+    !env[CACHE_R2_ACCESS_KEY_ID_BINDING] &&
+    !remoteSecrets.has(CACHE_R2_ACCESS_KEY_ID_BINDING)
+  ) {
+    throw new Error(`missing Runway cache binding: ${CACHE_R2_ACCESS_KEY_ID_BINDING}`);
+  }
+  if (
+    cacheConfigured &&
+    !env[CACHE_R2_SECRET_ACCESS_KEY_BINDING] &&
+    !remoteSecrets.has(CACHE_R2_SECRET_ACCESS_KEY_BINDING)
+  ) {
+    throw new Error(`missing Runway cache binding: ${CACHE_R2_SECRET_ACCESS_KEY_BINDING}`);
+  }
+  for (const name of CACHE_SECRET_BINDINGS) {
+    const value = env[name];
+    if (value) secretBindings[name] = value;
+  }
   const snapshotKeyAvailable = remoteSecrets.has(SECRET_SNAPSHOT_KEY_BINDING);
   const deployment = await buildDeployment(registry, {
     accountId,
     ...opts,
-    scriptName,
+    deploymentName,
     repository,
     snapshotKeyAvailable,
     ...(hasGitHubTrigger && repository.authentication.type === "github"
@@ -225,8 +252,8 @@ export const deployWithAdapters = async (
     });
   }
   opts.onProgress?.({ step: "deploy", status: "start" });
-  const artifacts = artifactBucketName(accountId);
-  const stateBucket = `runway-state-${accountId}`;
+  const dataBucket = DATA_BUCKET;
+  const stateBucket = STATE_BUCKET;
   const repositoryId =
     repository.authentication.type === "github"
       ? `github:${repository.authentication.repository.id}`
@@ -238,12 +265,12 @@ export const deployWithAdapters = async (
   const manifest = cloudflareStackManifest({
     accountId,
     repositoryId,
-    name: scriptName,
+    name: deploymentName,
     deployment,
     schedules: cronsOf(registry),
     secretNames: allSecretNames,
     snapshotKeyBindings,
-    artifactBucket: artifacts,
+    dataBucket,
     stateBucket,
   });
   const control =
@@ -257,13 +284,17 @@ export const deployWithAdapters = async (
       stateBucket,
       ready: adapters.ready ?? waitUntilReady,
     });
-  await new Stack(manifest, control).sync();
+  const stack = new Stack(manifest, control);
+  await stack.sync();
 
   opts.onProgress?.({ step: "deploy", status: "done" });
   return {
-    script: scriptName,
+    name: deploymentName,
     artifactVersions: deployment.artifacts.map(({ artifactVersion }) => artifactVersion),
     urls: control.urls(),
+    remove: async () => {
+      await stack.remove();
+    },
   };
 };
 

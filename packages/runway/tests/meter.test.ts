@@ -6,7 +6,7 @@ import {
   Meter,
   estimate,
   type PriceTable,
-} from "../src/meter.ts";
+} from "../src/internal/meter.ts";
 
 const prices = (id: string, multiplier = 1): PriceTable => ({
   id,

@@ -1,9 +1,12 @@
-export { ExecError } from "./exec-error.ts";
+export { ExecError } from "./step.ts";
 
 export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
+export { mise } from "./mise.ts";
+export { release } from "./release.ts";
+export { defineToolProvider } from "./tools.ts";
 
-export type { SecretRef } from "./secrets.ts";
+export type { SecretRef } from "./secret.ts";
 export type {
   GitHubEventFilter,
   GitHubEventOf,
@@ -15,16 +18,18 @@ export type {
   GitHubPushFilter,
   GitHubRepository,
   GitHubTrigger,
-} from "./github.ts";
+} from "./trigger.ts";
 export type {
-  Budget,
   CacheDeclaration,
   CacheKey,
   CacheResult,
   ExecOptions,
   ExecResult,
-  Run,
-} from "./run.ts";
+  Step,
+} from "./step.ts";
+export type { MiseTools } from "./mise.ts";
+export type { ReleaseOptions } from "./release.ts";
+export type { ToolProvider, Tools } from "./tools.ts";
 export type {
   CronParams,
   CronTrigger,
