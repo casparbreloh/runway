@@ -176,7 +176,7 @@ const objectExists = async (
 ): Promise<boolean> => {
   if (!(await bucketExists(cf, accountId, bucketName))) return false;
   try {
-    await cf.r2.buckets.objects.get(bucketName, objectKey, { account_id: accountId });
+    await cf.r2.buckets.objects.get(objectKey, { account_id: accountId, bucket_name: bucketName });
     return true;
   } catch (error) {
     if (isStatus(error, 404)) return false;
@@ -232,8 +232,9 @@ const instance = async (
   workflowName: string,
   instanceId: string,
 ): Promise<InstanceDetails> =>
-  (await cf.workflows.instances.get(workflowName, instanceId, {
+  (await cf.workflows.instances.get(instanceId, {
     account_id: accountId,
+    workflow_name: workflowName,
   })) as InstanceDetails;
 
 const waitFor = async (
@@ -704,7 +705,7 @@ const run = async (): Promise<void> => {
     }
     try {
       for (const key of createdObjectKeys) {
-        await cf.r2.buckets.objects.delete(bucketName, key, { account_id: accountId });
+        await cf.r2.buckets.objects.delete(key, { account_id: accountId, bucket_name: bucketName });
       }
       if (
         bucketCreated &&

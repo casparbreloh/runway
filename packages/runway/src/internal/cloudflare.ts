@@ -29,9 +29,8 @@ export type CloudflareApi = {
           params: { account_id: string; per_page?: number },
         ): Promise<unknown>;
         get(
-          scriptName: string,
           versionId: string,
-          params: { account_id: string },
+          params: { account_id: string; script_name: string },
         ): Promise<unknown>;
       };
       deployments: {
@@ -114,22 +113,19 @@ export type CloudflareApi = {
       };
       objects: {
         upload(
-          bucketName: string,
           objectKey: string,
           body: Uint8Array,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
           options?: { headers?: Readonly<Record<string, string>> },
         ): Promise<unknown>;
         list(bucketName: string, params: { account_id: string; prefix?: string }): Promise<unknown>;
         get(
-          bucketName: string,
           objectKey: string,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
         ): Promise<unknown>;
         delete(
-          bucketName: string,
           objectKey: string,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
         ): Promise<unknown>;
       };
     };

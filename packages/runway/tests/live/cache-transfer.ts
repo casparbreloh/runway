@@ -62,7 +62,10 @@ const createSmokeContainer = async (
   const versionId = versions[0];
   if (!versionId) throw new Error("smoke Worker has no version");
   const version = resultOf(
-    await cf.workers.scripts.versions.get(scriptName, versionId, { account_id: accountId }),
+    await cf.workers.scripts.versions.get(versionId, {
+      account_id: accountId,
+      script_name: scriptName,
+    }),
   ) as { resources?: { bindings?: readonly Record<string, unknown>[] } } | undefined;
   const binding = version?.resources?.bindings?.find(
     ({ type, name, class_name: className }) =>
@@ -324,7 +327,7 @@ const run = async (): Promise<void> => {
     }
     try {
       for (const key of await objectKeys(cf, accountId, bucket)) {
-        await cf.r2.buckets.objects.delete(bucket, key, { account_id: accountId });
+        await cf.r2.buckets.objects.delete(key, { account_id: accountId, bucket_name: bucket });
       }
       if (bucketIntentOwned) await cf.r2.buckets.delete(bucket, { account_id: accountId });
     } catch (error) {

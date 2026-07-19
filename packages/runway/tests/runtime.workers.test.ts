@@ -234,7 +234,7 @@ test.each([
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     await env.COMMANDS.create({ params });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus(status)).resolves.not.toThrow();
     await expect(testHost.lifecycleEvents()).resolves.toEqual(events);
   } finally {
@@ -248,7 +248,7 @@ test("runtime publishes only bounded redacted ExecError tails", async () => {
     await env.COMMANDS.create({
       params: { commands: ["diagnostic-stress https://command.example sandbox-secret"] },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     const diagnostics = await testHost.diagnostics();
     expect(diagnostics).toHaveLength(1);
@@ -279,7 +279,7 @@ test("runtime never transports arbitrary thrown failures as diagnostics", async 
         throwMessage: "arbitrary-secret https://arbitrary.example command",
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     expect(await testHost.diagnostics()).toEqual([null]);
   } finally {
@@ -291,7 +291,7 @@ test("the runtime durably records success after cleanup and before publication",
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     await expect(
@@ -319,7 +319,7 @@ test("cleanup failure durably wins failure before any terminal publication", asy
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     await env.COMMANDS.create({ params: { commands: ["true"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     await expect(
       instance!.waitForStepResult({ name: "runway:terminal-claim" }),
@@ -354,7 +354,7 @@ test.each([
     const introspector = await introspectWorkflow(env.COMMANDS);
     try {
       const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
-      const [instance] = introspector.get();
+      const [instance] = await introspector.get();
       await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
       await expect(testHost.lifecycleEvents()).resolves.toEqual([
         "lifecycle:in_progress",
@@ -1445,7 +1445,7 @@ test("a signed webhook runs a durable workflow in the Workers runtime", async ()
     const payload = (await response.json()) as {
       runs: [{ id: string; workflow: string }];
     };
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     expect(response.status).toBe(202);
     expect(payload.runs[0]?.workflow).toBe("issue-created");
@@ -1570,7 +1570,7 @@ test("a webhook filtered out by its trigger starts no workflow", async () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ skipped: true });
-    expect(introspector.get()).toEqual([]);
+    expect(await introspector.get()).toEqual([]);
   } finally {
     await introspector.dispose();
   }
@@ -1580,7 +1580,7 @@ test("a scheduled event runs its matching durable workflow", async () => {
   const introspector = await introspectWorkflow(env.DAILY);
   try {
     await worker.scheduled({ cron: "0 9 * * *", scheduledTime: 42 }, env, createExecutionContext());
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     expect(await instance!.waitForStepResult({ name: "record-schedule" })).toEqual({
       cron: "0 9 * * *",

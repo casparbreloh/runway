@@ -1,0 +1,37 @@
+[tools]
+node = "26"
+aube = "1"
+
+[settings]
+experimental = true
+lockfile = true
+
+[env]
+AUBE_CATALOG_MODE = "strict"
+
+[deps.aube]
+auto = true
+
+[tasks.format]
+run = "aube exec oxfmt '!aube-lock.yaml'"
+
+[tasks.format-check]
+run = "aube exec oxfmt --check '!aube-lock.yaml'"
+
+[tasks.fallow]
+run = "aube exec fallow --ci --no-cache"
+
+[tasks.lint]
+run = "aube exec oxlint"
+
+[tasks.typecheck]
+run = "aube exec tsc --build"
+
+[tasks.test]
+run = "aube exec vitest run"
+
+[tasks."test:image"]
+run = "aube exec vitest run --root packages/runway --config vitest.image.config.ts"
+
+[tasks."test:live"]
+run = "node packages/runway/tests/live/cache-transfer.ts && node packages/runway/tests/live/artifact-recovery.ts && node packages/runway/tests/live/repository-recovery.ts && node packages/runway/tests/live/github-recovery.ts"

@@ -208,9 +208,10 @@ runway deploy
 ## Development Status
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows are
-ordinary Runway consumers. They use the mise provider for Node and pnpm. Mise installs tools fresh
-because transporting its whole data tree costs more than setup; providers use the generic cache only
-when measured restore cost wins.
+ordinary Runway consumers. They discover the repository mise configuration for Node and Aube and
+run ordinary mise tasks that automatically reconcile dependencies, without caching application
+dependencies. Mise installs tools fresh because transporting its whole data tree costs more than setup; providers
+use the generic cache only when measured restore cost wins.
 
 At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
 integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
@@ -236,9 +237,15 @@ cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are l
 
 ## Testing
 
-Tests cover public SDK, Workers runtime, CLI, cache safety, and Cloudflare API seams. Run the full
-gate with:
+Run the individual checks and test suite with mise:
 
 ```sh
-pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test
+mise run format-check
+mise run lint
+mise run typecheck
+mise run fallow
+mise run test
 ```
+
+Run `mise run test:image` for the exact pinned-image cache contract when privileged Docker with
+linux/amd64 support is available.

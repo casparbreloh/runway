@@ -125,7 +125,10 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
           }),
         },
         versions: {
-          get: async () => ({
+          get: async (
+            _versionId: string,
+            _params: { account_id: string; script_name: string },
+          ) => ({
             resources: {
               bindings: providerBindings,
               script: { etag: overrides.providerEtag ?? "provider-etag" },
@@ -261,9 +264,10 @@ const api = (overrides: ProviderOverrides = {}): CloudflareApi =>
                   },
                 ]
               : [],
-          get: async () => new TextEncoder().encode("artifact"),
-          delete: async (bucket: string, key: string) => {
-            overrides.deletions?.push(`object:${bucket}/${key}`);
+          get: async (_key: string, _params: { account_id: string; bucket_name: string }) =>
+            new TextEncoder().encode("artifact"),
+          delete: async (key: string, params: { bucket_name: string }) => {
+            overrides.deletions?.push(`object:${params.bucket_name}/${key}`);
           },
         },
       },
@@ -643,7 +647,10 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
         },
         versions: {
           list: async () => [{ id: "worker-version" }],
-          get: async () => ({
+          get: async (
+            _versionId: string,
+            _params: { account_id: string; script_name: string },
+          ) => ({
             resources: {
               bindings: [
                 {
@@ -714,17 +721,11 @@ const applyApi = (calls: ApplyCalls, overrides: ApplyOverrides = {}): Cloudflare
           calls.bucketCreates.push(params);
         },
         objects: {
-          get: async () => {
+          get: async (_key: string, _params: { account_id: string; bucket_name: string }) => {
             if (!artifact) throw Object.assign(new Error("not found"), { status: 404 });
             return artifact;
           },
-          upload: async (
-            _bucket: string,
-            key: string,
-            _body: unknown,
-            params: unknown,
-            options: unknown,
-          ) => {
+          upload: async (key: string, _body: unknown, params: unknown, options: unknown) => {
             calls.operations.push(`artifact-upload:${key}`);
             calls.artifactParams.push(params);
             calls.artifactOptions.push(options);
@@ -784,6 +785,7 @@ test("apply creates missing storage, publishes content before host, and uploads 
   expect(calls.artifactParams).toEqual([
     {
       account_id: "account",
+      bucket_name: "runway-data",
     },
   ]);
   expect(calls.artifactOptions).toEqual([{ headers: { "If-None-Match": "*" } }]);
@@ -977,12 +979,12 @@ const stateApi = (
             [...objects.keys()]
               .filter((key) => key.startsWith(prefix))
               .map((key) => ({ key, etag: `etag:${key}` })),
-          upload: async (_bucket: string, key: string, body: Uint8Array) => {
+          upload: async (key: string, body: Uint8Array) => {
             uploads += 1;
             objects.set(key, new TextDecoder().decode(body));
           },
-          get: async (_bucket: string, key: string) => objects.get(key),
-          delete: async (_bucket: string, key: string) => {
+          get: async (key: string) => objects.get(key),
+          delete: async (key: string) => {
             objects.delete(key);
           },
         },

@@ -32,7 +32,7 @@ test("workflow tools restore caches, prepare once, and shape authored commands",
   const introspector = await introspectWorkflow(env.TOOL_COMMANDS);
   try {
     await env.TOOL_COMMANDS.create({ params: {} });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using cacheStateResult = disposable(
       exports
@@ -82,7 +82,7 @@ test("exec supports shorthand, options, defaults, and declared-secret redaction 
         ],
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using stateResult = disposable(testSandbox.state());
@@ -125,7 +125,7 @@ test("a confirmed timeout is durably recorded once and keeps its original outcom
     const run = await env.COMMANDS.create({
       params: { commands: ["confirmed-timeout"], catchErrors: true },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
       timeout: { message: "command timed out after 25ms", attempt: 1 },
@@ -148,7 +148,7 @@ test("the Workflow host prepares only its exact credential-free source capabilit
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     await env.COMMANDS.create({ params: { commands: ["git rev-parse HEAD"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
 
     using sourceStateResult = disposable(testSandbox.sourceState());
@@ -199,7 +199,7 @@ test("a cache hit inspects the exact run source and completes before the first e
         commands: ["true"],
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using cacheStateResult = disposable(host.cacheState());
     const state = (await cacheStateResult) as {
@@ -256,7 +256,7 @@ test("a multi-path cache uses reserved tree identities", async () => {
         commands: ["true"],
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using cacheStateResult = disposable(host.cacheState());
     const state = (await cacheStateResult) as { requests: Array<Record<string, unknown>> };
@@ -301,7 +301,7 @@ test("a partial multi-path restore is discarded before authored commands", async
         commands: ["true"],
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(instance!.waitForStatus("complete")).resolves.not.toThrow();
     using lifecycleResult = disposable(host.lifecycleEvents());
     expect(await lifecycleResult).toContain("cache:discard:/workspace/.one");
@@ -316,7 +316,7 @@ test("Sandbox startup is lazy and workspaces are reused per run but isolated bet
     const lazy = await env.COMMANDS.create({ params: { commands: [] } });
     const first = await env.COMMANDS.create({ params: { commands: ["true", "true"] } });
     const second = await env.COMMANDS.create({ params: { commands: ["true"] } });
-    const instances = introspector.get();
+    const instances = await introspector.get();
 
     await Promise.all(instances.map(async (instance) => await instance.waitForStatus("complete")));
     using stateResult = disposable(testSandbox.state());
@@ -342,7 +342,7 @@ test("a live Sandbox keeps workspace files across durable sleep", async () => {
         pauseMs: 20,
       },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-1" })).resolves.toMatchObject({
       result: { exitCode: 0, stdout: "hello\n" },
@@ -358,7 +358,7 @@ test("non-zero execution is recorded once, redacted, typed, and cleaned up", asy
     const run = await env.COMMANDS.create({
       params: { commands: ["leak sandbox-secret"], catchErrors: true },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
       result: { exitCode: 9 },
@@ -388,7 +388,7 @@ test("an ambiguous start latches loss across durable retries and later authored 
     const run = await env.COMMANDS.create({
       params: { commands: ["ambiguous-start", "must-not-start"], catchErrors: true },
     });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStepResult({ name: "command-0" })).resolves.toMatchObject({
       lost: {
@@ -422,7 +422,7 @@ test("a run keeps one secret snapshot when the host binding rotates before exec"
   });
   try {
     await env.SECRET_SNAPSHOT.create({ params: {} });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await expect(
       instance!.waitForStepResult({ name: "runway:secret-snapshot" }),
     ).resolves.not.toContain("sandbox-secret");
@@ -445,7 +445,7 @@ test("an errored workflow cleans up its Sandbox workspace", async () => {
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     const run = await env.COMMANDS.create({ params: { commands: ["exit 7"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     using stateResult = disposable(testSandbox.state());
@@ -460,7 +460,7 @@ test("a failed cleanup remains retryable during Workflow rollback", async () => 
   try {
     await testSandbox.failDestroyOnce();
     const run = await env.COMMANDS.create({ params: { commands: ["true"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
 
     await expect(instance!.waitForStatus("errored")).resolves.not.toThrow();
     await vi.waitFor(async () => {
@@ -477,7 +477,7 @@ test("terminating a workflow cancels active execution and cleans up its workspac
   const introspector = await introspectWorkflow(env.COMMANDS);
   try {
     const run = await env.COMMANDS.create({ params: { commands: ["block"] } });
-    const [instance] = introspector.get();
+    const [instance] = await introspector.get();
     await vi.waitFor(async () => {
       using stateResult = disposable(testSandbox.state());
       expect((await stateResult).executions).toHaveLength(1);
