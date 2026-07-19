@@ -29,9 +29,8 @@ export type CloudflareApi = {
           params: { account_id: string; per_page?: number },
         ): Promise<unknown>;
         get(
-          scriptName: string,
           versionId: string,
-          params: { account_id: string },
+          params: { account_id: string; script_name: string },
         ): Promise<unknown>;
       };
       deployments: {
@@ -114,72 +113,23 @@ export type CloudflareApi = {
       };
       objects: {
         upload(
-          bucketName: string,
           objectKey: string,
           body: Uint8Array,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
           options?: { headers?: Readonly<Record<string, string>> },
         ): Promise<unknown>;
         list(bucketName: string, params: { account_id: string; prefix?: string }): Promise<unknown>;
         get(
-          bucketName: string,
           objectKey: string,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
         ): Promise<unknown>;
         delete(
-          bucketName: string,
           objectKey: string,
-          params: { account_id: string },
+          params: { account_id: string; bucket_name: string },
         ): Promise<unknown>;
       };
     };
   };
-};
-
-export const cloudflare7Compatibility = (
-  cf: Pick<Cloudflare, "workers" | "r2">,
-): Pick<CloudflareApi, "workers" | "r2"> => {
-  const workers = Object.assign(Object.create(cf.workers), {
-    scripts: Object.assign(Object.create(cf.workers.scripts), {
-      versions: Object.assign(Object.create(cf.workers.scripts.versions), {
-        get: async (scriptName: string, versionId: string, params: { account_id: string }) =>
-          await cf.workers.scripts.versions.get(versionId, {
-            ...params,
-            script_name: scriptName,
-          }),
-      }),
-    }),
-  }) as CloudflareApi["workers"];
-  const r2 = Object.assign(Object.create(cf.r2), {
-    buckets: Object.assign(Object.create(cf.r2.buckets), {
-      objects: Object.assign(Object.create(cf.r2.buckets.objects), {
-        upload: async (
-          bucketName: string,
-          objectKey: string,
-          body: Uint8Array,
-          params: { account_id: string },
-          options?: { headers?: Readonly<Record<string, string>> },
-        ) =>
-          await cf.r2.buckets.objects.upload(
-            objectKey,
-            body,
-            { ...params, bucket_name: bucketName },
-            options,
-          ),
-        get: async (bucketName: string, objectKey: string, params: { account_id: string }) =>
-          await cf.r2.buckets.objects.get(objectKey, {
-            ...params,
-            bucket_name: bucketName,
-          }),
-        delete: async (bucketName: string, objectKey: string, params: { account_id: string }) =>
-          await cf.r2.buckets.objects.delete(objectKey, {
-            ...params,
-            bucket_name: bucketName,
-          }),
-      }),
-    }),
-  }) as CloudflareApi["r2"];
-  return { workers, r2 };
 };
 
 export const defaultClient = (
@@ -226,10 +176,9 @@ export const defaultClient = (
     }
     throw new Error("Cloudflare Containers API request exhausted retries");
   };
-  const { workers, r2 } = cloudflare7Compatibility(cf);
   return {
     accounts: cf.accounts,
-    workers,
+    workers: cf.workers,
     workflows: cf.workflows,
     zones: cf.zones,
     durableObjects: cf.durableObjects,
@@ -263,7 +212,7 @@ export const defaultClient = (
           await containerRequest(account_id, `/applications/${applicationId}/rollouts`),
       },
     },
-    r2,
+    r2: cf.r2,
   };
 };
 

@@ -463,11 +463,10 @@ export class CloudflareStackControl implements StackControl {
         account_id: this.#opts.accountId,
       }),
     );
-    const version = await this.#opts.cf.workers.scripts.versions.get(
-      manifest.worker.name,
-      deployment.versionId,
-      { account_id: this.#opts.accountId },
-    );
+    const version = await this.#opts.cf.workers.scripts.versions.get(deployment.versionId, {
+      account_id: this.#opts.accountId,
+      script_name: manifest.worker.name,
+    });
     const versionResult = resultOf(version) as
       | {
           resources?: { script?: { etag?: unknown } };
@@ -700,8 +699,9 @@ export class CloudflareStackControl implements StackControl {
               const found = objects.find(({ key }) => key === expected.key);
               if (!found) throw new Error(`missing exact Cloudflare R2 object ${expected.key}`);
               const contents = await bytesOf(
-                await this.#opts.cf.r2.buckets.objects.get(bucket.name, expected.key, {
+                await this.#opts.cf.r2.buckets.objects.get(expected.key, {
                   account_id: this.#opts.accountId,
+                  bucket_name: bucket.name,
                 }),
               );
               const digest = `sha256:${sha256(contents)}`;
@@ -764,8 +764,9 @@ export class CloudflareStackControl implements StackControl {
       objects.map(async (object) => ({
         object,
         value: await textOf(
-          await this.#opts.cf.r2.buckets.objects.get(this.#opts.stateBucket, object.key, {
+          await this.#opts.cf.r2.buckets.objects.get(object.key, {
             account_id: this.#opts.accountId,
+            bucket_name: this.#opts.stateBucket,
           }),
         ),
       })),
@@ -799,19 +800,18 @@ export class CloudflareStackControl implements StackControl {
   async writeOnce(key: string, value: string): Promise<void> {
     await this.#ensureStateBucket();
     const physical = `${key}.versions/${sha256(value)}.json`;
-    await this.#opts.cf.r2.buckets.objects.upload(
-      this.#opts.stateBucket,
-      physical,
-      new TextEncoder().encode(value),
-      { account_id: this.#opts.accountId },
-    );
+    await this.#opts.cf.r2.buckets.objects.upload(physical, new TextEncoder().encode(value), {
+      account_id: this.#opts.accountId,
+      bucket_name: this.#opts.stateBucket,
+    });
     const stored = await this.read(key);
     if (!stored || stored.value !== value) throw new Error("Cloudflare Stack state write conflict");
   }
 
   async deleteState(_key: string, revision: string): Promise<void> {
-    await this.#opts.cf.r2.buckets.objects.delete(this.#opts.stateBucket, revision, {
+    await this.#opts.cf.r2.buckets.objects.delete(revision, {
       account_id: this.#opts.accountId,
+      bucket_name: this.#opts.stateBucket,
     });
   }
 
@@ -819,8 +819,9 @@ export class CloudflareStackControl implements StackControl {
     switch (resource.type) {
       case "object": {
         if (!(await this.hasResource(resource))) return;
-        await this.#opts.cf.r2.buckets.objects.delete(resource.bucket, resource.key, {
+        await this.#opts.cf.r2.buckets.objects.delete(resource.key, {
           account_id: this.#opts.accountId,
+          bucket_name: resource.bucket,
         });
         return;
       }
@@ -866,8 +867,9 @@ export class CloudflareStackControl implements StackControl {
           const found = await this.#r2Object(resource.bucket, resource.key);
           if (!found) return false;
           const contents = await bytesOf(
-            await this.#opts.cf.r2.buckets.objects.get(resource.bucket, resource.key, {
+            await this.#opts.cf.r2.buckets.objects.get(resource.key, {
               account_id: this.#opts.accountId,
+              bucket_name: resource.bucket,
             }),
           );
           if (
@@ -993,8 +995,9 @@ export class CloudflareStackControl implements StackControl {
             }),
           );
           const version = resultOf(
-            await this.#opts.cf.workers.scripts.versions.get(resource.name, deployment.versionId, {
+            await this.#opts.cf.workers.scripts.versions.get(deployment.versionId, {
               account_id: this.#opts.accountId,
+              script_name: resource.name,
             }),
           ) as { resources?: { script?: { etag?: unknown } } } | undefined;
           const settings = resultOf(
@@ -1058,8 +1061,9 @@ export class CloudflareStackControl implements StackControl {
   async #readArtifact(bucket: string, key: string): Promise<Uint8Array | undefined> {
     try {
       return await bytesOf(
-        await this.#opts.cf.r2.buckets.objects.get(bucket, key, {
+        await this.#opts.cf.r2.buckets.objects.get(key, {
           account_id: this.#opts.accountId,
+          bucket_name: bucket,
         }),
       );
     } catch (error) {
@@ -1100,11 +1104,11 @@ export class CloudflareStackControl implements StackControl {
     let uploadError: unknown;
     try {
       await this.#opts.cf.r2.buckets.objects.upload(
-        bucket.name,
         key,
         artifact.contents,
         {
           account_id: this.#opts.accountId,
+          bucket_name: bucket.name,
         },
         { headers: { "If-None-Match": "*" } },
       );
@@ -1229,8 +1233,9 @@ export class CloudflareStackControl implements StackControl {
     const versionId = versions[0];
     if (!versionId) throw new Error(`missing Worker version after deploy: ${manifest.worker.name}`);
     const version = resultOf(
-      await this.#opts.cf.workers.scripts.versions.get(manifest.worker.name, versionId, {
+      await this.#opts.cf.workers.scripts.versions.get(versionId, {
         account_id: this.#opts.accountId,
+        script_name: manifest.worker.name,
       }),
     );
     const sandbox = bindingsOf(version).find(

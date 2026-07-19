@@ -62,7 +62,10 @@ const createSmokeContainer = async (
   const versionId = versions[0];
   if (!versionId) throw new Error("smoke Worker has no version");
   const version = resultOf(
-    await cf.workers.scripts.versions.get(scriptName, versionId, { account_id: accountId }),
+    await cf.workers.scripts.versions.get(versionId, {
+      account_id: accountId,
+      script_name: scriptName,
+    }),
   ) as { resources?: { bindings?: readonly Record<string, unknown>[] } } | undefined;
   const binding = version?.resources?.bindings?.find(
     ({ type, name, class_name: className }) =>
