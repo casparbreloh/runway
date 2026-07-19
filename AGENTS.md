@@ -29,9 +29,13 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 
 ## Commands
 
-- Full gate: `pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test`
-- Exact pinned-image cache contract: `pnpm test:image` (requires privileged Docker with linux/amd64
-  support).
+- Setup: `mise install --locked`; root `mise.toml` and `mise.lock` own Node and Aube, while
+  `aube-workspace.yaml` and `aube-lock.yaml` own workspace dependency resolution. Mise tasks
+  automatically reconcile dependencies through `[deps.aube] auto = true`.
+- Full gate: `mise run check && mise run test`. Individual checks are `mise run typecheck`,
+  `mise run lint`, `mise run format-check`, `mise run fallow`, and `mise run test`.
+- Exact pinned-image cache contract: `mise run test:image` (requires privileged Docker with
+  linux/amd64 support).
 - CLI: `runway deploy` and `runway secrets set`.
 
 ## Authoring Model
@@ -130,9 +134,10 @@ export default workflow({
   that name. Cloudflare derives its Durable Object namespace names from the Worker and class names.
   Account data and state use the shared `runway-data` and `runway-state` buckets. The digest-pinned
   linux/amd64 image runs on `standard-4`.
-- Runway's root workflows use the mise provider for the Node/pnpm toolchain and keep application
-  dependency installation uncached. Earlier evidence showed that transporting the pnpm store and
-  `node_modules` costs more and runs slower than a clean install.
+- Runway's root workflows discover the repository mise configuration for Node and Aube, run the
+  hidden frozen `deps:ci` task before checks, and keep application dependency installation uncached.
+  Earlier pnpm-era evidence showed that transporting the pnpm store and `node_modules` costs more
+  and runs slower than a clean install.
 - Cloudflare Artifacts is a possible future `Source` implementation only after repeated exact-revision
   latency and total-cost evidence wins. It is not the cache store.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
@@ -150,4 +155,5 @@ export default workflow({
   helpers or generated source strings directly.
 - Code is effectively comment-free; add comments only for non-obvious rationale.
 - Touch only the requested surface.
-- Add catalog dependencies in `pnpm-workspace.yaml`; use `"catalog:"` in packages.
+- Manage dependency changes with Aube, update catalogs in `aube-workspace.yaml`, and run
+  `mise deps`; package manifests retain `"catalog:"` and `"workspace:*"` protocols.

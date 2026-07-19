@@ -3,16 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "format": "oxfmt",
-    "format-check": "oxfmt --check",
-    "fallow": "fallow --ci --no-cache",
-    "lint": "oxlint",
-    "test": "vitest run",
-    "test:image": "pnpm --dir packages/runway exec vitest run --config vitest.image.config.ts",
-    "test:live": "node packages/runway/tests/live/cache-transfer.ts && node packages/runway/tests/live/artifact-recovery.ts && node packages/runway/tests/live/repository-recovery.ts && node packages/runway/tests/live/github-recovery.ts",
-    "typecheck": "tsgo --build"
-  },
   "dependencies": {
     "runway": "workspace:*"
   },
@@ -25,19 +15,5 @@
     "oxlint-tsgolint": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
-  },
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "11.5.0"
-    },
-    "runtime": {
-      "name": "node",
-      "version": "^26"
-    }
-  },
-  "engines": {
-    "node": "^26"
-  },
-  "packageManager": "pnpm@11.5.0"
+  }
 }

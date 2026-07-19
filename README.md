@@ -208,9 +208,10 @@ runway deploy
 ## Development Status
 
 The root [Check](.runway/workflows/check.ts) and [Test](.runway/workflows/test.ts) workflows are
-ordinary Runway consumers. They use the mise provider for Node and pnpm. Mise installs tools fresh
-because transporting its whole data tree costs more than setup; providers use the generic cache only
-when measured restore cost wins.
+ordinary Runway consumers. They discover the repository mise configuration for Node and Aube, run
+the hidden frozen `deps:ci` task before checks, and do not cache application dependencies. Mise
+installs tools fresh because transporting its whole data tree costs more than setup; providers use
+the generic cache only when measured restore cost wins.
 
 At PR head `df10a82` on 2026-07-17, 15 sequential development samples on the deployed `runway`
 integration produced Check P50/P95 of 39s/46s, Test P50/P95 of 87s/102s, and delivery-to-terminal
@@ -236,9 +237,20 @@ cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are l
 
 ## Testing
 
-Tests cover public SDK, Workers runtime, CLI, cache safety, and Cloudflare API seams. Run the full
-gate with:
+Root `mise.toml` and `mise.lock` are the authority for Node, Aube, and repository tasks.
+`aube-workspace.yaml` and `aube-lock.yaml` own dependency resolution; package manifests retain
+`catalog:` and `workspace:*` protocols. Install the locked tools, then run the full gate:
 
 ```sh
-pnpm typecheck && pnpm lint && pnpm format-check && pnpm fallow && pnpm test
+mise install --locked
+mise run check
+mise run test
 ```
+
+`[deps.aube] auto = true` makes `mise run` reconcile dependencies. Individual checks are
+`mise run typecheck`, `mise run lint`, `mise run format-check`, and `mise run fallow`. Run the exact
+pinned-image cache contract with `mise run test:image`; it requires privileged Docker with
+linux/amd64 support.
+
+Manage dependency changes with Aube, update shared catalogs in `aube-workspace.yaml`, and run
+`mise deps` to reconcile the workspace.

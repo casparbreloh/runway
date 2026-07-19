@@ -26,8 +26,6 @@ catalog:
   vitest: ^4.0.15
   "@cloudflare/dynamic-workflows": 0.1.1
 
-catalogMode: strict
-
 minimumReleaseAgeExclude:
   - "@cloudflare/vitest-pool-workers@0.16.14"
   - "@cloudflare/workerd-darwin-64@1.20260609.1"

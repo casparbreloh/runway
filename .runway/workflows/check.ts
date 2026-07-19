@@ -2,7 +2,7 @@ import { github, mise, workflow } from "runway";
 
 export default workflow({
   id: "check",
-  tools: mise({ node: "26.5.0", pnpm: "11.5.0" }),
+  tools: mise(),
   trigger: () =>
     github({
       checkName: "Check",
@@ -13,11 +13,11 @@ export default workflow({
     }),
 }).run(async (step) => {
   await step.exec("install", {
-    command: "pnpm install --frozen-lockfile --reporter=append-only",
+    command: "mise run --no-deps deps:ci",
     env: { NODE_OPTIONS: "--max-old-space-size=128" },
   });
-  await step.exec("format-check", "pnpm format-check");
-  await step.exec("lint", "pnpm lint");
-  await step.exec("typecheck", "pnpm typecheck");
-  await step.exec("fallow", "pnpm fallow");
+  await step.exec("format-check", "mise run --no-deps format-check");
+  await step.exec("lint", "mise run --no-deps lint");
+  await step.exec("typecheck", "mise run --no-deps typecheck");
+  await step.exec("fallow", "mise run --no-deps fallow");
 });
