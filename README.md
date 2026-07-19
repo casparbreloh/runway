@@ -237,20 +237,15 @@ cache store. BuildKit, run artifacts, deployment workflows, AI, and agents are l
 
 ## Testing
 
-Root `mise.toml` and `mise.lock` are the authority for Node, Aube, and repository tasks.
-`aube-workspace.yaml` and `aube-lock.yaml` own dependency resolution; package manifests retain
-`catalog:` and `workspace:*` protocols. Install the locked tools, then run the full gate:
+Run the individual checks and test suite with mise:
 
 ```sh
-mise install --locked
-mise run check
+mise run format-check
+mise run lint
+mise run typecheck
+mise run fallow
 mise run test
 ```
 
-`[deps.aube] auto = true` makes `mise run` reconcile dependencies. Individual checks are
-`mise run typecheck`, `mise run lint`, `mise run format-check`, and `mise run fallow`. Run the exact
-pinned-image cache contract with `mise run test:image`; it requires privileged Docker with
-linux/amd64 support.
-
-Manage dependency changes with Aube, update shared catalogs in `aube-workspace.yaml`, and run
-`mise deps` to reconcile the workspace.
+Run `mise run test:image` for the exact pinned-image cache contract when privileged Docker with
+linux/amd64 support is available.

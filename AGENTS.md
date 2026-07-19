@@ -29,11 +29,11 @@ Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
 
 ## Commands
 
-- Setup: `mise install --locked`; root `mise.toml` and `mise.lock` own Node and Aube, while
-  `aube-workspace.yaml` and `aube-lock.yaml` own workspace dependency resolution. Mise tasks
-  automatically reconcile dependencies through `[deps.aube] auto = true`.
-- Full gate: `mise run check && mise run test`. Individual checks are `mise run typecheck`,
-  `mise run lint`, `mise run format-check`, `mise run fallow`, and `mise run test`.
+Mise automatically installs the locked Node and Aube tools and reconciles Aube dependencies when a
+task runs.
+
+- Full gate: `mise run format-check`, `mise run lint`, `mise run typecheck`, `mise run fallow`, and
+  `mise run test`.
 - Exact pinned-image cache contract: `mise run test:image` (requires privileged Docker with
   linux/amd64 support).
 - CLI: `runway deploy` and `runway secrets set`.
