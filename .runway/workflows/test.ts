@@ -12,12 +12,8 @@ export default workflow({
       ],
     }),
 }).run(async (step) => {
-  await step.exec("install", {
-    command: "mise run --no-deps deps:ci",
-    env: { NODE_OPTIONS: "--max-old-space-size=128" },
-  });
   await step.exec("test", {
-    command: "mise run --no-deps test",
+    command: "mise run test",
     env: { VITEST_MAX_WORKERS: "1" },
   });
 });

@@ -324,7 +324,7 @@ const run = async (): Promise<void> => {
     }
     try {
       for (const key of await objectKeys(cf, accountId, bucket)) {
-        await cf.r2.buckets.objects.delete(bucket, key, { account_id: accountId });
+        await cf.r2.buckets.objects.delete(key, { account_id: accountId, bucket_name: bucket });
       }
       if (bucketIntentOwned) await cf.r2.buckets.delete(bucket, { account_id: accountId });
     } catch (error) {

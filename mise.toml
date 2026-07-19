@@ -38,7 +38,3 @@ run = "node packages/runway/tests/live/cache-transfer.ts && node packages/runway
 
 [tasks.check]
 depends = ["format-check", "lint", "typecheck", "fallow"]
-
-[tasks."deps:ci"]
-hide = true
-run = "aube ci"

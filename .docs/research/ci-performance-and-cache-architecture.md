@@ -206,7 +206,7 @@ is exempt from Container egress, so cost models should not assume that it is.
 Runway also consumes Workers, Durable Objects, Workflows, logs, and R2:
 
 - The $5 Workers Paid minimum includes 10 million Worker requests and 30 million CPU-ms per month;
-  overage is `$0.30/million` requests and `$0.02/million` CPU-ms. Workers themselves have no data
+  overage is $0.30 per million requests and $0.02 per million CPU-ms. Workers themselves have no data
   transfer charge. SQLite Durable Objects include 1 million requests, 400,000 GB-s duration,
   25 billion rows read, 50 million rows written, and 5 GB-month of stored data before their
   respective overages. [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)

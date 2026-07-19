@@ -217,7 +217,7 @@ const objectExists = async (
 ): Promise<boolean> => {
   if (!(await bucketExists(cf, accountId, bucketName))) return false;
   try {
-    await cf.r2.buckets.objects.get(bucketName, objectKey, { account_id: accountId });
+    await cf.r2.buckets.objects.get(objectKey, { account_id: accountId, bucket_name: bucketName });
     return true;
   } catch (error) {
     if (isStatus(error, 404)) return false;
@@ -309,8 +309,9 @@ const waitForCompletion = async (
   const deadline = Date.now() + 180_000;
   let last: InstanceDetails | undefined;
   while (Date.now() < deadline) {
-    last = (await cf.workflows.instances.get(workflowName, runId, {
+    last = (await cf.workflows.instances.get(runId, {
       account_id: accountId,
+      workflow_name: workflowName,
     })) as InstanceDetails;
     if (last.status === "complete") return last;
     if (["errored", "terminated"].includes(last.status)) {
@@ -544,7 +545,7 @@ const run = async (): Promise<void> => {
     }
     try {
       for (const key of createdObjectKeys) {
-        await cf.r2.buckets.objects.delete(bucketName, key, { account_id: accountId });
+        await cf.r2.buckets.objects.delete(key, { account_id: accountId, bucket_name: bucketName });
       }
       if (!bucketExisted && (await objectKeys(cf, accountId, bucketName)).size === 0) {
         await cf.r2.buckets.delete(bucketName, { account_id: accountId });

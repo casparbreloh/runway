@@ -134,10 +134,10 @@ export default workflow({
   that name. Cloudflare derives its Durable Object namespace names from the Worker and class names.
   Account data and state use the shared `runway-data` and `runway-state` buckets. The digest-pinned
   linux/amd64 image runs on `standard-4`.
-- Runway's root workflows discover the repository mise configuration for Node and Aube, run the
-  hidden frozen `deps:ci` task before checks, and keep application dependency installation uncached.
-  Earlier pnpm-era evidence showed that transporting the pnpm store and `node_modules` costs more
-  and runs slower than a clean install.
+- Runway's root workflows discover the repository mise configuration for Node and Aube and run
+  ordinary mise tasks that automatically reconcile dependencies, without caching application
+  dependency installation. Earlier pnpm-era evidence showed that transporting the pnpm store and
+  `node_modules` costs more and runs slower than a clean install.
 - Cloudflare Artifacts is a possible future `Source` implementation only after repeated exact-revision
   latency and total-cost evidence wins. It is not the cache store.
 - Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
