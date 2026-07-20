@@ -36,7 +36,6 @@ test("terminal publication emits one structured run report", async () => {
   const reports: unknown[] = [];
   let now = 10;
   const meter = new Meter({
-    priceTable: { id: "test", rates: [] },
     now: () => now,
     emit: (report) => {
       reports.push(structuredClone(report));
@@ -58,7 +57,6 @@ test("meter delivery is advisory and retries without duplicating the run sample"
   const reports: unknown[] = [];
   let attempts = 0;
   const meter = new Meter({
-    priceTable: { id: "test", rates: [] },
     emit: (report) => {
       attempts += 1;
       if (attempts === 1) throw new Error("observability unavailable");

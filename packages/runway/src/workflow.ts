@@ -2,13 +2,23 @@ import { secretNameOf, secretRef, type SecretRef } from "./secret.ts";
 import type { Step } from "./step.ts";
 import { toolProviders, type ToolProvider, type Tools } from "./tools.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type { CronTrigger, GitHubTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
+import type {
+  CronTrigger,
+  GitHubTrigger,
+  ManualTrigger,
+  Trigger,
+  WebhookTrigger,
+} from "./trigger.ts";
 
 export type TriggerContext<S extends string> = {
   readonly secrets: { readonly [K in S]: SecretRef<K> };
 };
 
-export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger | GitHubTrigger<unknown>;
+export type WorkflowTrigger =
+  | WebhookTrigger<unknown>
+  | CronTrigger
+  | GitHubTrigger<unknown>
+  | ManualTrigger;
 
 export interface WorkflowDefinition {
   readonly __kind: "workflow";

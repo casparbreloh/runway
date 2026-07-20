@@ -23,14 +23,12 @@ import {
   type GitHubAcceptedDelivery,
 } from "../github/delivery.ts";
 import { createGitHubProvider } from "../github/provider.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "../meter.ts";
+import { Meter } from "../meter.ts";
 import { cloudflareSandbox } from "../sandbox/cloudflare.ts";
 import {
   CACHE_SCHEMA,
-  CACHE_LIMITS,
   GITHUB_COORDINATOR_BINDING,
   SANDBOX_BINDING,
-  SANDBOX_CAPACITY,
   SANDBOX_RUNNER_ABI,
 } from "../sandbox/config.ts";
 import { createSecretSnapshots } from "../secret/snapshot.ts";
@@ -150,6 +148,11 @@ type HostRoute =
       readonly type: "github";
       readonly checkName: string;
       readonly events: readonly GitHubEventFilter[];
+    }
+  | {
+      readonly id: string;
+      readonly artifactVersion: string;
+      readonly type: "manual";
     };
 
 export interface HostConfig {
@@ -362,25 +365,6 @@ export class RunwaySandboxBinding
           })
         : undefined;
     const meter = new Meter({
-      priceTable: CLOUDFLARE_PRICE_TABLE,
-      container: SANDBOX_CAPACITY,
-      cache: {
-        maxBytes: CACHE_LIMITS.maxBytes,
-        maxDurationMs: CACHE_LIMITS.helperDurationMs,
-        save: {
-          classAOperations: CACHE_LIMITS.saveClassAOperations,
-          classBOperations: CACHE_LIMITS.saveClassBOperations,
-          storageHorizonMs: CACHE_LIMITS.storageHorizonMs,
-          transferDurationMs: CACHE_LIMITS.transferDurationMs,
-          workflowSteps: CACHE_LIMITS.saveWorkflowSteps,
-        },
-        restore: {
-          classAOperations: CACHE_LIMITS.restoreClassAOperations,
-          classBOperations: CACHE_LIMITS.restoreClassBOperations,
-          transferDurationMs: CACHE_LIMITS.transferDurationMs,
-          workflowSteps: CACHE_LIMITS.restoreWorkflowSteps,
-        },
-      },
       emit: (report) => console.log({ type: "runway-meter", report }),
     });
     return new Cache({
@@ -642,7 +626,7 @@ export class RunwaySandboxBinding
 interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
   readonly artifactVersion: string;
   readonly source?: GitHubRunSource;
-  readonly trigger?: "webhook" | "cron";
+  readonly trigger?: "webhook" | "cron" | "manual";
 }
 
 type LoaderPurpose = "trigger" | "run";
@@ -668,7 +652,9 @@ const metadataOf = (value: unknown): WorkflowMetadata => {
   if (typeof artifactVersion !== "string" || !/^[0-9a-f]{64}$/.test(artifactVersion)) {
     throw new Error("invalid workflow metadata");
   }
-  if (trigger === "webhook" || trigger === "cron") return { artifactVersion, trigger };
+  if (trigger === "webhook" || trigger === "cron" || trigger === "manual") {
+    return { artifactVersion, trigger };
+  }
   if (source === undefined) return { artifactVersion };
   try {
     return { artifactVersion, source: parseGitHubRunSource(source) };

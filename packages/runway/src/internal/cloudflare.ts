@@ -137,6 +137,37 @@ export const defaultClient = (
   request: typeof globalThis.fetch = globalThis.fetch,
 ): CloudflareApi => {
   const cf = new Cloudflare({ apiToken, timeout: 15_000 });
+  const updateScript: CloudflareApi["workers"]["scripts"]["update"] = async (
+    scriptName,
+    params,
+  ) => {
+    const form = new FormData();
+    form.set("metadata", JSON.stringify(params.metadata));
+    for (const upload of params.files ?? []) {
+      if (!(upload instanceof Blob) || !("name" in upload) || typeof upload.name !== "string") {
+        throw new Error("invalid Worker module upload");
+      }
+      form.set(upload.name, upload, upload.name);
+    }
+    const query = params.bindings_inherit
+      ? `?bindings_inherit=${encodeURIComponent(params.bindings_inherit)}`
+      : "";
+    const response = await request(
+      `https://api.cloudflare.com/client/v4/accounts/${params.account_id}/workers/scripts/${encodeURIComponent(scriptName)}${query}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${apiToken}` },
+        body: form,
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as unknown) : undefined;
+    if (response.ok) return resultOf(body);
+    throw Object.assign(new Error(`Cloudflare Workers API ${response.status}: ${text}`), {
+      status: response.status,
+    });
+  };
   const containerRequest = async (
     accountId: string,
     path: string,
@@ -178,7 +209,21 @@ export const defaultClient = (
   };
   return {
     accounts: cf.accounts,
-    workers: cf.workers,
+    workers: {
+      routes: cf.workers.routes,
+      scripts: {
+        list: async (params) => await cf.workers.scripts.list(params),
+        update: updateScript,
+        delete: async (scriptName, params) => await cf.workers.scripts.delete(scriptName, params),
+        secrets: cf.workers.scripts.secrets,
+        versions: cf.workers.scripts.versions,
+        deployments: cf.workers.scripts.deployments,
+        schedules: cf.workers.scripts.schedules,
+        subdomain: cf.workers.scripts.subdomain,
+        scriptAndVersionSettings: cf.workers.scripts.scriptAndVersionSettings,
+      },
+      subdomains: cf.workers.subdomains,
+    },
     workflows: cf.workflows,
     zones: cf.zones,
     durableObjects: cf.durableObjects,

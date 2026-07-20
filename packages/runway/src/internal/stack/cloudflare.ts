@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { toFile } from "cloudflare";
 
 import { collectResultItems, resultOf, type CloudflareApi } from "../cloudflare.ts";
-import type { PreparedDeployment } from "../deploy/artifacts.ts";
-import type { Registry } from "../deploy/registry.ts";
+import type { PreparedDeployment } from "../publish/artifacts.ts";
+import type { Registry } from "../publish/registry.ts";
 import { workflowArtifactKey } from "../runtime/artifact.ts";
 import {
   DATA_BUCKET_BINDING,

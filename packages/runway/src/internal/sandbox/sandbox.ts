@@ -281,32 +281,25 @@ export class Sandbox {
   #prepare(allowReconstruct: boolean): Promise<PreparedSource> {
     if (this.#preparation) return this.#preparation;
     const started = this.#meter?.now();
-    let durationMs: number | undefined;
-    const preparation = this.#source
-      .prepare({ allowReconstruct })
-      .then((prepared) => {
-        const observedDuration = this.#elapsed(started);
-        durationMs = observedDuration;
-        this.#observe(() =>
-          this.#meter?.record({
-            type: "source",
-            state: prepared.result.state,
-            durationMs: observedDuration,
-            bytes: prepared.result.bytes,
-          }),
-        );
-        this.#observe(() =>
-          this.#meter?.record({
-            type: "sandbox",
-            phase: "ready",
-            durationMs: observedDuration,
-          }),
-        );
-        return prepared;
-      })
-      .finally(() => {
-        this.#observe(() => this.#meter?.allocation(durationMs ?? this.#elapsed(started)));
-      });
+    const preparation = this.#source.prepare({ allowReconstruct }).then((prepared) => {
+      const observedDuration = this.#elapsed(started);
+      this.#observe(() =>
+        this.#meter?.record({
+          type: "source",
+          state: prepared.result.state,
+          durationMs: observedDuration,
+          bytes: prepared.result.bytes,
+        }),
+      );
+      this.#observe(() =>
+        this.#meter?.record({
+          type: "sandbox",
+          phase: "ready",
+          durationMs: observedDuration,
+        }),
+      );
+      return prepared;
+    });
     this.#preparation = preparation;
     void preparation.catch(() => {
       if (this.#preparation === preparation) this.#preparation = undefined;
@@ -336,7 +329,6 @@ export class Sandbox {
           }
           this.#priorStart = true;
           this.#startedCommands.add(step.id);
-          const allocationStarted = this.#meter?.now();
           try {
             return await this.#placement.exec({
               runId: this.#runId,
@@ -348,8 +340,6 @@ export class Sandbox {
           } catch (error) {
             if (error instanceof RunLostError) throw this.#lose(error);
             throw error;
-          } finally {
-            this.#observe(() => this.#meter?.allocation(this.#elapsed(allocationStarted)));
           }
         },
         async () => await this.cleanup(),
@@ -414,7 +404,6 @@ export class Sandbox {
             durationMs,
           }),
         );
-        this.#observe(() => this.#meter?.allocation(durationMs));
       }
     })();
     this.#cleaning = cleaning;

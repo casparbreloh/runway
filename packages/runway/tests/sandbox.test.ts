@@ -63,7 +63,7 @@ const terminalFixture = () => {
 };
 
 test("one bounded meter observes source, cache, command, and Sandbox lifecycle", async () => {
-  const meter = new Meter({ priceTable: { id: "test", rates: [] } });
+  const meter = new Meter();
   const revision = "f".repeat(40);
   const sandbox = new Sandbox({
     runId: "unreported-run-id",
@@ -105,7 +105,7 @@ test("one bounded meter observes source, cache, command, and Sandbox lifecycle",
 
 test("reconnect latency does not double-count the original command duration", async () => {
   let now = 0;
-  const meter = new Meter({ priceTable: { id: "test", rates: [] }, now: () => ++now });
+  const meter = new Meter({ now: () => ++now });
   const revision = "f".repeat(40);
   const sandbox = new Sandbox({
     runId: "run-reconnect-meter",
@@ -144,18 +144,7 @@ test("reconnect latency does not double-count the original command duration", as
 
 test("continuity loss and failed destroy attempts are each metered once", async () => {
   let now = 0;
-  const meter = new Meter({
-    priceTable: {
-      id: "test",
-      rates: [
-        { source: "container", unit: "vcpu-ms", usdPerUnit: 0 },
-        { source: "container", unit: "gib-ms", usdPerUnit: 0 },
-        { source: "container", unit: "disk-gb-ms", usdPerUnit: 0 },
-      ],
-    },
-    container: { vcpu: 0.5, memoryGib: 4, diskGb: 8 },
-    now: () => ++now,
-  });
+  const meter = new Meter({ now: () => ++now });
   const revision = "f".repeat(40);
   const sandbox = new Sandbox({
     runId: "run-loss-meter",
@@ -184,13 +173,6 @@ test("continuity loss and failed destroy attempts are each metered once", async 
     expect.arrayContaining([
       { type: "loss", startedCommands: 1 },
       expect.objectContaining({ type: "sandbox", phase: "destroy", count: 1 }),
-      expect.objectContaining({
-        type: "usage",
-        source: "container",
-        unit: "vcpu-ms",
-        quantity: 1.5,
-        provenance: "allocated",
-      }),
     ]),
   );
 });

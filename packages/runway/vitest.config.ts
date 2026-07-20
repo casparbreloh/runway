@@ -11,7 +11,7 @@ export default defineConfig({
       "tests/adapter/cloudflare.test.ts",
       "tests/adapter/sandbox.test.ts",
       "tests/adapter/stack.test.ts",
-      "tests/deploy.test.ts",
+      "tests/publish.test.ts",
       "tests/github.test.ts",
       "tests/meter.test.ts",
       "tests/sandbox.test.ts",

@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 
 import type { CloudflareApi } from "../../src/internal/cloudflare.ts";
-import type { PreparedDeployment } from "../../src/internal/deploy/artifacts.ts";
+import type { PreparedDeployment } from "../../src/internal/publish/artifacts.ts";
 import {
   CloudflareStackControl,
   cloudflareStackManifest,

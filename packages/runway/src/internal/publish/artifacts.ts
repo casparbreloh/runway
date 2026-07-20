@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
 
-import type { ProgressEvent } from "../../deploy.ts";
 import type { GitHubRepository } from "../../trigger.ts";
 import { encodeWorkflowArtifact } from "../runtime/artifact.ts";
 import {
@@ -18,6 +17,7 @@ import {
 } from "../runtime/contract.ts";
 import { SANDBOX_IMAGE_DIGEST } from "../sandbox/config.ts";
 import type { RepositorySource } from "../source/repository.ts";
+import type { ProgressEvent } from "./publish.ts";
 import { validateRegistry, type RegisteredWorkflow, type Registry } from "./registry.ts";
 
 const toPosix = (value: string): string => value.split(path.sep).join(path.posix.sep);
@@ -76,12 +76,23 @@ const hostSource = (
         events: workflow.def.trigger.events,
       };
     }
-    return {
-      id: workflow.def.id,
-      artifactVersion,
-      type: "cron",
-      expression: workflow.def.trigger.expression,
-    };
+    if (workflow.def.trigger.type === "cron") {
+      return {
+        id: workflow.def.id,
+        artifactVersion,
+        type: "cron",
+        expression: workflow.def.trigger.expression,
+      };
+    }
+    if (workflow.def.trigger.type === "manual") {
+      return {
+        id: workflow.def.id,
+        artifactVersion,
+        type: "manual",
+      };
+    }
+    const unsupported: never = workflow.def.trigger;
+    throw new Error(`unsupported workflow trigger: ${String(unsupported)}`);
   });
   const config = JSON.stringify({
     accountId: opts.accountId,

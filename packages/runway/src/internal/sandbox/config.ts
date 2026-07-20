@@ -14,23 +14,9 @@ export const SANDBOX_CONTAINER = {
 } as const;
 export const SANDBOX_IMAGE_DIGEST = SANDBOX_IMAGE.slice(SANDBOX_IMAGE.indexOf("@") + 1);
 
-export const SANDBOX_CAPACITY = {
-  vcpu: 4,
-  memoryGib: 12,
-  diskGb: 20,
-} as const;
-
 export const CACHE_LIMITS = {
   maxBytes: 1024 * 1024 * 1024,
   helperDurationMs: 180_000,
-  transferDurationMs: 15 * 60_000,
-  storageHorizonMs: 30 * 24 * 60 * 60 * 1_000,
-  saveClassAOperations: 9,
-  saveClassBOperations: 10,
-  restoreClassAOperations: 0,
-  restoreClassBOperations: 4,
-  saveWorkflowSteps: 3,
-  restoreWorkflowSteps: 1,
 } as const;
 
 export const SANDBOX_APPLICATION = {

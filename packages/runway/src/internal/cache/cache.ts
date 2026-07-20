@@ -7,7 +7,6 @@ import { normalizedCacheTarget } from "./path.ts";
 export interface Budget {
   readonly maxBytes: number;
   readonly maxDurationMs: number;
-  readonly maxEstimatedCostUsd: number;
 }
 
 export interface CacheTreeDeclaration extends Omit<CacheDeclaration, "paths"> {
@@ -245,14 +244,17 @@ export const cacheDeclarationEvidence = async (
   }
   const target = normalizedCacheTarget(declaration.path);
   const budget = declaration.budget;
-  if (budget) {
+  if (budget !== undefined) {
     if (
+      !budget ||
+      typeof budget !== "object" ||
+      !["", "maxBytes", "maxDurationMs", "maxBytes,maxDurationMs"].includes(
+        Object.keys(budget).sort().join(","),
+      ) ||
       (budget.maxBytes !== undefined &&
         (!Number.isSafeInteger(budget.maxBytes) || budget.maxBytes < 0)) ||
       (budget.maxDurationMs !== undefined &&
-        (!Number.isSafeInteger(budget.maxDurationMs) || budget.maxDurationMs < 0)) ||
-      (budget.maxEstimatedCostUsd !== undefined &&
-        (!Number.isFinite(budget.maxEstimatedCostUsd) || budget.maxEstimatedCostUsd < 0))
+        (!Number.isSafeInteger(budget.maxDurationMs) || budget.maxDurationMs < 0))
     )
       invalid();
   }
@@ -267,9 +269,6 @@ export const cacheDeclarationEvidence = async (
       budget?.maxDurationMs === undefined
         ? "maxDurationMs:unset"
         : `maxDurationMs:${budget.maxDurationMs}`,
-      budget?.maxEstimatedCostUsd === undefined
-        ? "maxEstimatedCostUsd:unset"
-        : `maxEstimatedCostUsd:${budget.maxEstimatedCostUsd}`,
     ]),
     target,
   };
@@ -676,15 +675,9 @@ export class Cache {
     const budget = pending.declaration.budget;
     if (
       budget &&
-      ![
-        "maxBytes",
-        "maxDurationMs",
-        "maxEstimatedCostUsd",
-        "maxBytes,maxDurationMs",
-        "maxBytes,maxEstimatedCostUsd",
-        "maxDurationMs,maxEstimatedCostUsd",
-        "maxBytes,maxDurationMs,maxEstimatedCostUsd",
-      ].includes(Object.keys(budget).sort().join(","))
+      !["maxBytes", "maxDurationMs", "maxBytes,maxDurationMs"].includes(
+        Object.keys(budget).sort().join(","),
+      )
     ) {
       throw new CacheError("invalid pending cache");
     }
@@ -762,14 +755,11 @@ export class Cache {
     const prepared: PreparedCache[] = [];
     for (const pending of pendingCaches) {
       const started = this.#meter?.now();
-      let providerStarted: number | undefined;
       let path: string | undefined;
       try {
         await this.#validatePending(pending);
-        this.#admitCost(pending.declaration, "save");
         const slash = pending.target.lastIndexOf("/");
         path = `${pending.target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}.sqsh`;
-        providerStarted = this.#meter?.now();
         const capture = await snapshots.capture({
           target: pending.target,
           path,
@@ -799,13 +789,7 @@ export class Cache {
           String(capture.archive.bytes),
         ]);
         const key = `content/${objectDigest}.sqsh`;
-        let uploaded: Awaited<ReturnType<CacheSnapshots["upload"]>>;
-        try {
-          uploaded = await snapshots.upload({ key, path, expected: capture.archive });
-        } finally {
-          this.#observe(() => this.#meter?.usage("r2", "class-a", 1, "derived"));
-          this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
-        }
+        const uploaded = await snapshots.upload({ key, path, expected: capture.archive });
         if (
           !["stored", "present"].includes(uploaded.state) ||
           !sameArchive(uploaded, capture.archive)
@@ -823,9 +807,6 @@ export class Cache {
             manifest,
           },
         });
-        if (uploaded.state === "stored") {
-          this.#observe(() => this.#meter?.cacheStorage(capture.archive.bytes));
-        }
       } catch (error) {
         const reason =
           error instanceof CacheError && error.message.includes("unsafe")
@@ -847,9 +828,6 @@ export class Cache {
         );
       } finally {
         if (path) await snapshots.remove(path).catch(() => {});
-        if (providerStarted !== undefined) {
-          this.#observe(() => this.#meter?.allocation(this.#elapsed(providerStarted)));
-        }
       }
     }
     return prepared;
@@ -963,35 +941,20 @@ export class Cache {
       return { state: "miss" as const, reason: lookup.reason ?? ("absent" as const) };
     }
     if (!restore) return { state: "miss" as const, reason: "unavailable" as const };
-    try {
-      this.#admitCost(declaration, "restore");
-    } catch (error) {
-      if (error instanceof CacheError && error.message.includes("budget")) {
-        return { state: "miss" as const, reason: "budget" as const };
-      }
-      throw error;
-    }
     const slash = target.lastIndexOf("/");
     const staging = `${target.slice(0, slash)}/.runway-cache-${crypto.randomUUID()}`;
-    const restoreStarted = this.#meter?.now();
     let staged: Awaited<ReturnType<CacheRestore["stage"]>>;
     try {
-      try {
-        staged = await restore.stage({
-          object: lookup.object,
-          path: staging,
-          target,
-          budget: declaration.budget,
-        });
-      } finally {
-        this.#observe(() => this.#meter?.usage("r2", "class-b", 2, "derived"));
-      }
+      staged = await restore.stage({
+        object: lookup.object,
+        path: staging,
+        target,
+        budget: declaration.budget,
+      });
     } catch {
-      this.#observe(() => this.#meter?.allocation(this.#elapsed(restoreStarted)));
       await restore.remove(staging).catch(() => {});
       return { state: "miss" as const, reason: "unavailable" as const };
     }
-    this.#observe(() => this.#meter?.allocation(this.#elapsed(restoreStarted)));
     if (staged.state === "miss") {
       await restore.remove(staging).catch(() => {});
       if (
@@ -1043,27 +1006,6 @@ export class Cache {
       key: lookup.key,
       match: lookup.match,
     };
-  }
-
-  #admitCost(declaration: CacheTreeDeclaration, phase: "save" | "restore"): void {
-    const limit = declaration.budget?.maxEstimatedCostUsd;
-    if (limit === undefined) return;
-    if (!this.#meter) throw new CacheError("cache snapshot exceeds budget");
-    const options = {
-      ...(declaration.budget?.maxBytes === undefined
-        ? {}
-        : { maxBytes: declaration.budget.maxBytes }),
-      ...(declaration.budget?.maxDurationMs === undefined
-        ? {}
-        : { maxDurationMs: declaration.budget.maxDurationMs }),
-    };
-    const estimate =
-      phase === "save"
-        ? this.#meter.cacheBound(options).estimate
-        : this.#meter.cacheRestoreBound(options).estimate;
-    if (!Number.isFinite(estimate.usd) || estimate.usd > limit) {
-      throw new CacheError("cache snapshot exceeds budget");
-    }
   }
 
   #elapsed(started: number | undefined): number {
@@ -1384,19 +1326,11 @@ export class Cache {
   }
 
   async #getRef(key: string): ReturnType<CacheRefs["get"]> {
-    try {
-      return await this.#refs.get(key);
-    } finally {
-      this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
-    }
+    return await this.#refs.get(key);
   }
 
   async #listRefs(prefix: string): ReturnType<CacheRefs["list"]> {
-    try {
-      return await this.#refs.list(prefix);
-    } finally {
-      this.#observe(() => this.#meter?.usage("r2", "class-b", 1, "derived"));
-    }
+    return await this.#refs.list(prefix);
   }
 
   async #putRef(
@@ -1404,11 +1338,7 @@ export class Cache {
     text: string,
     options: Parameters<CacheRefs["put"]>[2],
   ): ReturnType<CacheRefs["put"]> {
-    try {
-      return await this.#refs.put(key, text, options);
-    } finally {
-      this.#observe(() => this.#meter?.usage("r2", "class-a", 1, "derived"));
-    }
+    return await this.#refs.put(key, text, options);
   }
 
   async flushMeter(): Promise<void> {

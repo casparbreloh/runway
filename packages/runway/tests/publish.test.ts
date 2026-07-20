@@ -3,13 +3,16 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { cron, github, webhook, workflow } from "runway";
+import { cron, github, manual, webhook, workflow } from "runway";
 import type { WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
 
-import { deployWithAdapters } from "../src/deploy.ts";
-import type { CloudflareApi, ProgressEvent } from "../src/deploy.ts";
-import type { Registry } from "../src/internal/deploy/registry.ts";
+import { resolveAuth } from "../src/internal/auth.ts";
+import type { WranglerCommand } from "../src/internal/auth.ts";
+import { buildDeployment } from "../src/internal/publish/artifacts.ts";
+import { publishWithAdapters } from "../src/internal/publish/publish.ts";
+import type { CloudflareApi, ProgressEvent } from "../src/internal/publish/publish.ts";
+import { cronsOf, type Registry } from "../src/internal/publish/registry.ts";
 import type { RepositorySource } from "../src/internal/source/repository.ts";
 import { assertRepositorySourceReachable } from "../src/internal/source/repository.ts";
 import type {
@@ -60,7 +63,7 @@ const moduleOf = (name: string, definition: WorkflowDefinition): string =>
 
 const writeProject = async (packageJson: object = { name: "ship-it" }) => {
   const cwd = await mkdtemp(
-    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-deploy-test-"),
+    path.join(path.resolve(import.meta.dirname, ".."), ".tmp-publish-test-"),
   );
   await mkdir(path.join(cwd, ".runway", "workflows"), { recursive: true });
   await writeFile(path.join(cwd, "package.json"), JSON.stringify(packageJson));
@@ -194,12 +197,12 @@ const githubProvider = {
   createInstallationToken: async () => ({ token: "ephemeral", expiresAt: "2026-07-17T12:30:00Z" }),
 };
 
-test("deploy builds and syncs one exact digest-pinned Stack", async () => {
+test("publish builds and syncs one exact digest-pinned Stack", async () => {
   const project = await writeProject();
   const stack = new MemoryStack();
   let manifest: StackManifest | undefined;
   try {
-    const result = await deployWithAdapters(
+    const result = await publishWithAdapters(
       registry,
       { cwd: project.cwd, env: environment },
       {
@@ -252,7 +255,7 @@ test("package metadata and environment variables cannot configure deployment ide
     const manifests: StackManifest[] = [];
     const stack = new MemoryStack();
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         { cwd: project.cwd, env: { ...environment, RUNWAY_NAME: "runway-ignored" } },
         {
@@ -273,13 +276,13 @@ test("package metadata and environment variables cannot configure deployment ide
   }
 });
 
-test("GitHub deployment derives stable repository ownership and never serializes credentials", async () => {
+test("GitHub publication derives stable repository ownership and never serializes credentials", async () => {
   const project = await writeProject();
   const stack = new MemoryStack();
   let manifest: StackManifest | undefined;
   let source: RepositorySource | undefined;
   try {
-    await deployWithAdapters(
+    await publishWithAdapters(
       githubRegistry,
       { cwd: project.cwd, env: githubEnvironment },
       {
@@ -311,12 +314,12 @@ test("GitHub deployment derives stable repository ownership and never serializes
   }
 });
 
-test("deploy validates required and reserved secrets before Stack state or provider mutation", async () => {
+test("publish validates required and reserved secrets before Stack state or provider mutation", async () => {
   const project = await writeProject();
   const stack = new MemoryStack();
   try {
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         {
           cwd: project.cwd,
@@ -343,7 +346,7 @@ test("deploy validates required and reserved secrets before Stack state or provi
       },
     ];
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         colliding,
         { cwd: project.cwd, env: githubEnvironment },
         {
@@ -360,11 +363,11 @@ test("deploy validates required and reserved secrets before Stack state or provi
   }
 });
 
-test("deploy binds complete cache transport credentials and rejects partial configuration", async () => {
+test("publish binds complete cache transport credentials and rejects partial configuration", async () => {
   const project = await writeProject();
   let manifest: StackManifest | undefined;
   try {
-    await deployWithAdapters(
+    await publishWithAdapters(
       registry,
       {
         cwd: project.cwd,
@@ -392,7 +395,7 @@ test("deploy binds complete cache transport credentials and rejects partial conf
     );
 
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         {
           cwd: project.cwd,
@@ -411,12 +414,12 @@ test("deploy binds complete cache transport credentials and rejects partial conf
   }
 });
 
-test("deploy emits final progress only after Stack verification", async () => {
+test("publish emits final progress only after Stack verification", async () => {
   const project = await writeProject();
   const progress: ProgressEvent[] = [];
   const stack = new MemoryStack();
   try {
-    await deployWithAdapters(
+    await publishWithAdapters(
       registry,
       { cwd: project.cwd, env: environment, onProgress: (event) => progress.push(event) },
       {
@@ -426,9 +429,9 @@ test("deploy emits final progress only after Stack verification", async () => {
         stack: () => stack,
       },
     );
-    expect(progress.filter(({ step }) => step === "deploy")).toEqual([
-      { step: "deploy", status: "start" },
-      { step: "deploy", status: "done" },
+    expect(progress.filter(({ step }) => step === "publish")).toEqual([
+      { step: "publish", status: "start" },
+      { step: "publish", status: "done" },
     ]);
   } finally {
     await project.cleanup();
@@ -436,7 +439,7 @@ test("deploy emits final progress only after Stack verification", async () => {
 });
 
 test("private repository reachability uses one ephemeral exact-prompt askpass", async () => {
-  const token = "private-deploy-installation-token";
+  const token = "private-publish-installation-token";
   let askpass: string | undefined;
   await assertRepositorySourceReachable(authenticatedRepositoryFixture, {
     installationToken: async () => token,
@@ -459,25 +462,24 @@ test("private repository reachability uses one ephemeral exact-prompt askpass", 
   await expect(readFile(askpass!, "utf8")).rejects.toBeDefined();
 });
 
-test("deploy can still use Wrangler OAuth without exposing its token", async () => {
+test("publish can still use Wrangler OAuth without exposing its token", async () => {
   const project = await writeProject();
-  const bin = path.join(project.cwd, ".bin");
-  await mkdir(bin);
-  const wrangler = path.join(bin, "wrangler");
-  await writeFile(wrangler, '#!/bin/sh\nprintf \'{"type":"oauth","token":"oauth-token"}\\n\'\n');
-  await chmod(wrangler, 0o755);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${bin}:${previousPath}`;
+  const command: WranglerCommand = async (args, options) => {
+    expect(args).toEqual(["auth", "token", "--json"]);
+    expect(options.stdio).toBe("capture");
+    return { stdout: '{"type":"oauth","token":"oauth-token"}\n' };
+  };
   try {
     const stack = new MemoryStack();
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         {
           cwd: project.cwd,
           env: { LINEAR_WEBHOOK_SECRET: "secret", LINEAR_API_KEY: "key" },
         },
         {
+          wranglerCommand: command,
           client: ({ apiToken }) => {
             expect(apiToken).toBe("oauth-token");
             return cloudflare();
@@ -489,16 +491,165 @@ test("deploy can still use Wrangler OAuth without exposing its token", async () 
       ),
     ).resolves.toBeDefined();
   } finally {
-    process.env.PATH = previousPath;
     await project.cleanup();
   }
 });
 
-test("GitHub deploy validates local App configuration and preserves a remote webhook secret", async () => {
+test("the default Wrangler subprocess environment excludes workflow secrets", async () => {
+  const directory = await mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "runway-wrangler-"));
+  const wrangler = path.join(directory, "wrangler");
+  await writeFile(
+    wrangler,
+    `#!/bin/sh
+if [ -n "\${LINEAR_API_KEY-}\${WRANGLER_WORKFLOW_SECRET-}\${CLOUDFLARE_AUTH_WORKFLOW_SECRET-}" ]; then
+  exit 41
+fi
+printf '{"type":"oauth","token":"oauth-token"}\\n'
+`,
+  );
+  await chmod(wrangler, 0o755);
+  try {
+    await expect(
+      resolveAuth(
+        {
+          cwd: directory,
+          client: () => ({ accounts: { list: async () => [{ id: "account" }] } }) as CloudflareApi,
+        },
+        {
+          PATH: directory,
+          LINEAR_API_KEY: "workflow-secret",
+          WRANGLER_WORKFLOW_SECRET: "workflow-secret",
+          CLOUDFLARE_AUTH_WORKFLOW_SECRET: "workflow-secret",
+        },
+      ),
+    ).resolves.toMatchObject({ accountId: "account" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("auth explains how to authenticate when Wrangler is not installed", async () => {
+  await expect(resolveAuth({ cwd: "/repo" }, { PATH: "", HOME: process.env.HOME })).rejects.toThrow(
+    "install Wrangler and run `wrangler login`, or set CLOUDFLARE_API_TOKEN",
+  );
+});
+
+test("interactive auth launches the ordinary Wrangler login and retries the token", async () => {
+  const calls: ReadonlyArray<string>[] = [];
+  const command: WranglerCommand = async (args, options) => {
+    calls.push(args);
+    if (args[0] === "login") {
+      expect(options.stdio).toBe("inherit");
+      return { stdout: "" };
+    }
+    expect(options.stdio).toBe("capture");
+    return calls.length === 1
+      ? { stdout: "", stderr: "Not logged in. Run wrangler login.", exitCode: 1 }
+      : { stdout: '{"type":"oauth","token":"after-login"}' };
+  };
+
+  const auth = await resolveAuth(
+    {
+      cwd: "/repo",
+      interactive: true,
+      wranglerCommand: command,
+      client: ({ apiToken }) => {
+        expect(apiToken).toBe("after-login");
+        return { accounts: { list: async () => [{ id: "account" }] } } as CloudflareApi;
+      },
+    },
+    {},
+  );
+
+  expect(auth.accountId).toBe("account");
+  expect(calls).toEqual([["auth", "token", "--json"], ["login"], ["auth", "token", "--json"]]);
+});
+
+test("Wrangler operational failures do not launch a new login", async () => {
+  const calls: ReadonlyArray<string>[] = [];
+  const command: WranglerCommand = async (args) => {
+    calls.push(args);
+    return { stdout: "", stderr: "failed to read Wrangler configuration", exitCode: 1 };
+  };
+
+  await expect(
+    resolveAuth({ cwd: "/repo", interactive: true, wranglerCommand: command }, {}),
+  ).rejects.toThrow("Wrangler authentication check failed");
+  expect(calls).toEqual([["auth", "token", "--json"]]);
+});
+
+test("interactive auth selects an accessible account and rejects invalid injected selections", async () => {
+  const accounts = {
+    list: async () => [
+      { id: "one", name: "First" },
+      { id: "two", name: "Second" },
+    ],
+  };
+  const selected = await resolveAuth(
+    {
+      cwd: "/repo",
+      interactive: true,
+      accountSelector: async (available) => {
+        expect(available).toEqual([
+          { id: "one", name: "First" },
+          { id: "two", name: "Second" },
+        ]);
+        return "two";
+      },
+      client: () => ({ accounts }) as CloudflareApi,
+    },
+    { CLOUDFLARE_API_TOKEN: "token" },
+  );
+  expect(selected.accountId).toBe("two");
+
+  await expect(
+    resolveAuth(
+      {
+        cwd: "/repo",
+        interactive: true,
+        accountSelector: async () => "other",
+        client: () => ({ accounts }) as CloudflareApi,
+      },
+      { CLOUDFLARE_API_TOKEN: "token" },
+    ),
+  ).rejects.toThrow('selected Cloudflare account is not accessible: "other"');
+});
+
+test("auth preserves env-token precedence and never logs in when noninteractive, in CI, or disabled", async () => {
+  let calls = 0;
+  const command: WranglerCommand = async () => {
+    calls += 1;
+    return { stdout: "", stderr: "Not logged in. Run wrangler login.", exitCode: 1 };
+  };
+  const client = ({ apiToken }: { apiToken: string }) => {
+    expect(apiToken).toBe("environment-token");
+    return { accounts: { list: async () => [] } } as CloudflareApi;
+  };
+
+  await expect(
+    resolveAuth(
+      { cwd: "/repo", interactive: true, wranglerCommand: command, client },
+      { CLOUDFLARE_API_TOKEN: "environment-token", CLOUDFLARE_ACCOUNT_ID: "account" },
+    ),
+  ).resolves.toMatchObject({ accountId: "account" });
+  expect(calls).toBe(0);
+
+  for (const [options, env] of [
+    [{ cwd: "/repo", wranglerCommand: command }, {}],
+    [{ cwd: "/repo", interactive: true, wranglerCommand: command }, { CI: "true" }],
+    [{ cwd: "/repo", interactive: true, wranglerAuth: false, wranglerCommand: command }, {}],
+  ] as const) {
+    const before = calls;
+    await expect(resolveAuth(options, env)).rejects.toThrow("Cloudflare authentication required");
+    expect(calls - before).toBe("wranglerAuth" in options ? 0 : 1);
+  }
+});
+
+test("GitHub publish validates local App configuration and preserves a remote webhook secret", async () => {
   const project = await writeProject();
   try {
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         githubRegistry,
         {
           cwd: project.cwd,
@@ -511,10 +662,10 @@ test("GitHub deploy validates local App configuration and preserves a remote web
           stack: () => new MemoryStack(),
         },
       ),
-    ).rejects.toThrow("missing GitHub App deploy config");
+    ).rejects.toThrow("missing GitHub App publish config");
 
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         githubRegistry,
         {
           cwd: project.cwd,
@@ -535,7 +686,7 @@ test("GitHub deploy validates local App configuration and preserves a remote web
     ).rejects.toThrow("missing GitHub App secret");
 
     let manifest: StackManifest | undefined;
-    await deployWithAdapters(
+    await publishWithAdapters(
       githubRegistry,
       {
         cwd: project.cwd,
@@ -571,7 +722,7 @@ test("GitHub credentials do not authenticate a non-GitHub public repository", as
     authentication: { type: "public" },
   };
   try {
-    await deployWithAdapters(
+    await publishWithAdapters(
       registry,
       { cwd: project.cwd, env: githubEnvironment },
       {
@@ -620,12 +771,12 @@ test("repository reachability rejects identity drift and never authenticates pub
   expect(tokenMints).toBe(0);
 });
 
-test("deploy stops before Stack mutation when the source commit is unavailable", async () => {
+test("publish stops before Stack mutation when the source commit is unavailable", async () => {
   const project = await writeProject();
   const stack = new MemoryStack();
   try {
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         { cwd: project.cwd, env: environment },
         {
@@ -644,10 +795,35 @@ test("deploy stops before Stack mutation when the source commit is unavailable",
   }
 });
 
+test("manual workflows bundle immutable artifacts without schedules", async () => {
+  const project = await writeProject();
+  const definition = workflow({ id: "example", trigger: () => manual() }).run(async () => {});
+  const manualRegistry: Registry = [
+    { path: ".runway/workflows/example.ts", exportName: "default", def: definition },
+  ];
+  try {
+    await writeFile(
+      path.join(project.cwd, manualRegistry[0]!.path),
+      moduleOf("default", definition),
+    );
+    const deployment = await buildDeployment(manualRegistry, {
+      accountId: "account",
+      cwd: project.cwd,
+      deploymentName: "runway-example",
+      repository: repositoryFixture,
+      snapshotKeyAvailable: true,
+    });
+    expect(deployment.artifacts.map((artifact) => artifact.workflowId)).toEqual(["example"]);
+    expect(cronsOf(manualRegistry)).toEqual([]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
 test("artifact identities stay stable until workflow source changes", async () => {
   const project = await writeProject();
-  const deployProject = async () =>
-    await deployWithAdapters(
+  const publishProject = async () =>
+    await publishWithAdapters(
       registry,
       { cwd: project.cwd, env: environment },
       {
@@ -658,8 +834,8 @@ test("artifact identities stay stable until workflow source changes", async () =
       },
     );
   try {
-    const first = await deployProject();
-    const unchanged = await deployProject();
+    const first = await publishProject();
+    const unchanged = await publishProject();
     expect(unchanged.artifactVersions).toEqual(first.artifactVersions);
 
     const hello = registry[0]!;
@@ -670,7 +846,7 @@ test("artifact identities stay stable until workflow source changes", async () =
         'run: async () => { return "changed"; }',
       ),
     );
-    const changed = await deployProject();
+    const changed = await publishProject();
     expect(changed.artifactVersions[0]).not.toBe(first.artifactVersions[0]);
     expect(changed.artifactVersions[1]).toBe(first.artifactVersions[1]);
   } finally {
@@ -678,11 +854,11 @@ test("artifact identities stay stable until workflow source changes", async () =
   }
 });
 
-test("deploy accepts remote secrets and requires explicit account selection for ambiguous auth", async () => {
+test("publish accepts remote secrets and requires explicit account selection for ambiguous auth", async () => {
   const project = await writeProject();
   try {
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         {
           cwd: project.cwd,
@@ -698,7 +874,7 @@ test("deploy accepts remote secrets and requires explicit account selection for 
     ).resolves.toBeDefined();
 
     await expect(
-      deployWithAdapters(
+      publishWithAdapters(
         registry,
         {
           cwd: project.cwd,

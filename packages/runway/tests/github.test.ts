@@ -438,7 +438,7 @@ describe("GitHub App installation authentication", () => {
       "invalid GitHub installation token response",
     ],
   ])(
-    "fails closed on an invalid deploy-time repository resolution response",
+    "fails closed on an invalid publication-time repository resolution response",
     async (responses, message) => {
       let calls = 0;
       const provider = createGitHubProvider({
