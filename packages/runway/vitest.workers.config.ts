@@ -5,8 +5,8 @@ import { build as esbuild } from "esbuild";
 import { kCurrentWorker } from "miniflare";
 import { defineConfig } from "vitest/config";
 
-import { buildDeployment } from "./src/internal/deploy/artifacts.ts";
-import type { Registry } from "./src/internal/deploy/registry.ts";
+import { buildDeployment } from "./src/internal/publish/artifacts.ts";
+import type { Registry } from "./src/internal/publish/registry.ts";
 import { COMPATIBILITY_DATE } from "./src/internal/runtime/contract.ts";
 import { secretRef } from "./src/secret.ts";
 import { cron, github, webhook } from "./src/trigger.ts";

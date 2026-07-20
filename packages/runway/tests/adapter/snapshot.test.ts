@@ -69,7 +69,7 @@ test("capture accepts only a fixed summary and removes its private helper on suc
     snapshots.capture({
       target: "/workspace/cache",
       path: "/tmp/archive",
-      budget: { maxBytes: 10_000, maxDurationMs: 20_000, maxEstimatedCostUsd: 1 },
+      budget: { maxBytes: 10_000, maxDurationMs: 20_000 },
     }),
   ).resolves.toMatchObject({
     state: "ready",
@@ -112,7 +112,7 @@ test.each([
     snapshots.capture({
       target: "/workspace/cache",
       path: "/tmp/archive",
-      budget: { maxBytes: 10_000, maxDurationMs: 20_000, maxEstimatedCostUsd: 1 },
+      budget: { maxBytes: 10_000, maxDurationMs: 20_000 },
     }),
   ).resolves.toEqual({ state: "skipped", reason: "corrupt" });
   expect(process.files).toEqual(new Set());
@@ -149,7 +149,7 @@ test("restore verifies the archive before its isolated copy and cleans every fai
       },
       path: "/workspace/.cache.staging",
       target: "/workspace/cache",
-      budget: { maxBytes: 10_000, maxDurationMs: 20_000, maxEstimatedCostUsd: 1 },
+      budget: { maxBytes: 10_000, maxDurationMs: 20_000 },
     }),
   ).resolves.toMatchObject({ state: "ready", treeDigest, byteCount: 7, fileCount: 2 });
   expect(events).toEqual(["download"]);

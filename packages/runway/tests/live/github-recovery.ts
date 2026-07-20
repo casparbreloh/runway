@@ -8,10 +8,10 @@ import { promisify } from "node:util";
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
 
-import { deployWithAdapters } from "../../src/deploy.ts";
-import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
-import type { Registry } from "../../src/internal/deploy/registry.ts";
 import { createGitHubProvider } from "../../src/internal/github/provider.ts";
+import { buildDeployment } from "../../src/internal/publish/artifacts.ts";
+import { publishWithAdapters } from "../../src/internal/publish/publish.ts";
+import type { Registry } from "../../src/internal/publish/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
 import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import {
@@ -641,7 +641,7 @@ const run = async (config: LiveConfig): Promise<void> => {
       }
       createdObjectKeys.add(key);
     }
-    const deployment = await deployWithAdapters(
+    const deployment = await publishWithAdapters(
       registry(project),
       {
         cwd: project,
@@ -660,7 +660,7 @@ const run = async (config: LiveConfig): Promise<void> => {
       JSON.stringify(deployment.artifactVersions) !==
       JSON.stringify(prepared.artifacts.map(({ artifactVersion }) => artifactVersion))
     ) {
-      throw new Error("Deploy returned unexpected workflow artifacts");
+      throw new Error("Publication returned unexpected workflow artifacts");
     }
     const deployedNamespaces = await relatedNamespaces(cf, accountId, scriptName);
     for (const namespace of deployedNamespaces) {
@@ -685,7 +685,7 @@ const run = async (config: LiveConfig): Promise<void> => {
       throw new Error("Deploy did not create exactly the owned Sandbox and coordinator namespaces");
     }
     const webhookUrl = deployment.urls[0]?.url;
-    if (!webhookUrl) throw new Error("Deploy returned no webhook URL");
+    if (!webhookUrl) throw new Error("Publication returned no webhook URL");
     await uploadDriver(cf, accountId, driverName, scriptName);
     const host = new URL(webhookUrl).host;
     const prefix = `${scriptName}.`;

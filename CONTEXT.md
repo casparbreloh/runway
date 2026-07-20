@@ -40,9 +40,8 @@ checkpoint, dependency graph, or tool preset.
 _Avoid_: Dependency cache, package cache, snapshot manager
 
 **Meter**:
-The bounded record of latency, bytes, terminal outcomes, and billable quantities, with explicit
-provider, aggregate, derived, or allocated provenance. Estimates are not provider invoices.
-_Avoid_: Logger, billing record
+The bounded record of lifecycle timing, bytes, continuity loss, and terminal outcomes.
+_Avoid_: Logger, usage record, billing record
 
 **Stack**:
 The exact desired Cloudflare resources owned by one repository deployment, together with immutable

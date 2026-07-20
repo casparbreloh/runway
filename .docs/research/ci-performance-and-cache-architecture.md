@@ -38,7 +38,7 @@ For Runway, this implies:
 
 The foundation source now has the flat `workflow(...).run(...)` and `run.do/exec/cache/sleep`
 surface, exact Source and continuity rules, one Terminal owner, generic safe cache behavior, bounded
-Meter quantities, exact Stack ownership, cache schema 2, runner ABI `runway-sandbox-v2`, and a
+Meter timings and byte counts, exact Stack ownership, cache schema 2, runner ABI `runway-sandbox-v2`, and a
 digest-pinned linux/amd64 `standard-4` desired manifest. This is local implementation evidence.
 
 At exact PR head `df10a82`, 15 sequential development samples on the deployed `standard-4`
@@ -832,10 +832,10 @@ open release gate.
   with the durable winning success grant.
 - Keep metadata/control in Worker/Durable Object while large bytes transfer directly Sandbox↔storage
   through short-lived capabilities; prove commands cannot observe or reuse credentials.
-- Make lookup, transfer, validation, conflicts, bytes, and cost observable; skip work above explicit
-  time/cost/size budgets.
+- Make lookup, transfer, validation, conflicts, bytes, and timing observable; skip work above explicit
+  time/size budgets.
 - Benchmark direct R2 transfer against Cloudflare backup/restore before introducing a storage seam.
-- Add retention/quota/GC and proactive lookup only after lifecycle and cost measurement.
+- Add retention/quota/GC and proactive lookup only after lifecycle measurement.
 
 Local status: private identity, refs, policy, observability, budgets, and success-only publication are
 implemented. Repeatable direct private-R2 live evidence remains open.

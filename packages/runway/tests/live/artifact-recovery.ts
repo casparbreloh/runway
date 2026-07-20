@@ -8,9 +8,9 @@ import { promisify } from "node:util";
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
 
-import { deployWithAdapters } from "../../src/deploy.ts";
-import { buildDeployment } from "../../src/internal/deploy/artifacts.ts";
-import type { Registry } from "../../src/internal/deploy/registry.ts";
+import { buildDeployment } from "../../src/internal/publish/artifacts.ts";
+import { publishWithAdapters } from "../../src/internal/publish/publish.ts";
+import type { Registry } from "../../src/internal/publish/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
 import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { setScriptSecret } from "../../src/internal/secret/store.ts";
@@ -435,7 +435,7 @@ const run = async (): Promise<void> => {
     const expectedV1Artifacts = preparedV1.artifacts.map(({ artifactVersion }) => artifactVersion);
     await ownPreparedArtifacts(expectedV1Artifacts);
     const v1Started = Date.now();
-    const v1 = await deployWithAdapters(
+    const v1 = await publishWithAdapters(
       registry(project),
       {
         cwd: project,
@@ -447,15 +447,15 @@ const run = async (): Promise<void> => {
       { deploymentName: scriptName },
     );
     removeStack = v1.remove;
-    timings.v1DeployMs = Date.now() - v1Started;
+    timings.v1PublishMs = Date.now() - v1Started;
     const webhookUrl = v1.urls[0]?.url;
-    if (!webhookUrl) throw new Error("Deploy returned no webhook URL");
+    if (!webhookUrl) throw new Error("Publication returned no webhook URL");
     const host = new URL(webhookUrl).host;
     const v1DeploymentId = await deploymentIdAt(host);
     identities.v1DeploymentId = v1DeploymentId;
     identities.v1WorkerVersionId = await firstVersionId(cf, accountId, scriptName);
     if (JSON.stringify(v1.artifactVersions) !== JSON.stringify(expectedV1Artifacts)) {
-      throw new Error("First deploy returned unexpected workflow artifacts");
+      throw new Error("First publication returned unexpected workflow artifacts");
     }
     const v1ArtifactVersion = v1.artifactVersions[0]!;
     identities.v1ArtifactVersion = v1ArtifactVersion;
@@ -466,7 +466,7 @@ const run = async (): Promise<void> => {
         deploymentId: identities.v1DeploymentId,
         workerVersionId: identities.v1WorkerVersionId,
         artifactVersion: identities.v1ArtifactVersion,
-        deployMs: timings.v1DeployMs,
+        publishMs: timings.v1PublishMs,
       }),
     );
 
@@ -507,7 +507,7 @@ const run = async (): Promise<void> => {
     const expectedV2Artifacts = preparedV2.artifacts.map(({ artifactVersion }) => artifactVersion);
     await ownPreparedArtifacts(expectedV2Artifacts);
     const v2Started = Date.now();
-    const v2 = await deployWithAdapters(
+    const v2 = await publishWithAdapters(
       registry(project),
       {
         cwd: project,
@@ -519,14 +519,14 @@ const run = async (): Promise<void> => {
       { deploymentName: scriptName },
     );
     removeStack = v2.remove;
-    timings.v2DeployMs = Date.now() - v2Started;
+    timings.v2PublishMs = Date.now() - v2Started;
     const v2WebhookUrl = v2.urls[0]?.url;
-    if (!v2WebhookUrl) throw new Error("Second deploy returned no webhook URL");
+    if (!v2WebhookUrl) throw new Error("Second publication returned no webhook URL");
     const v2DeploymentId = await deploymentIdAt(host);
     identities.v2DeploymentId = v2DeploymentId;
     identities.v2WorkerVersionId = await firstVersionId(cf, accountId, scriptName);
     if (JSON.stringify(v2.artifactVersions) !== JSON.stringify(expectedV2Artifacts)) {
-      throw new Error("Second deploy returned unexpected workflow artifacts");
+      throw new Error("Second publication returned unexpected workflow artifacts");
     }
     const v2ArtifactVersion = v2.artifactVersions[0]!;
     await verifyOwnedArtifact(v2ArtifactVersion);
@@ -655,7 +655,7 @@ const run = async (): Promise<void> => {
       identities,
       timings: { ...timings, totalMs: Date.now() - startedAt },
       readiness:
-        "each deploy returned only after thirty-one matching cache-busted /.runway/version observations over thirty seconds",
+        "each publication returned only after thirty-one matching cache-busted /.runway/version observations over thirty seconds",
       loaderEviction:
         "Cloudflare exposes no supported Worker Loader eviction control; live cold-loader recovery remains unforced",
       workersRuntimeMetadataProof:

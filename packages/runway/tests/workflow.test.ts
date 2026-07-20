@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, github, webhook, workflow } from "runway";
+import { cron, github, manual, webhook, workflow } from "runway";
 import type { CacheDeclaration, CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
@@ -96,6 +96,16 @@ test("the authoring API types secrets, runs, raw webhooks, and cron events", () 
   workflow({ id: "typed-cron", trigger: () => cron("0 9 * * *") }).run(async (_step, event) => {
     expectTypeOf(event).toEqualTypeOf<CronParams>();
   });
+});
+
+test("a manual trigger is declarative and has no event payload", () => {
+  const definition = workflow({ id: "manually-started", trigger: () => manual() }).run(
+    async (_step, event) => {
+      expectTypeOf(event).toEqualTypeOf<undefined>();
+    },
+  );
+
+  expect(JSON.parse(JSON.stringify(definition.trigger))).toEqual({ type: "manual" });
 });
 
 test("a GitHub push trigger is declarative and types its normalized event", () => {

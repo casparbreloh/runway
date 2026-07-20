@@ -11,7 +11,7 @@ export const nonGitHubDeployEnv = (
   const result = { ...env, ...overrides };
   for (const name of GITHUB_DEPLOY_BINDINGS) delete result[name];
   if (GITHUB_DEPLOY_BINDINGS.some((name) => result[name] !== undefined)) {
-    throw new Error("non-GitHub live smoke inherited GitHub App deploy config");
+    throw new Error("non-GitHub live smoke inherited GitHub App publication config");
   }
   return result;
 };

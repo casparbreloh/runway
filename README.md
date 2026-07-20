@@ -2,8 +2,8 @@
 
 Runway is a TypeScript-first authoring layer over a language-neutral workflow and repository-runner
 foundation on Cloudflare. Author workflows with
-`workflow({ id, secrets?, tools?, trigger }).run(async (step, event) => { ... })`, export them from
-`.runway/workflows/**/*.ts`, and deploy them with `runway deploy`.
+`workflow({ id, secrets?, tools?, trigger }).run(async (step, event) => { ... })` and export them from
+`.runway/workflows/**/*.ts`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox, cache transport, credentials,
 terminal coordination, metering, and resource reconciliation stay internal. Runway does not own a
@@ -16,6 +16,15 @@ For the domain vocabulary see [`CONTEXT.md`](CONTEXT.md). For direction and non-
 [`.docs/VISION.md`](.docs/VISION.md).
 
 ## A Workflow
+
+Start with offline scaffolding:
+
+```sh
+npm add --save-dev runway
+npx runway init
+```
+
+This creates only `.runway/workflows/example.ts` and preserves it on repeated initialization.
 
 ```ts
 // .runway/workflows/hello.ts
@@ -148,6 +157,7 @@ evidence-driven: its own repository removed whole-tree caches after they lost on
 
 Triggers are explicit; there is no default public start endpoint.
 
+- `manual()` declares a workflow with no automatic ingress and gives an `undefined` event.
 - `cron("0 9 * * *")` gives `event: { cron, scheduledTime }`.
 - `github({ checkName, events })` selects pushes and pull requests, binds each accepted delivery to
   its exact repository and SHA, and keeps the GitHub Checks lifecycle internal.
@@ -160,15 +170,15 @@ Triggers are explicit; there is no default public start endpoint.
 
 Declare every workflow secret, including webhook signing secrets. In `trigger(ctx)`,
 `ctx.secrets.X` is a branded name reference; in the run callback, `step.secrets.X` is the captured
-runtime string. Deploy fails before upload when a declared secret is missing.
+runtime string. Internal publication fails before upload when a declared secret is missing.
 
 GitHub triggers use internal `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and
 `RUNWAY_GITHUB_WEBHOOK_SECRET` bindings. They never enter authored workflow secrets or repository
 commands.
 
-## Deployment And Stack Ownership
+## Internal Publication And Stack Ownership
 
-`runway deploy` discovers `.runway/workflows/**/*.ts`, builds immutable content-addressed workflow
+The internal publication path discovers `.runway/workflows/**/*.ts`, builds immutable content-addressed workflow
 artifacts, and creates one repo-scoped Cloudflare Stack. A Stack manifest and immutable receipt bind
 the exact Worker version/deployment, Dynamic Workflow, container image and rollout, Durable Object
 namespaces, schedules, routes, bindings, secret names, workers.dev state, and exact owned bucket
@@ -182,12 +192,10 @@ Worker, Dynamic Workflow, and container use that exact name. Cloudflare derives 
 namespace names from the Worker and class names. The digest-pinned linux/amd64 Sandbox uses
 `standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
 
-```sh
-wrangler login
-runway deploy
-```
-
-In CI, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
+Runway does not own or store Cloudflare credentials. Cloud commands use an installed
+[Wrangler](https://developers.cloudflare.com/workers/wrangler/), Cloudflare's official CLI. They use
+an existing Wrangler login or launch the ordinary `wrangler login` flow lazily in an interactive
+terminal. If Wrangler is not installed, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
 with `runway secrets set NAME ...`. Deployment identity cannot be configured through `package.json`
 or environment variables.
 
@@ -202,7 +210,6 @@ to the deployed `/.runway/github` endpoint and use the same webhook secret as
 export RUNWAY_GITHUB_APP_ID=12345
 export RUNWAY_GITHUB_PRIVATE_KEY="$(cat /path/to/github-app.pem)"
 export RUNWAY_GITHUB_WEBHOOK_SECRET="$(openssl rand -hex 32)"
-runway deploy
 ```
 
 ## Development Status
@@ -228,7 +235,7 @@ fallback.
 
 Implemented locally: workflow authoring, triggers, secrets, exact Source, durable operations,
 run-bound Sandbox execution, one Terminal authority, generic cache identity/restore/publication,
-Meter quantities, immutable workflow artifacts, GitHub delivery and Checks coordination, and exact
+Meter lifecycle timings, immutable workflow artifacts, GitHub delivery and Checks coordination, and exact
 Stack ownership/reconciliation.
 
 Still intentionally deferred: comparative release benchmarking, ecosystem-specific application cache adapters, and final

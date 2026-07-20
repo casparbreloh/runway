@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { expect, test } from "vitest";
+
+import { loadRegistry } from "../src/internal/publish/registry.ts";
 
 const repo = path.resolve(import.meta.dirname, "../../..");
 const fixtureRoot = path.join(repo, "packages/runway");
@@ -19,7 +21,6 @@ const run = async (
       LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
       PATH: process.env.PATH,
       NODE_OPTIONS: process.env.NODE_OPTIONS,
-      RUNWAY_DISABLE_WRANGLER_AUTH: "1",
       ...env,
     },
   });
@@ -43,99 +44,45 @@ const project = async (
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
-const workflow = (
-  id: string,
-  secrets: ReadonlyArray<string> = [],
-): string => `import { cron, workflow } from "runway";
-
-export const ${id.replaceAll("-", "_")} = workflow({
-  id: ${JSON.stringify(id)},
-  secrets: ${JSON.stringify(secrets)},
-  trigger: () => cron("* * * * *"),
-}).run(async () => {});
-`;
-
-const defaultWorkflow = (
-  id: string,
-  secrets: ReadonlyArray<string> = [],
-): string => `import { cron, workflow } from "runway";
-
-export default workflow({
-  id: ${JSON.stringify(id)},
-  secrets: ${JSON.stringify(secrets)},
-  trigger: () => cron("* * * * *"),
-}).run(async () => {});
-`;
-
-test("deploy reports missing required env vars before upload", async () => {
-  const missingAll = await run(["deploy"]);
-
-  expect(missingAll.code, missingAll.output).toBe(1);
-  expect(missingAll.output).toMatch(/runway: deploy failed/);
-  expect(missingAll.output).toMatch(
-    /missing required env var\(s\): CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID/,
-  );
-});
-
-test("deploy discovers workflows without config", async () => {
-  const app = await project({
-    ".runway/workflows/hello.ts": defaultWorkflow("hello", ["HELLO_SECRET"]),
-    ".runway/workflows/ignored.test.ts": workflow("ignored", ["IGNORED_SECRET"]),
-  });
+test("init works offline, creates one manual workflow, and preserves existing files", async () => {
+  const app = await project({});
+  const example = path.join(app.cwd, ".runway/workflows/example.ts");
+  const existing = path.join(app.cwd, ".runway/workflows/existing.ts");
 
   try {
-    const result = await run(["deploy"], {}, app.cwd);
+    const first = await run(["init"], { PATH: "" }, app.cwd);
 
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
-    expect(result.output).not.toMatch(/IGNORED_SECRET/);
+    expect(first.code, first.output).toBe(0);
+    expect(first.output).toMatch(/Created \.runway\/workflows\/example\.ts/);
+    expect(await readdir(path.dirname(example))).toEqual(["example.ts"]);
+    const registered = await loadRegistry(app.cwd);
+    expect(registered).toHaveLength(1);
+    expect(registered[0]!.def.id).toBe("example");
+    expect(registered[0]!.def.trigger.type).toBe("manual");
+
+    await writeFile(example, "custom example\n");
+    await writeFile(existing, "existing workflow\n");
+    const second = await run(["init"], {}, app.cwd);
+
+    expect(second.code, second.output).toBe(0);
+    expect(second.output).toMatch(/Preserved \.runway\/workflows\/example\.ts/);
+    expect(await readFile(example, "utf8")).toBe("custom example\n");
+    expect(await readFile(existing, "utf8")).toBe("existing workflow\n");
   } finally {
     await app.cleanup();
   }
 });
 
-test("deploy supports barrel exports without duplicate registration", async () => {
-  const app = await project({
-    ".runway/workflows/hello.ts": workflow("hello", ["HELLO_SECRET"]),
-    ".runway/workflows/index.ts": 'export { hello } from "./hello.ts";\n',
-  });
-
+test("init rejects unexpected arguments without creating files", async () => {
+  const app = await project({});
   try {
-    const result = await run(["deploy"], {}, app.cwd);
+    const result = await run(["init", "unexpected"], {}, app.cwd);
 
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/missing required env var\(s\): CLOUDFLARE_API_TOKEN/);
-  } finally {
-    await app.cleanup();
-  }
-});
-
-test("deploy errors when no workflows are discovered", async () => {
-  const app = await project({
-    ".runway/workflows/helper.ts": "export const helper = 1;\n",
-  });
-
-  try {
-    const result = await run(["deploy"], {}, app.cwd);
-
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/no workflows found; checked 1 file\(s\)/);
-  } finally {
-    await app.cleanup();
-  }
-});
-
-test("deploy errors on duplicate workflow ids", async () => {
-  const app = await project({
-    ".runway/workflows/one.ts": workflow("same"),
-    ".runway/workflows/two.ts": workflow("same"),
-  });
-
-  try {
-    const result = await run(["deploy"], {}, app.cwd);
-
-    expect(result.code).toBe(1);
-    expect(result.output).toMatch(/duplicate workflow id "same"/);
+    expect(result.code, result.output).toBe(1);
+    expect(result.output).toMatch(/usage: runway init/);
+    await expect(
+      readFile(path.join(app.cwd, ".runway/workflows/example.ts")),
+    ).rejects.toBeDefined();
   } finally {
     await app.cleanup();
   }

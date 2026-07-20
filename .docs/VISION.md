@@ -33,9 +33,9 @@ The public Run contains only `runId`, declared secrets, and flat `do`, `exec`, `
 methods. Sandbox placement, Source credentials, cache refs and transfer capabilities, terminal
 claims, Meter samples, provider steps, and Stack receipts remain internal.
 
-The public cache declaration names one tree, one caller-defined string or exact-source file key, and
-optional byte/time/estimated-cost budgets. It is not a package-manager cache DSL, dependency graph,
-content-store API, or checkpoint primitive.
+The public cache declaration names caller-owned trees and one caller-defined string or exact-source
+file key. Private normalized cache trees enforce byte/time budgets. Cache is not a package-manager
+DSL, dependency graph, content-store API, or checkpoint primitive.
 
 ## Foundation Boundaries
 
@@ -97,10 +97,8 @@ cannot advance shared state.
 
 ### Meter
 
-Meter records bounded sandbox/source/exec/reconnect/cache/loss/run timings and raw billable
-quantities. Cost quantities state whether they are provider-measured, provider-aggregate, derived, or
-allocated and carry a versioned price table. `maxEstimatedCostUsd` uses the same conservative
-estimator, but neither estimates nor allocated quantities are represented as provider invoices.
+Meter records bounded sandbox/source/exec/reconnect/cache/loss/run lifecycle, timing, byte, and
+outcome samples. It does not record usage quantities or estimate provider costs.
 
 ### Stack
 
@@ -149,8 +147,8 @@ The foundation primitives are independent of comparative marketing evidence. Bef
    cancellation fencing, credential unobservability, and cleanup in the exact pinned image.
 4. Remove the obsolete public bootstrap only after the new cache is no longer dependent on it.
 5. Run a statistically meaningful comparison against identical GitHub four-core commands before
-   publishing relative speed or cost claims; report webhook-to-terminal P50/P95 and total variable
-   infrastructure cost from Meter quantities.
+   publishing relative speed or cost claims; report webhook-to-terminal P50/P95 and provider-backed
+   total variable infrastructure cost.
 6. Pass local and live behavior gates plus standards, specification, and architecture review before
    publication.
 

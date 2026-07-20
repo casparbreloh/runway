@@ -36,7 +36,8 @@ task runs.
   `mise run test`.
 - Exact pinned-image cache contract: `mise run test:image` (requires privileged Docker with
   linux/amd64 support).
-- CLI: `runway deploy` and `runway secrets set`.
+- CLI: `runway init` and `runway secrets set`; cloud execution and GitHub connection commands are
+  still being implemented.
 
 ## Authoring Model
 
@@ -90,7 +91,7 @@ export default workflow({
   signatures, installation IDs, credentials, and Checks internal.
 - Declare every workflow secret, including webhook signing secrets.
 - Trigger secrets are branded name references; step secrets are runtime strings.
-- Deploy fails before upload when a declared secret is missing from env and the repo Worker.
+- Internal publication fails before upload when a declared secret is missing from env and the repo Worker.
 - GitHub App bindings are `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`, and
   `RUNWAY_GITHUB_WEBHOOK_SECRET`; they are internal and must not appear in workflow secrets.
 
@@ -107,7 +108,7 @@ export default workflow({
   internal to the Cloudflare Sandbox implementation.
 - The CLI discovers `.runway/workflows/**/*.ts`, excluding tests, specs, and type files.
 - Default exports, named exports, and barrel re-exports are supported.
-- Deploy stores each bundled workflow as one immutable content-addressed artifact in the shared
+- Internal publication stores each bundled workflow as one immutable content-addressed artifact in the shared
   account R2 bucket before uploading the host. Trigger starts persist only the artifact version;
   resumed Dynamic Workflows load that exact artifact.
 - Declared secrets are captured once per run in an encrypted durable snapshot, so secret rotation
@@ -118,7 +119,7 @@ export default workflow({
   private shared account artifact bucket. Sync/remove re-inventory exact provider state and preserve
   unknown or shared resources.
 - Command steps lazily use one internal Cloudflare Sandbox workspace per workflow run and clean it
-  up when the run ends. Deploy captures the repository remote and exact commit inside each workflow
+  up when the run ends. Internal publication captures the repository remote and exact commit inside each workflow
   artifact. GitHub deliveries provide an exact run source. Private checkout uses a purpose-scoped,
   repository-scoped installation token only in the checkout process environment. The Sandbox
   prepares `/workspace` before the first command and reconstructs the same commit, reminting when
@@ -140,7 +141,7 @@ export default workflow({
   `node_modules` costs more and runs slower than a clean install.
 - Cloudflare Artifacts is a possible future `Source` implementation only after repeated exact-revision
   latency and total-cost evidence wins. It is not the cache store.
-- Deploy updates schedules, removes stale workflow resources for that script, enables workers.dev,
+- Internal publication updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
   returns webhook URLs, including one shared `/.runway/github` ingress when configured.
 - Keep Sandbox and container deployment resources internal to the managed command implementation.
@@ -150,6 +151,9 @@ export default workflow({
 
 ## Conventions
 
+- Runway is pre-1.0. Do not preserve backward compatibility unless explicitly requested. Prefer the
+  simplest current design: remove obsolete commands, aliases, migrations, compatibility branches,
+  deleted-feature tests, and stale documentation instead of carrying the old state forward.
 - Keep `.runway/workflows/` in the root TypeScript solution.
 - Test behavior at the SDK, Workers runtime, CLI, and Cloudflare API seams. Do not test internal
   helpers or generated source strings directly.

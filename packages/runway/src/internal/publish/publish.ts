@@ -1,13 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 
-import type { CloudflareApi } from "./internal/cloudflare.ts";
-import { buildDeployment } from "./internal/deploy/artifacts.ts";
-import { resolveAuth } from "./internal/deploy/auth.ts";
-import { deploymentNameOf } from "./internal/deploy/name.ts";
-import { cronsOf, secretNamesOf, type Registry } from "./internal/deploy/registry.ts";
-import { waitForRollout } from "./internal/deploy/rollout.ts";
-import { createGitHubProvider, type GitHubProvider } from "./internal/github/provider.ts";
+import { resolveAuth } from "../auth.ts";
+import type { AccountSelector, WranglerCommand } from "../auth.ts";
+import type { CloudflareApi } from "../cloudflare.ts";
+import { createGitHubProvider, type GitHubProvider } from "../github/provider.ts";
 import {
   CACHE_R2_ACCESS_KEY_ID_BINDING,
   CACHE_R2_SECRET_ACCESS_KEY_BINDING,
@@ -18,44 +15,50 @@ import {
   DATA_BUCKET,
   SECRET_SNAPSHOT_KEY_BINDING,
   STATE_BUCKET,
-} from "./internal/runtime/contract.ts";
-import { listScriptSecrets } from "./internal/secret/store.ts";
+} from "../runtime/contract.ts";
+import { listScriptSecrets } from "../secret/store.ts";
 import {
   assertRepositorySourceReachable,
   resolveRepositorySource,
   type RepositorySource,
-} from "./internal/source/repository.ts";
+} from "../source/repository.ts";
 import {
   CloudflareStackControl,
   cloudflareStackManifest,
   validateBindings,
-} from "./internal/stack/cloudflare.ts";
-import { Stack, type StackControl, type StackManifest } from "./internal/stack/stack.ts";
+} from "../stack/cloudflare.ts";
+import { Stack, type StackControl, type StackManifest } from "../stack/stack.ts";
+import { buildDeployment } from "./artifacts.ts";
+import { deploymentNameOf } from "./name.ts";
+import { cronsOf, secretNamesOf, type Registry } from "./registry.ts";
+import { waitForRollout } from "./rollout.ts";
 
-export type { CloudflareApi } from "./internal/cloudflare.ts";
-export { resolveAuth } from "./internal/deploy/auth.ts";
+export type { CloudflareApi } from "../cloudflare.ts";
 
 export interface ProgressEvent {
-  readonly step: "load" | "build" | "deploy";
+  readonly step: "build" | "publish";
   readonly status: "start" | "done";
 }
 
-interface DeployContext {
+interface PublishContext {
   readonly cwd: string;
   readonly env?: Record<string, string | undefined>;
   readonly onProgress?: (event: ProgressEvent) => void;
   readonly wranglerAuth?: boolean;
+  readonly interactive?: boolean;
 }
 
-interface DeployOutput {
+interface PublishOutput {
   readonly name: string;
   readonly artifactVersions: ReadonlyArray<string>;
   readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
   readonly remove: () => Promise<void>;
 }
 
-interface DeployAdapters {
+interface PublishAdapters {
   readonly deploymentName?: string;
+  readonly wranglerCommand?: WranglerCommand;
+  readonly accountSelector?: AccountSelector;
   readonly client?: (opts: { apiToken: string }) => CloudflareApi;
   readonly repository?: RepositorySource;
   readonly reachable?: (repository: RepositorySource) => Promise<void>;
@@ -105,17 +108,22 @@ const waitUntilReady = async (opts: {
     ...opts,
   });
 
-export const deployWithAdapters = async (
+export const publishWithAdapters = async (
   registry: Registry,
-  opts: DeployContext,
-  adapters: DeployAdapters,
-): Promise<DeployOutput> => {
+  opts: PublishContext,
+  adapters: PublishAdapters,
+): Promise<PublishOutput> => {
   const env = opts.env ?? process.env;
   const secrets = secretNamesOf(registry);
   let repository = adapters.repository ?? (await resolveRepositorySource(opts.cwd));
   const deploymentName = adapters.deploymentName ?? deploymentNameOf(repository);
   const { accountId, cf } = await resolveAuth(
-    { ...opts, ...(adapters.client ? { client: adapters.client } : {}) },
+    {
+      ...opts,
+      ...(adapters.client ? { client: adapters.client } : {}),
+      ...(adapters.wranglerCommand ? { wranglerCommand: adapters.wranglerCommand } : {}),
+      ...(adapters.accountSelector ? { accountSelector: adapters.accountSelector } : {}),
+    },
     env,
   );
   const remoteSecrets = await listScriptSecrets(cf, accountId, deploymentName);
@@ -144,10 +152,10 @@ export const deployWithAdapters = async (
       ...(privateKey ? [] : [GITHUB_PRIVATE_KEY_BINDING]),
     ];
     if (missing.length > 0) {
-      throw new Error(`missing GitHub App deploy config: ${missing.join(", ")}`);
+      throw new Error(`missing GitHub App publish config: ${missing.join(", ")}`);
     }
     if (!/^[1-9][0-9]*$/.test(appId!) || privateKey!.trim().length === 0) {
-      throw new Error("invalid GitHub App deploy config");
+      throw new Error("invalid GitHub App publish config");
     }
   }
   if (
@@ -251,7 +259,7 @@ export const deployWithAdapters = async (
       key: randomBytes(32).toString("base64"),
     });
   }
-  opts.onProgress?.({ step: "deploy", status: "start" });
+  opts.onProgress?.({ step: "publish", status: "start" });
   const dataBucket = DATA_BUCKET;
   const stateBucket = STATE_BUCKET;
   const repositoryId =
@@ -287,7 +295,7 @@ export const deployWithAdapters = async (
   const stack = new Stack(manifest, control);
   await stack.sync();
 
-  opts.onProgress?.({ step: "deploy", status: "done" });
+  opts.onProgress?.({ step: "publish", status: "done" });
   return {
     name: deploymentName,
     artifactVersions: deployment.artifacts.map(({ artifactVersion }) => artifactVersion),
@@ -297,6 +305,3 @@ export const deployWithAdapters = async (
     },
   };
 };
-
-export const deploy = async (registry: Registry, opts: DeployContext): Promise<DeployOutput> =>
-  await deployWithAdapters(registry, opts, {});

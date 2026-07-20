@@ -1,14 +1,14 @@
 #!/usr/bin/env node
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
 
 import { defineCommand, runMain } from "citty";
 import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
-import { deploy as deployCloudflare, resolveAuth } from "../src/deploy.ts";
-import type { ProgressEvent } from "../src/deploy.ts";
-import { deploymentNameOf } from "../src/internal/deploy/name.ts";
-import { loadRegistry } from "../src/internal/deploy/registry.ts";
+import { resolveAuth } from "../src/internal/auth.ts";
+import { deploymentNameOf } from "../src/internal/publish/name.ts";
 import {
   COMPATIBILITY_DATE,
   isSecretSnapshotKeyBinding,
@@ -17,46 +17,27 @@ import { setScriptSecret } from "../src/internal/secret/store.ts";
 import { resolveRepositorySource } from "../src/internal/source/repository.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
-const LABELS: Record<ProgressEvent["step"], Record<ProgressEvent["status"], string>> = {
-  load: { start: "Loading", done: "Loaded" },
-  build: { start: "Building", done: "Built" },
-  deploy: { start: "Deploying", done: "Deployed" },
-};
+const EXAMPLE_WORKFLOW = `import { manual, workflow } from "runway";
 
-const spinner = () => {
-  const frames = [".  ", ".. ", "..."];
-  let timer: NodeJS.Timeout | undefined;
-  let i = 0;
-  const clear = () => {
-    if (!timer) return;
-    clearInterval(timer);
-    timer = undefined;
-    process.stderr.write("\r\x1b[K");
-  };
-  return {
-    event(event: ProgressEvent) {
-      const label = LABELS[event.step][event.status];
-      if (!process.stderr.isTTY) {
-        console.error(event.status === "start" ? `${label}...` : `${label}.`);
-        return;
-      }
-      clear();
-      if (event.status === "start") {
-        process.stderr.write(`${label}${frames[0]}\r`);
-        timer = setInterval(() => {
-          i = (i + 1) % frames.length;
-          process.stderr.write(`${label}${frames[i]}\r`);
-        }, 80);
-      } else {
-        console.error(`${label}.`);
-      }
-    },
-    fail(message: string) {
-      clear();
-      console.error("runway: deploy failed");
-      console.error(`  ${message}`);
-    },
-  };
+export default workflow({
+  id: "example",
+  trigger: () => manual(),
+}).run(async (step) => {
+  await step.exec("echo", 'echo "Hello from Runway"');
+});
+`;
+
+const runInit = async (): Promise<void> => {
+  const relative = path.join(".runway", "workflows", "example.ts");
+  const file = path.resolve(process.cwd(), relative);
+  await mkdir(path.dirname(file), { recursive: true });
+  try {
+    await writeFile(file, EXAMPLE_WORKFLOW, { flag: "wx" });
+    console.log(`Created ${relative}`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    console.log(`Preserved ${relative}`);
+  }
 };
 
 const parseSecretsSet = (args: ReadonlyArray<string>): { name: string; value: string } => {
@@ -70,6 +51,8 @@ const parseSecretsSet = (args: ReadonlyArray<string>): { name: string; value: st
   }
   return { name, value };
 };
+
+const interactiveCloudAuth = (): boolean => Boolean(process.stdin.isTTY);
 
 const isMissingScript = (err: unknown): boolean =>
   err instanceof Error &&
@@ -107,7 +90,7 @@ const runSecrets = async (args: ReadonlyArray<string>): Promise<void> => {
   const { name, value } = parseSecretsSet(rest);
   const scriptName = deploymentNameOf(await resolveRepositorySource(process.cwd()));
   const { accountId, cf } = await resolveAuth(
-    { cwd: process.cwd(), env: process.env },
+    { cwd: process.cwd(), interactive: interactiveCloudAuth() },
     process.env,
   );
   try {
@@ -136,26 +119,15 @@ const secrets = defineCommand({
   meta: { name: "secrets", description: "Manage workflow secrets" },
   subCommands: { set: secretsSet },
 });
-const deploy = defineCommand({
-  meta: { name: "deploy", description: "Build and deploy all registered workflows" },
-  async run() {
-    const out = spinner();
+const init = defineCommand({
+  meta: { name: "init", description: "Create an example workflow" },
+  async run({ rawArgs }) {
     try {
-      const cwd = process.cwd();
-      out.event({ step: "load", status: "start" });
-      const registry = await loadRegistry(cwd);
-      out.event({ step: "load", status: "done" });
-      const result = await deployCloudflare(registry, {
-        cwd,
-        env: process.env,
-        onProgress: (event) => out.event(event),
-      });
-      console.log(`Deployed ${registry.length} workflow(s) as ${result.name}`);
-      for (const { id, url } of result.urls) {
-        console.log(`  ${id}: POST ${url}`);
-      }
+      if (rawArgs.length > 0) throw new Error("usage: runway init");
+      await runInit();
     } catch (err) {
-      out.fail(err instanceof Error ? err.message : String(err));
+      console.error("runway: init failed");
+      console.error(`  ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
     }
   },
@@ -163,7 +135,10 @@ const deploy = defineCommand({
 
 await runMain(
   defineCommand({
-    meta: { name: "runway", version: pkg.version, description: "Deploy code-first workflows" },
-    subCommands: { deploy, secrets },
+    meta: { name: "runway", version: pkg.version, description: "Run code-first workflows" },
+    subCommands: {
+      init,
+      secrets,
+    },
   }),
 );

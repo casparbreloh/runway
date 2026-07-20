@@ -2,13 +2,12 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import type { PreparedCache } from "./internal/cache/cache.ts";
-import { CLOUDFLARE_PRICE_TABLE, Meter } from "./internal/meter.ts";
+import { Meter } from "./internal/meter.ts";
 import type { RuntimeBinding } from "./internal/runtime/binding.ts";
 import { RUNTIME_BINDING } from "./internal/runtime/contract.ts";
 import { failureDiagnosticOf } from "./internal/runtime/diagnostic.ts";
 import type { FailureDiagnostic } from "./internal/runtime/diagnostic.ts";
 import { createRouter } from "./internal/runtime/router.ts";
-import { SANDBOX_CAPACITY } from "./internal/sandbox/config.ts";
 import { ExecTimeoutError, RunLostError, Sandbox } from "./internal/sandbox/sandbox.ts";
 import { source } from "./internal/source/source.ts";
 import type { SourceIdentity } from "./internal/source/source.ts";
@@ -25,16 +24,6 @@ const CACHE_PUBLISH_STEP = "runway:cache-publish";
 const TERMINAL_START_STEP = "runway:terminal-start";
 const TERMINAL_CLAIM_STEP = "runway:terminal-claim";
 const TERMINAL_PUBLISH_STEP = "runway:terminal-publish";
-
-const measuredWorkflowStep = async <T>(meter: Meter, work: () => Promise<T>): Promise<T> => {
-  try {
-    return await work();
-  } finally {
-    try {
-      meter.usage("workflow", "step", 1, "derived");
-    } catch {}
-  }
-};
 
 const cachePublicationIdentity = async (
   finalization: Finalization,
@@ -68,9 +57,6 @@ const cachePublicationIdentity = async (
       pending.declaration.budget?.maxDurationMs === undefined
         ? "maxDurationMs:unset"
         : `maxDurationMs:${pending.declaration.budget.maxDurationMs}`,
-      pending.declaration.budget?.maxEstimatedCostUsd === undefined
-        ? "maxEstimatedCostUsd:unset"
-        : `maxEstimatedCostUsd:${pending.declaration.budget.maxEstimatedCostUsd}`,
       pending.revision.cacheIdDigest,
       pending.revision.declarationDigest,
       pending.revision.etag ?? "etag:missing",
@@ -184,48 +170,43 @@ const makeStepRuntime = (
   });
   const operations: Pick<Step, "do" | "exec" | "cache" | "sleep"> = {
     do: <T>(id: string, work: () => T | Promise<T>): Promise<T> =>
-      measuredWorkflowStep(
-        meter,
-        () => step.do(id, async () => (await work()) as never) as Promise<T>,
-      ),
+      step.do(id, async () => (await work()) as never) as Promise<T>,
     exec: (id, command) =>
       sandbox.exec(
         {
           id,
           run: async (digest, work, rollback) => {
             let executed = false;
-            const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-              step.do(
-                id,
-                { retries: { limit: 5, delay: 0 } },
-                async (ctx) => {
-                  executed = true;
-                  try {
+            const recorded: unknown = await step.do(
+              id,
+              { retries: { limit: 5, delay: 0 } },
+              async (ctx) => {
+                executed = true;
+                try {
+                  return {
+                    digest,
+                    result: await work({
+                      count: ctx.step.count,
+                      attempt: ctx.attempt,
+                    }),
+                  } as never;
+                } catch (error) {
+                  if (error instanceof RunLostError) {
                     return {
                       digest,
-                      result: await work({
-                        count: ctx.step.count,
-                        attempt: ctx.attempt,
-                      }),
+                      lost: { message: error.message, attempt: ctx.attempt },
                     } as never;
-                  } catch (error) {
-                    if (error instanceof RunLostError) {
-                      return {
-                        digest,
-                        lost: { message: error.message, attempt: ctx.attempt },
-                      } as never;
-                    }
-                    if (error instanceof ExecTimeoutError) {
-                      return {
-                        digest,
-                        timeout: { message: error.message, attempt: ctx.attempt },
-                      } as never;
-                    }
-                    throw error;
                   }
-                },
-                { rollback },
-              ),
+                  if (error instanceof ExecTimeoutError) {
+                    return {
+                      digest,
+                      timeout: { message: error.message, attempt: ctx.attempt },
+                    } as never;
+                  }
+                  throw error;
+                }
+              },
+              { rollback },
             );
             if (
               !recorded ||
@@ -260,12 +241,10 @@ const makeStepRuntime = (
       return await sandbox.cacheSet(id, declaration, (treeId) => ({
         id: treeId,
         run: async (digest, work) => {
-          const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-            step.do(
-              treeId,
-              { retries: { limit: 5, delay: 0 } },
-              async () => ({ digest, record: await work() }) as never,
-            ),
+          const recorded: unknown = await step.do(
+            treeId,
+            { retries: { limit: 5, delay: 0 } },
+            async () => ({ digest, record: await work() }) as never,
           );
           if (
             !recorded ||
@@ -283,19 +262,16 @@ const makeStepRuntime = (
         },
       }));
     },
-    sleep: (id: string, durationMs: number): Promise<void> =>
-      measuredWorkflowStep(meter, async () => await step.sleep(id, durationMs)),
+    sleep: (id: string, durationMs: number): Promise<void> => step.sleep(id, durationMs),
   };
   return {
     ...operations,
     cleanup: async () => {
       if (sandbox.hasPendingCaches()) {
-        const recorded = (await measuredWorkflowStep(meter, async () =>
-          step.do(
-            CACHE_PREPARE_STEP,
-            { retries: { limit: 5, delay: 0 } },
-            async () => (await sandbox.prepare()) as never,
-          ),
+        const recorded = (await step.do(
+          CACHE_PREPARE_STEP,
+          { retries: { limit: 5, delay: 0 } },
+          async () => (await sandbox.prepare()) as never,
         )) as readonly PreparedCache[];
         if (!Array.isArray(recorded)) throw new Error("invalid durable cache preparation");
         preparedCaches = structuredClone(recorded);
@@ -310,11 +286,13 @@ const makeStepRuntime = (
       return sandbox.finish(finalization, ready, {
         run: async (work) => {
           const identity = await cachePublicationIdentity(finalization, ready);
-          const recorded: unknown = await measuredWorkflowStep(meter, async () =>
-            step.do(CACHE_PUBLISH_STEP, { retries: { limit: 5, delay: 0 } }, async () => {
+          const recorded: unknown = await step.do(
+            CACHE_PUBLISH_STEP,
+            { retries: { limit: 5, delay: 0 } },
+            async () => {
               await work();
               return { identity, published: true } as never;
-            }),
+            },
           );
           if (
             !recorded ||
@@ -342,11 +320,9 @@ const makeTerminal = async (
   let winner: TerminalRecord | undefined;
   const state: TerminalState = {
     claim: async (candidate) => {
-      winner = (await measuredWorkflowStep(meter, async () =>
-        step.do(
-          TERMINAL_CLAIM_STEP,
-          async () => (await binding.claimTerminal(runId, candidate)) as never,
-        ),
+      winner = (await step.do(
+        TERMINAL_CLAIM_STEP,
+        async () => (await binding.claimTerminal(runId, candidate)) as never,
       )) as TerminalRecord;
       return winner;
     },
@@ -356,15 +332,13 @@ const makeTerminal = async (
     await binding.terminal(runId),
     state,
     async (finalization) => {
-      await measuredWorkflowStep(meter, async () =>
-        step.do(TERMINAL_PUBLISH_STEP, async () => {
-          await binding.publishTerminal(
-            runId,
-            finalization,
-            finalization.outcome === "failure" ? diagnostic.value : null,
-          );
-        }),
-      );
+      await step.do(TERMINAL_PUBLISH_STEP, async () => {
+        await binding.publishTerminal(
+          runId,
+          finalization,
+          finalization.outcome === "failure" ? diagnostic.value : null,
+        );
+      });
     },
     { meter },
   );
@@ -378,17 +352,13 @@ export const toEntrypoint = (
       const binding = (this.env as DynamicWorkerEnv)[RUNTIME_BINDING];
       if (!binding) throw new Error(`missing runtime binding: ${RUNTIME_BINDING}`);
       const meter = new Meter({
-        priceTable: CLOUDFLARE_PRICE_TABLE,
-        container: SANDBOX_CAPACITY,
         emit: (report) => console.log({ type: "runway-meter", report }),
       });
       const diagnostic: { value: FailureDiagnostic | null } = { value: null };
       const terminal = await makeTerminal(step, binding, event.instanceId, meter, diagnostic);
-      const started = (await measuredWorkflowStep(meter, async () =>
-        step.do(
-          TERMINAL_START_STEP,
-          async () => (await binding.startRun(event.instanceId)) as never,
-        ),
+      const started = (await step.do(
+        TERMINAL_START_STEP,
+        async () => (await binding.startRun(event.instanceId)) as never,
       )) as boolean;
       if (!started) {
         await meter.flush().catch(() => {});
@@ -396,11 +366,9 @@ export const toEntrypoint = (
       }
       let secrets: Readonly<Record<string, string>>;
       try {
-        const snapshot = await measuredWorkflowStep(meter, async () =>
-          step.do(
-            SECRET_SNAPSHOT_STEP,
-            async () => (await binding.captureSecrets(event.instanceId)) as never,
-          ),
+        const snapshot = await step.do(
+          SECRET_SNAPSHOT_STEP,
+          async () => (await binding.captureSecrets(event.instanceId)) as never,
         );
         secrets = secretsOf(def.secrets, await binding.restoreSecrets(event.instanceId, snapshot));
       } catch (error) {
