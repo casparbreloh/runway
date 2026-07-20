@@ -12,8 +12,7 @@ package-manager preset, dependency graph, build scheduler, or public Sandbox API
 This project is in development, not production. The foundation is deployed for its own repository CI;
 comparative release claims and publication remain gated. See [Development Status](#development-status).
 
-For the domain vocabulary see [`CONTEXT.md`](CONTEXT.md). For direction and non-goals see
-[`.docs/VISION.md`](.docs/VISION.md).
+For domain vocabulary, direction, next steps, and open issues, see [`VISION.md`](VISION.md).
 
 ## A Workflow
 

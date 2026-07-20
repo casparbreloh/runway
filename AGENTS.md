@@ -11,7 +11,7 @@ tool-native caches for Turborepo, Nx, and other ecosystems. Foundation source co
 manager, language-runtime, or dependency-graph semantics. Tool providers are thin adapters over
 generic cache and exec; agents are deferred.
 
-Read [`CONTEXT.md`](CONTEXT.md) before naming or moving a foundation boundary.
+Read [`VISION.md`](VISION.md) before naming or moving a foundation boundary.
 
 ## Layout
 
