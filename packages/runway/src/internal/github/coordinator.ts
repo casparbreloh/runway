@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GitHubRepository } from "../../trigger.ts";
-import { lowercaseDigestHex } from "../digest.ts";
 import {
   parseFailureDiagnostic,
   sameFailureDiagnostic,
@@ -608,13 +607,16 @@ const dispatchSeed = async (
   repositoryId: number,
   deliveryId: string,
   workflowId: string,
-): Promise<string> =>
-  lowercaseDigestHex(
-    await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(`${repositoryId}\0${deliveryId}\0${workflowId}`),
-    ),
-  ).slice(0, 48);
+): Promise<string> => {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${repositoryId}\0${deliveryId}\0${workflowId}`),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 48);
+};
 
 const retryDelay = (retryCount: number): number =>
   Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(retryCount - 1, 20));

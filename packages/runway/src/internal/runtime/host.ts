@@ -12,7 +12,6 @@ import { Cache } from "../cache/cache.ts";
 import { normalizedCacheTarget } from "../cache/path.ts";
 import { CloudflareCacheSnapshot } from "../cache/snapshot.ts";
 import { CloudflareCacheTransfer } from "../cache/transfer.ts";
-import { lowercaseDigestHex } from "../digest.ts";
 import type {
   GitHubCoordinatorAdmission,
   GitHubCoordinatorRun,
@@ -627,8 +626,10 @@ interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
 
 type LoaderPurpose = "trigger" | "run";
 
-const sha256 = async (bytes: BufferSource): Promise<string> =>
-  lowercaseDigestHex(await crypto.subtle.digest("SHA-256", bytes));
+const sha256 = async (bytes: BufferSource): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 const metadataOf = (value: unknown): WorkflowMetadata => {
   if (
