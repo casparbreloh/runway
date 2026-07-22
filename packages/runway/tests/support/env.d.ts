@@ -31,12 +31,18 @@ declare namespace Cloudflare {
     ACTIVE_ARTIFACT: string;
     ACTIVE_ARTIFACT_VERSION: string;
     ACTIVE_DEPLOYMENT_ID: string;
+    ACTIVE_REGISTRY: string;
+    ACTIVE_REGISTRY_VERSION: string;
     SUSPENDED_ARTIFACT: string;
     SUSPENDED_ARTIFACT_VERSION: string;
     GITHUB_CHECK_ARTIFACT: string;
     GITHUB_CHECK_ARTIFACT_VERSION: string;
     GITHUB_TEST_ARTIFACT: string;
     GITHUB_TEST_ARTIFACT_VERSION: string;
+    GITHUB_REGISTRY: string;
+    GITHUB_REGISTRY_VERSION: string;
+    MANY_GITHUB_REGISTRY: string;
+    MANY_GITHUB_REGISTRY_VERSION: string;
     RUNWAY_SECRET_SNAPSHOT_KEY: string;
     RUNWAY_TEST_SANDBOX: Service<import("./runtime-worker.ts").TestSandbox>;
     RUNWAY_GITHUB_PROVIDER: Service<import("./runtime-worker.ts").GitHubProviderProbe>;

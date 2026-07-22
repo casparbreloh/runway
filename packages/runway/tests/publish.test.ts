@@ -9,10 +9,11 @@ import { expect, test } from "vitest";
 
 import { resolveAuth } from "../src/internal/auth.ts";
 import type { WranglerCommand } from "../src/internal/auth.ts";
-import { buildDeployment } from "../src/internal/publish/artifacts.ts";
+import { connectGitHub, releaseFromBuild } from "../src/internal/connect.ts";
+import { buildDeployment, buildHost, buildRelease } from "../src/internal/publish/artifacts.ts";
 import { publishWithAdapters } from "../src/internal/publish/publish.ts";
 import type { CloudflareApi, ProgressEvent } from "../src/internal/publish/publish.ts";
-import { cronsOf, type Registry } from "../src/internal/publish/registry.ts";
+import { cronsOf, loadRegistry, type Registry } from "../src/internal/publish/registry.ts";
 import type { RepositorySource } from "../src/internal/source/repository.ts";
 import { assertRepositorySourceReachable } from "../src/internal/source/repository.ts";
 import type {
@@ -820,6 +821,41 @@ test("workflows without triggers bundle immutable artifacts without ingress", as
   }
 });
 
+test("repeated production builds preserve exact structural host identity", async () => {
+  const project = await writeProject();
+  const context = {
+    accountId: "account",
+    cwd: project.cwd,
+    deploymentName: "runway-example",
+    repository: repositoryFixture,
+    snapshotKeyAvailable: false,
+  } as const;
+  try {
+    const host = await buildHost(context);
+    const first = await buildRelease(registry, context);
+    const hello = registry[0]!;
+    await writeFile(
+      path.join(project.cwd, hello.path),
+      moduleOf(hello.exportName, hello.def).replace(
+        "run: async () => {}",
+        'run: async () => { return "changed"; }',
+      ),
+    );
+    const repeated = await buildHost({ ...context, snapshotKeyAvailable: true });
+    const structurallyChanged = await buildHost({ ...context, accountId: "other-account" });
+    const changed = await buildRelease(registry, context);
+
+    expect(repeated.host).toEqual(host.host);
+    expect(repeated.deploymentId).toBe(host.deploymentId);
+    expect(structurallyChanged.host).not.toEqual(host.host);
+    expect(structurallyChanged.deploymentId).not.toBe(host.deploymentId);
+    expect(changed.registryVersion).not.toBe(first.registryVersion);
+    expect(changed.artifacts[0]!.artifactVersion).not.toBe(first.artifacts[0]!.artifactVersion);
+  } finally {
+    await project.cleanup();
+  }
+});
+
 test("artifact identities stay stable until workflow source changes", async () => {
   const project = await writeProject();
   const publishProject = async () =>
@@ -849,6 +885,184 @@ test("artifact identities stay stable until workflow source changes", async () =
     const changed = await publishProject();
     expect(changed.artifactVersions[0]).not.toBe(first.artifactVersions[0]);
     expect(changed.artifactVersions[1]).toBe(first.artifactVersions[1]);
+  } finally {
+    await project.cleanup();
+  }
+});
+
+test("a connected workflow-only release never reconciles the structural Stack", async () => {
+  const project = await writeProject();
+  const stack = new MemoryStack();
+  let active:
+    | { schema: 1; commit: string; registryVersion: string; registry: Record<string, unknown> }
+    | undefined;
+  const registries = new Map<string, Record<string, unknown>>();
+  const artifacts = new Set<string>();
+  let buildEnvironment: Record<string, { value: string; is_secret: boolean }> = {};
+  const cf = {
+    accounts: { list: async () => [{ id: "account" }] },
+    builds: {
+      repos: {
+        connections: {
+          upsert: async () => ({ result: { repo_connection_uuid: "connection" } }),
+        },
+      },
+      tokens: {
+        list: async () => [
+          { build_token_name: "Runway releases", build_token_uuid: "build-token" },
+        ],
+      },
+      triggers: {
+        list: async () => [],
+        create: async () => ({ result: { trigger_uuid: "trigger" } }),
+        update: async () => ({}),
+        environmentVariables: {
+          update: async (_id: string, value: { variables: typeof buildEnvironment }) => {
+            buildEnvironment = value.variables;
+          },
+        },
+      },
+    },
+    workers: {
+      scripts: {
+        list: async () => [{ id: "runway-ship-it", tag: "worker-tag" }],
+        secrets: { list: async () => [] },
+      },
+      subdomains: { get: async () => ({ result: { subdomain: "example" } }) },
+    },
+  } as unknown as CloudflareApi;
+  const request = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url.startsWith("https://api.github.com/")) {
+      return Response.json({
+        id: 42,
+        name: "ship-it",
+        default_branch: "main",
+        owner: { id: 7, login: "example" },
+      });
+    }
+    if (init?.method === "PUT") {
+      const body = JSON.parse(String(init.body)) as {
+        registryVersion: string;
+        artifacts: Array<{ workflowId: string; artifactVersion: string }>;
+      };
+      return Response.json({
+        schema: 1,
+        missingRegistry: !registries.has(body.registryVersion),
+        missingArtifacts: body.artifacts.filter(
+          ({ artifactVersion }) => !artifacts.has(artifactVersion),
+        ),
+      });
+    }
+    if (init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as {
+        registryVersion: string;
+        registryContents?: string;
+        artifacts: Array<{ artifactVersion: string; contents?: string }>;
+      };
+      if (body.registryContents) {
+        registries.set(
+          body.registryVersion,
+          JSON.parse(Buffer.from(body.registryContents, "base64").toString("utf8")) as Record<
+            string,
+            unknown
+          >,
+        );
+      }
+      body.artifacts.forEach(({ artifactVersion }) => artifacts.add(artifactVersion));
+      const registry = registries.get(body.registryVersion)!;
+      active = {
+        schema: 1,
+        commit: (registry.repository as { commit: string }).commit,
+        registryVersion: body.registryVersion,
+        registry,
+      };
+      return Response.json({
+        changed: true,
+        active: {
+          schema: 1,
+          commit: active.commit,
+          registryVersion: active.registryVersion,
+        },
+      });
+    }
+    if (!active) return new Response("not found", { status: 404 });
+    return Response.json({
+      active: {
+        schema: 1,
+        commit: active.commit,
+        registryVersion: active.registryVersion,
+      },
+      registry: active.registry,
+    });
+  };
+  try {
+    await execFileAsync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: project.cwd });
+    await execFileAsync("git", ["config", "user.email", "runway@example.com"], {
+      cwd: project.cwd,
+    });
+    await execFileAsync("git", ["config", "user.name", "Runway"], { cwd: project.cwd });
+    await execFileAsync(
+      "git",
+      ["remote", "add", "origin", "https://github.com/example/ship-it.git"],
+      { cwd: project.cwd },
+    );
+    await execFileAsync("git", ["add", "."], { cwd: project.cwd });
+    await execFileAsync("git", ["commit", "--quiet", "-m", "initial"], { cwd: project.cwd });
+
+    await connectGitHub(
+      await loadRegistry(project.cwd),
+      {
+        cwd: project.cwd,
+        env: githubEnvironment,
+        fetch: request as typeof fetch,
+        interactive: false,
+      },
+      {
+        resolveAuth: async () => ({ accountId: "account", cf }),
+        publish: {
+          github: githubProvider,
+          reachable: async () => {},
+          stack: () => stack,
+          wranglerCommand: async () => ({
+            stdout: JSON.stringify({ type: "oauth", token: "wrangler" }),
+          }),
+        },
+      },
+    );
+    expect(stack.applied).toBe(1);
+
+    const hello = registry[0]!;
+    await writeFile(
+      path.join(project.cwd, hello.path),
+      moduleOf(hello.exportName, hello.def).replace(
+        "run: async () => {}",
+        'run: async () => { return "changed"; }',
+      ),
+    );
+    await execFileAsync("git", ["add", "."], { cwd: project.cwd });
+    await execFileAsync("git", ["commit", "--quiet", "-m", "change workflow"], {
+      cwd: project.cwd,
+    });
+    const { stdout: commit } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: project.cwd,
+      encoding: "utf8",
+    });
+    await releaseFromBuild(await loadRegistry(project.cwd), {
+      cwd: project.cwd,
+      fetch: request as typeof fetch,
+      env: {
+        WORKERS_CI: "1",
+        WORKERS_CI_COMMIT_SHA: commit.trim(),
+        WORKERS_CI_BRANCH: "main",
+        RUNWAY_RELEASE_URL: buildEnvironment.RUNWAY_RELEASE_URL!.value,
+        RUNWAY_RELEASE_TOKEN: buildEnvironment.RUNWAY_RELEASE_TOKEN!.value,
+        RUNWAY_ACCOUNT_ID: buildEnvironment.RUNWAY_ACCOUNT_ID!.value,
+      },
+    });
+
+    expect(stack.applied).toBe(1);
+    expect(registries).toHaveProperty("size", 2);
   } finally {
     await project.cleanup();
   }

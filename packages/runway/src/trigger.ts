@@ -174,6 +174,11 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
         `invalid workflow trigger path ${JSON.stringify(trigger.path)}: contains "//"`,
       );
     }
+    if (trigger.path === "/runway" || trigger.path.startsWith("/runway/")) {
+      throw new Error(
+        `invalid workflow trigger path ${JSON.stringify(trigger.path)}: reserved by Runway`,
+      );
+    }
     const secret = secretNameOf(trigger.secret);
     if (!BINDING.test(secret)) {
       throw new Error(

@@ -129,6 +129,16 @@ export default workflow({ id: "event", trigger: () => cron("0 9 * * *") }).run(
   }
 });
 
+test("connect and provider release commands fail before provider mutation when invalid", async () => {
+  const connect = await run(["connect", "github", "unexpected"]);
+  const release = await run(["internal", "release"]);
+
+  expect(connect.code).toBe(1);
+  expect(connect.output).toMatch(/usage: runway connect github/);
+  expect(release.code).toBe(1);
+  expect(release.output).toMatch(/internal release requires Workers Builds/);
+});
+
 test("secrets set validates command shape before auth", async () => {
   const invalidName = await run(["secrets", "set", "not-valid", "value"]);
   const missingValue = await run(["secrets", "set", "LINEAR_API_KEY"]);

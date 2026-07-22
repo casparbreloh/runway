@@ -5,6 +5,37 @@ type AsyncMethod<T extends (...args: never[]) => unknown> = (
 ) => Promise<unknown>;
 
 export type CloudflareApi = {
+  builds: {
+    repos: {
+      connections: {
+        upsert(params: {
+          account_id: string;
+          provider_type: "github";
+          provider_account_id: string;
+          provider_account_name: string;
+          repo_id: string;
+          repo_name: string;
+        }): Promise<unknown>;
+      };
+    };
+    tokens: {
+      list(params: { account_id: string }): Promise<unknown>;
+    };
+    triggers: {
+      list(workerTag: string, params: { account_id: string }): Promise<unknown>;
+      create(params: Record<string, unknown> & { account_id: string }): Promise<unknown>;
+      update(
+        triggerId: string,
+        params: Record<string, unknown> & { account_id: string },
+      ): Promise<unknown>;
+      environmentVariables: {
+        update(
+          triggerId: string,
+          params: { account_id: string; variables: Record<string, unknown> },
+        ): Promise<unknown>;
+      };
+    };
+  };
   accounts: {
     list(): Promise<unknown>;
   };
@@ -168,6 +199,25 @@ export const defaultClient = (
       status: response.status,
     });
   };
+  const apiRequest = async (
+    path: string,
+    init: { method?: string; body?: unknown } = {},
+  ): Promise<unknown> => {
+    const response = await request(`https://api.cloudflare.com/client/v4${path}`, {
+      method: init.method ?? "GET",
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await response.text();
+    if (response.ok) return text ? (JSON.parse(text) as unknown) : undefined;
+    throw Object.assign(new Error(`Cloudflare API ${response.status}: ${text}`), {
+      status: response.status,
+    });
+  };
   const containerRequest = async (
     accountId: string,
     path: string,
@@ -208,6 +258,40 @@ export const defaultClient = (
     throw new Error("Cloudflare Containers API request exhausted retries");
   };
   return {
+    builds: {
+      repos: {
+        connections: {
+          upsert: async ({ account_id, ...body }) =>
+            await apiRequest(`/accounts/${account_id}/builds/repos/connections`, {
+              method: "PUT",
+              body,
+            }),
+        },
+      },
+      tokens: {
+        list: async ({ account_id }) => await apiRequest(`/accounts/${account_id}/builds/tokens`),
+      },
+      triggers: {
+        list: async (workerTag, { account_id }) =>
+          await apiRequest(
+            `/accounts/${account_id}/builds/workers/${encodeURIComponent(workerTag)}/triggers`,
+          ),
+        create: async ({ account_id, ...body }) =>
+          await apiRequest(`/accounts/${account_id}/builds/triggers`, { method: "POST", body }),
+        update: async (triggerId, { account_id, ...body }) =>
+          await apiRequest(
+            `/accounts/${account_id}/builds/triggers/${encodeURIComponent(triggerId)}`,
+            { method: "PATCH", body },
+          ),
+        environmentVariables: {
+          update: async (triggerId, { account_id, variables }) =>
+            await apiRequest(
+              `/accounts/${account_id}/builds/triggers/${encodeURIComponent(triggerId)}/environment_variables`,
+              { method: "PATCH", body: variables },
+            ),
+        },
+      },
+    },
     accounts: cf.accounts,
     workers: {
       routes: cf.workers.routes,

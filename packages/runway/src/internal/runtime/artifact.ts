@@ -15,7 +15,7 @@ export const workflowArtifactKey = (artifactVersion: string): string =>
 export const encodeWorkflowArtifact = (artifact: WorkflowArtifact): Uint8Array =>
   new TextEncoder().encode(JSON.stringify(artifact));
 
-export const decodeWorkflowArtifact = (bytes: ArrayBuffer): WorkflowArtifact => {
+export const decodeWorkflowArtifact = (bytes: ArrayBuffer | Uint8Array): WorkflowArtifact => {
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder().decode(bytes));

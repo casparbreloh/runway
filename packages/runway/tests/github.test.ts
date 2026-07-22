@@ -67,7 +67,7 @@ const signatureOf = (body: string) =>
   `sha256=${createHmac("sha256", webhookSecret).update(body).digest("hex")}`;
 
 const requestOf = (body: string, headers: Record<string, string> = {}) =>
-  new Request("https://runway.test/.runway/github", {
+  new Request("https://runway.test/runway/github", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -165,7 +165,7 @@ describe("GitHub delivery admission", () => {
       body: stream,
       duplex: "half",
     };
-    const request = new Request("https://runway.test/.runway/github", init);
+    const request = new Request("https://runway.test/runway/github", init);
 
     const normalized = await normalizeGitHubDelivery(request, config);
     const matches = Array.from({ length: 64 }, () =>

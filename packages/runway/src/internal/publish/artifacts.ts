@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,10 +7,15 @@ import { build as esbuild } from "esbuild";
 import type { Plugin } from "esbuild";
 
 import type { GitHubRepository } from "../../trigger.ts";
+import {
+  encodeReleaseRegistry,
+  type ReleaseRegistry,
+  type ReleaseRoute,
+} from "../release/registry.ts";
 import { encodeWorkflowArtifact } from "../runtime/artifact.ts";
 import {
-  DYNAMIC_WORKFLOW_CLASS,
   DATA_BUCKET,
+  DYNAMIC_WORKFLOW_CLASS,
   RUNWAY_WORKFLOW_CLASS,
   SECRET_SNAPSHOT_KEY_BINDING,
   secretSnapshotBackupBinding,
@@ -18,7 +23,12 @@ import {
 import { SANDBOX_IMAGE_DIGEST } from "../sandbox/config.ts";
 import type { RepositorySource } from "../source/repository.ts";
 import type { ProgressEvent } from "./publish.ts";
-import { validateRegistry, type RegisteredWorkflow, type Registry } from "./registry.ts";
+import {
+  secretNamesOf,
+  validateRegistry,
+  type RegisteredWorkflow,
+  type Registry,
+} from "./registry.ts";
 
 const toPosix = (value: string): string => value.split(path.sep).join(path.posix.sep);
 
@@ -45,49 +55,16 @@ export default createWorkflowWorker(workflow);
 `;
 };
 
-const hostSource = (
-  registry: Registry,
-  opts: {
-    accountId: string;
-    deploymentName: string;
-    workflowArtifacts: Readonly<Record<string, string>>;
-    deploymentId: string;
-    secretSnapshotKey: string;
-    github?: { readonly repository: GitHubRepository; readonly installationId: number };
-  },
-): string => {
-  validateRegistry(registry);
-  const routes: Array<Record<string, unknown>> = [];
-  for (const workflow of registry) {
-    const artifactVersion = opts.workflowArtifacts[workflow.def.id]!;
-    const trigger = workflow.def.trigger;
-    if (!trigger) continue;
-    if (trigger.type === "webhook") {
-      routes.push({ id: workflow.def.id, artifactVersion, type: "webhook", path: trigger.path });
-      continue;
-    }
-    if (trigger.type === "github") {
-      routes.push({
-        id: workflow.def.id,
-        artifactVersion,
-        type: "github",
-        checkName: trigger.checkName,
-        events: trigger.events,
-      });
-      continue;
-    }
-    if (trigger.type === "cron") {
-      routes.push({
-        id: workflow.def.id,
-        artifactVersion,
-        type: "cron",
-        expression: trigger.expression,
-      });
-      continue;
-    }
-    const unsupported: never = trigger;
-    throw new Error(`unsupported workflow trigger: ${String(unsupported)}`);
-  }
+const hostSource = (opts: {
+  accountId: string;
+  deploymentName: string;
+  deploymentId: string;
+  secretSnapshotKey: string;
+  authorSecretNames: readonly string[];
+  repository: RepositorySource;
+  defaultBranch?: string;
+  github?: { readonly repository: GitHubRepository; readonly installationId: number };
+}): string => {
   const config = JSON.stringify({
     accountId: opts.accountId,
     cacheBucket: DATA_BUCKET,
@@ -95,8 +72,13 @@ const hostSource = (
     deploymentName: opts.deploymentName,
     deploymentId: opts.deploymentId,
     secretSnapshotKey: opts.secretSnapshotKey,
-    github: opts.github,
-    routes,
+    authorSecretNames: [...opts.authorSecretNames].sort(),
+    repository: {
+      remote: opts.repository.remote,
+      authentication: opts.repository.authentication,
+    },
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+    ...(opts.github ? { github: opts.github } : {}),
   });
   return `import { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { Sandbox } from "@cloudflare/sandbox";
@@ -117,13 +99,17 @@ export default createHost(config);
 `;
 };
 
-interface BuildContext {
+export interface BuildContext {
   readonly accountId: string;
   readonly cwd: string;
   readonly deploymentName: string;
+  readonly defaultBranch?: string;
   readonly repository: RepositorySource;
   readonly snapshotKeyAvailable: boolean;
   readonly github?: { readonly repository: GitHubRepository; readonly installationId: number };
+  readonly deploymentId?: string;
+  readonly secretSnapshotKey?: string;
+  readonly authorSecretNames?: readonly string[];
   readonly onProgress?: (event: ProgressEvent) => void;
 }
 
@@ -143,6 +129,12 @@ const runtimeDependencyResolver: Plugin = {
     }));
     build.onResolve({ filter: /^@cloudflare\/sandbox$/ }, () => ({
       path: fileURLToPath(import.meta.resolve("@cloudflare/sandbox")),
+    }));
+    build.onResolve({ filter: /^runway$/ }, () => ({
+      path: path.resolve(import.meta.dirname, "../../index.ts"),
+    }));
+    build.onResolve({ filter: /^runway\/runtime$/ }, () => ({
+      path: path.resolve(import.meta.dirname, "../../runtime.ts"),
     }));
     build.onResolve({ filter: /^runway:host-runtime$/ }, () => ({
       path: path.resolve(import.meta.dirname, "../runtime/host.ts"),
@@ -174,9 +166,7 @@ const buildDynamicWorker = async (
       {
         name: "runway-dynamic-workflow",
         setup(build) {
-          build.onResolve({ filter: /^runway:workflow:/ }, () => ({
-            path: entry,
-          }));
+          build.onResolve({ filter: /^runway:workflow:/ }, () => ({ path: entry }));
           build.onLoad({ filter: /^.*\/workflow-.*\.gen\.ts$/ }, () => ({
             contents: source,
             loader: "ts",
@@ -195,48 +185,101 @@ export interface BuiltWorkflowArtifact {
   readonly contents: Uint8Array;
 }
 
-export interface PreparedDeployment {
+export interface PreparedHost {
   readonly host: Uint8Array;
-  readonly artifacts: ReadonlyArray<BuiltWorkflowArtifact>;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
 }
 
-export const buildDeployment = async (
+export interface PreparedRelease {
+  readonly artifacts: readonly BuiltWorkflowArtifact[];
+  readonly registry: ReleaseRegistry;
+  readonly registryContents: Uint8Array;
+  readonly registryVersion: string;
+}
+
+export interface PreparedDeployment extends PreparedHost, PreparedRelease {}
+
+const routeOf = (
+  workflow: RegisteredWorkflow,
+  artifactVersion: string,
+): ReleaseRoute | undefined => {
+  const trigger = workflow.def.trigger;
+  if (!trigger) return undefined;
+  if (trigger.type === "webhook") {
+    return { id: workflow.def.id, artifactVersion, type: "webhook", path: trigger.path };
+  }
+  if (trigger.type === "cron") {
+    return { id: workflow.def.id, artifactVersion, type: "cron", expression: trigger.expression };
+  }
+  if (trigger.type === "github") {
+    return {
+      id: workflow.def.id,
+      artifactVersion,
+      type: "github",
+      checkName: trigger.checkName,
+      events: trigger.events,
+    };
+  }
+  const unsupported: never = trigger;
+  throw new Error(`unsupported workflow trigger: ${String(unsupported)}`);
+};
+
+export const buildRelease = async (
   registry: Registry,
   opts: BuildContext,
-): Promise<PreparedDeployment> => {
+): Promise<PreparedRelease> => {
+  validateRegistry(registry);
   opts.onProgress?.({ step: "build", status: "start" });
-  const deploymentId = randomUUID();
-  const secretSnapshotKey = opts.snapshotKeyAvailable
-    ? SECRET_SNAPSHOT_KEY_BINDING
-    : secretSnapshotBackupBinding(deploymentId);
   const artifacts = await Promise.all(
-    registry.map(async (w) => {
-      const source = new TextDecoder().decode(await buildDynamicWorker(w, opts));
+    registry.map(async (workflow) => {
+      const source = new TextDecoder().decode(await buildDynamicWorker(workflow, opts));
       const contents = encodeWorkflowArtifact({
         deploymentName: opts.deploymentName,
-        workflowId: w.def.id,
-        secrets: w.def.secrets,
+        workflowId: workflow.def.id,
+        secrets: workflow.def.secrets,
         repository: opts.repository,
         source,
       });
-      const artifactVersion = hashOf(contents);
-      return { workflowId: w.def.id, artifactVersion, contents };
+      return {
+        workflowId: workflow.def.id,
+        artifactVersion: hashOf(contents),
+        contents,
+      };
     }),
   );
-  const workflowArtifacts = Object.fromEntries(
-    artifacts.map((workflow) => [workflow.workflowId, workflow.artifactVersion]),
+  const versions = new Map(
+    artifacts.map((artifact) => [artifact.workflowId, artifact.artifactVersion]),
   );
-  const entry = path.join(opts.cwd, "worker.gen.ts");
-  const host = hostSource(registry, {
-    accountId: opts.accountId,
+  const routes = registry
+    .map((workflow) => routeOf(workflow, versions.get(workflow.def.id)!))
+    .filter((route): route is ReleaseRoute => route !== undefined)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const published: ReleaseRegistry = {
+    schema: 1,
     deploymentName: opts.deploymentName,
-    workflowArtifacts,
-    deploymentId,
-    secretSnapshotKey,
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+    repository: opts.repository,
     ...(opts.github ? { github: opts.github } : {}),
-  });
+    secretNames: [...secretNamesOf(registry)].sort(),
+    routes,
+  };
+  const registryContents = encodeReleaseRegistry(published);
+  opts.onProgress?.({ step: "build", status: "done" });
+  return {
+    artifacts,
+    registry: published,
+    registryContents,
+    registryVersion: hashOf(registryContents),
+  };
+};
+
+const buildHostContents = async (
+  opts: BuildContext,
+  deploymentId: string,
+  secretSnapshotKey: string,
+): Promise<Uint8Array> => {
+  const entry = path.join(opts.cwd, "worker.gen.ts");
   const result = await esbuild({
     ...esbuildBase,
     entryPoints: ["runway:worker"],
@@ -245,11 +288,18 @@ export const buildDeployment = async (
       {
         name: "runway-worker",
         setup(build) {
-          build.onResolve({ filter: /^runway:worker$/ }, () => ({
-            path: entry,
-          }));
+          build.onResolve({ filter: /^runway:worker$/ }, () => ({ path: entry }));
           build.onLoad({ filter: /^.*\/worker\.gen\.ts$/ }, () => ({
-            contents: host,
+            contents: hostSource({
+              accountId: opts.accountId,
+              deploymentName: opts.deploymentName,
+              deploymentId,
+              secretSnapshotKey,
+              authorSecretNames: opts.authorSecretNames ?? [],
+              repository: opts.repository,
+              ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+              ...(opts.github ? { github: opts.github } : {}),
+            }),
             loader: "ts",
             resolveDir: opts.cwd,
           }));
@@ -257,12 +307,31 @@ export const buildDeployment = async (
       },
     ],
   });
-  const contents = outputOf(result.outputFiles).contents;
-  opts.onProgress?.({ step: "build", status: "done" });
-  return {
-    host: contents,
-    artifacts,
-    deploymentId,
-    secretSnapshotKey,
-  };
+  return outputOf(result.outputFiles).contents;
+};
+
+export const buildHost = async (opts: BuildContext): Promise<PreparedHost> => {
+  const hostSnapshotKey = opts.secretSnapshotKey ?? SECRET_SNAPSHOT_KEY_BINDING;
+  const deploymentId =
+    opts.deploymentId ??
+    hashOf(await buildHostContents(opts, "runway-structural-host", hostSnapshotKey));
+  const secretSnapshotKey =
+    opts.secretSnapshotKey ??
+    (opts.snapshotKeyAvailable
+      ? SECRET_SNAPSHOT_KEY_BINDING
+      : secretSnapshotBackupBinding(deploymentId));
+  const host = await buildHostContents(opts, deploymentId, hostSnapshotKey);
+  return { host, deploymentId, secretSnapshotKey };
+};
+
+export const buildDeployment = async (
+  registry: Registry,
+  opts: BuildContext,
+): Promise<PreparedDeployment> => {
+  const host = await buildHost({
+    ...opts,
+    authorSecretNames: [...secretNamesOf(registry)].sort(),
+  });
+  const release = await buildRelease(registry, opts);
+  return { ...host, ...release };
 };

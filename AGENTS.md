@@ -144,7 +144,7 @@ export default workflow({
   latency and total-cost evidence wins. It is not the cache store.
 - Internal publication updates schedules, removes stale workflow resources for that script, enables workers.dev,
   waits for 31 consecutive cache-busted deployment identity observations over 30 seconds, and then
-  returns webhook URLs, including one shared `/.runway/github` ingress when configured.
+  returns webhook URLs, including one shared `/runway/github` ingress when configured.
 - Keep Sandbox and container deployment resources internal to the managed command implementation.
 - Runway's own `Check` and `Test` workflows are the repository CI. At exact PR head `df10a82`, 15
   sequential development samples produced Check P50/P95 of 39s/46s and Test P50/P95 of 87s/102s,

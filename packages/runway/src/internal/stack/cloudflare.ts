@@ -14,6 +14,7 @@ import {
   GITHUB_SECRET_BINDINGS,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
+  RELEASE_TOKEN_BINDING,
   SECRET_SNAPSHOT_KEY_BINDING,
   WORKFLOW_BINDING,
 } from "../runtime/contract.ts";
@@ -29,8 +30,8 @@ import {
 } from "../sandbox/config.ts";
 import {
   stackIdOf,
-  type StackControl,
   type StackBucket,
+  type StackControl,
   type StackManifest,
   type StackReceipt,
   type StackResource,
@@ -111,6 +112,7 @@ export const validateBindings = (secrets: readonly string[]): void => {
     [WORKFLOW_BINDING, "Runway workflow binding"],
     [LOADER_BINDING, "Runway worker loader binding"],
     [DATA_BUCKET_BINDING, "Runway workflow artifact binding"],
+    [RELEASE_TOKEN_BINDING, "Runway release binding"],
     [SANDBOX_BINDING, "Runway sandbox binding"],
     [GITHUB_COORDINATOR_BINDING, "Runway GitHub coordinator binding"],
     ...GITHUB_SECRET_BINDINGS.map((name) => [name, "Runway GitHub App binding"] as const),
@@ -441,7 +443,7 @@ export class CloudflareStackControl implements StackControl {
           : [],
       ),
       ...(this.#opts.registry.some(({ def }) => def.trigger?.type === "github")
-        ? [{ id: "github", url: `https://${host}/.runway/github` }]
+        ? [{ id: "github", url: `https://${host}/runway/github` }]
         : []),
     ];
     await this.#opts.ready({

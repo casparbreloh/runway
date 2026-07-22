@@ -199,34 +199,47 @@ GitHub triggers use internal `RUNWAY_GITHUB_APP_ID`, `RUNWAY_GITHUB_PRIVATE_KEY`
 `RUNWAY_GITHUB_WEBHOOK_SECRET` bindings. They never enter authored workflow secrets or repository
 commands.
 
-## Internal Publication And Stack Ownership
+## GitHub Connection And Releases
 
-The internal publication path discovers `.runway/workflows/**/*.ts`, builds immutable content-addressed workflow
-artifacts, and creates one repo-scoped Cloudflare Stack. A Stack manifest and immutable receipt bind
-the exact Worker version/deployment, Dynamic Workflow, container image and rollout, Durable Object
-namespaces, schedules, routes, bindings, secret names, workers.dev state, and exact owned bucket
-objects. Sync and removal re-inventory the provider and fail closed on drift. Unknown state and shared
-objects are preserved.
+Connect a repository once:
 
-The private `runway-data` and `runway-state` buckets are shared by the account; Stack removal must
-preserve them and any object not claimed by exact ownership evidence. A deployment name is derived
-from the Git repository: `runway` for this repository and `runway-<repository>` otherwise. Its
-Worker, Dynamic Workflow, and container use that exact name. Cloudflare derives its Durable Object
-namespace names from the Worker and class names. The digest-pinned linux/amd64 Sandbox uses
-`standard-4`. Capacity remains an internal foundation choice, not a public workflow option.
+```sh
+runway connect github
+```
 
-Runway does not own or store Cloudflare credentials. Cloud commands use an installed
-[Wrangler](https://developers.cloudflare.com/workers/wrangler/), Cloudflare's official CLI. They use
-an existing Wrangler login or launch the ordinary `wrangler login` flow lazily in an interactive
-terminal. If Wrangler is not installed, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored secrets
-with `runway secrets set NAME ...`. Deployment identity cannot be configured through `package.json`
-or environment variables.
+Runway uses an existing Wrangler login or launches `wrangler login` lazily for the repository Stack.
+Cloudflare's Builds configuration API additionally requires a user API token with **Workers Builds
+Configuration: Edit**; provide it as `CLOUDFLARE_API_TOKEN` for `connect` only. Runway preflights that
+permission, the Cloudflare Workers and Pages GitHub App authorization, and an existing Builds deploy
+token before changing the Stack. It then establishes the stable host, activates the current immutable
+workflow registry, and configures Builds for the default branch.
+
+Default-branch pushes run the project-installed Runway CLI's private release command inside Workers
+Builds; no launcher file is generated. A release verifies the provider-selected commit, uploads only
+missing content-addressed workflow artifacts, writes and
+verifies one immutable repository registry, and advances its active pointer conditionally. The
+stable Worker loads that registry at admission and persists the selected artifact version for each
+run. Workflow body, webhook path, and GitHub filter edits therefore do not deploy or wait for the
+Worker. Secret declaration and schedule changes require rerunning `connect` because they alter
+structural provider state.
+
+A Stack manifest and immutable receipt bind the exact Worker version/deployment, Dynamic Workflow,
+container image and rollout, Durable Object namespaces, schedules, bindings, secret names,
+workers.dev state, and owned objects. Sync and removal re-inventory the provider and fail closed on
+drift. Unknown state and shared objects are preserved. The private `runway-data` and `runway-state`
+buckets are shared by the account.
+
+A deployment name is derived from the Git repository: `runway` for this repository and
+`runway-<repository>` otherwise. Its Worker, Dynamic Workflow, and container use that exact name. The
+digest-pinned linux/amd64 Sandbox uses `standard-4`; capacity remains internal. If Wrangler is not
+installed, provide `CLOUDFLARE_API_TOKEN` and, when needed, `CLOUDFLARE_ACCOUNT_ID`. Set authored
+secrets with `runway secrets set NAME ...`.
 
 ## GitHub App Setup
 
 Create a GitHub App named Runway with Contents read, Pull requests read, Checks write, and Push and
 Pull request subscriptions. Install it only on repositories Runway should serve. Set its webhook URL
-to the deployed `/.runway/github` endpoint and use the same webhook secret as
+to the deployed `/runway/github` endpoint and use the same webhook secret as
 `RUNWAY_GITHUB_WEBHOOK_SECRET`.
 
 ```sh

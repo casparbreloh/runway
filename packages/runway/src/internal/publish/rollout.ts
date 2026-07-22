@@ -28,7 +28,7 @@ export const waitForRollout = async (opts: {
       });
       try {
         const response = await Promise.race([
-          opts.fetch(`https://${opts.host}/.runway/version?attempt=${attempt}`, {
+          opts.fetch(`https://${opts.host}/runway/version?attempt=${attempt}`, {
             headers: { "Cache-Control": "no-cache", Connection: "close" },
             signal: controller.signal,
           }),

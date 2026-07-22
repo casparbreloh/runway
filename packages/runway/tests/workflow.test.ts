@@ -54,6 +54,35 @@ test("a webhook signing secret must belong to its workflow", () => {
   ).toThrow('workflow webhook secret "FOREIGN_SECRET" must be declared in secrets');
 });
 
+test("authored webhooks cannot use Runway's reserved URL paths", () => {
+  for (const [id, path] of [
+    ["reserved-runway-root", "/runway"],
+    ["reserved-runway-child", "/runway/hooks"],
+  ] as const) {
+    expect(() =>
+      workflow({
+        id,
+        secrets: ["HOOK_SECRET"],
+        trigger: (ctx) =>
+          webhook({ path, secret: ctx.secrets.HOOK_SECRET, signatureHeader: "x-signature" }),
+      }),
+    ).toThrow(`invalid workflow trigger path ${JSON.stringify(path)}: reserved by Runway`);
+  }
+
+  expect(() =>
+    workflow({
+      id: "runway-adjacent",
+      secrets: ["HOOK_SECRET"],
+      trigger: (ctx) =>
+        webhook({
+          path: "/runway-hooks",
+          secret: ctx.secrets.HOOK_SECRET,
+          signatureHeader: "x-signature",
+        }),
+    }),
+  ).not.toThrow();
+});
+
 test("a workflow run types secrets, events, and flat durable operations", () => {
   workflow({
     id: "flat-run",

@@ -1,6 +1,11 @@
-import { readdir, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { lstat, readdir, stat } from "node:fs/promises";
+import { builtinModules } from "node:module";
 import { join, matchesGlob, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+import { build as esbuild } from "esbuild";
 
 import { secretNameOf } from "../../secret.ts";
 import { validateTrigger } from "../../trigger.ts";
@@ -18,7 +23,10 @@ export type Registry = ReadonlyArray<RegisteredWorkflow>;
 export interface RegistryOptions {
   readonly include?: ReadonlyArray<string>;
   readonly exclude?: ReadonlyArray<string>;
+  readonly committed?: boolean;
 }
+
+const execFileAsync = promisify(execFile);
 
 export const secretNamesOf = (registry: Registry): ReadonlyArray<string> => [
   ...new Set(registry.flatMap((w) => w.def.secrets)),
@@ -143,13 +151,85 @@ const discoverFiles = async (
     .sort();
 };
 
+const importWorkflowModule = async (
+  file: string,
+  cwd: string,
+  committed: boolean,
+): Promise<Record<string, unknown>> => {
+  if (!committed) {
+    try {
+      return (await import(pathToFileURL(file).href)) as Record<string, unknown>;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ERR_MODULE_NOT_FOUND" ||
+        !error.message.includes("package 'runway'")
+      ) {
+        throw error;
+      }
+    }
+  }
+  const result = await esbuild({
+    metafile: committed,
+    preserveSymlinks: committed,
+    bundle: true,
+    entryPoints: [file],
+    external: ["cloudflare:*", "node:*", ...builtinModules],
+    format: "esm",
+    platform: "node",
+    plugins: [
+      {
+        name: "runway-self-reference",
+        setup(build) {
+          build.onResolve({ filter: /^runway$/ }, () => ({
+            path: resolve(import.meta.dirname, "../../index.ts"),
+          }));
+          build.onResolve({ filter: /^runway\/runtime$/ }, () => ({
+            path: resolve(import.meta.dirname, "../../runtime.ts"),
+          }));
+        },
+      },
+    ],
+    write: false,
+  });
+  if (committed) {
+    const root = `${resolve(cwd)}${sep}`;
+    const runwayRoot = `${resolve(import.meta.dirname, "../../")}${sep}`;
+    for (const input of Object.keys(result.metafile?.inputs ?? {})) {
+      const absolute = resolve(input);
+      if (!absolute.startsWith(root)) {
+        if (!absolute.startsWith(runwayRoot)) {
+          throw new Error(`workflow source is outside the repository: ${input}`);
+        }
+        continue;
+      }
+      const relative = absolute.slice(root.length).split(sep).join("/");
+      if (relative.startsWith("node_modules/")) continue;
+      if ((await lstat(absolute)).isSymbolicLink()) {
+        throw new Error(`workflow source cannot be a symbolic link: ${relative}`);
+      }
+      try {
+        await execFileAsync("git", ["ls-files", "--error-unmatch", "--", relative], { cwd });
+      } catch {
+        throw new Error(`workflow source is not committed: ${relative}`);
+      }
+    }
+  }
+  const output = result.outputFiles?.[0];
+  if (!output) throw new Error("esbuild returned no workflow module");
+  return (await import(
+    `data:text/javascript;base64,${Buffer.from(output.contents).toString("base64")}`
+  )) as Record<string, unknown>;
+};
+
 export const loadRegistry = async (cwd: string, opts: RegistryOptions = {}): Promise<Registry> => {
   const include = opts.include ?? INCLUDE;
   const exclude = opts.exclude ?? EXCLUDE;
   const paths = await discoverFiles(cwd, include, exclude);
   const workflows = new Map<WorkflowDefinition, { path: string; exportName: string }>();
   for (const path of paths) {
-    const mod = (await import(pathToFileURL(resolve(cwd, path)).href)) as Record<string, unknown>;
+    const mod = await importWorkflowModule(resolve(cwd, path), cwd, opts.committed ?? false);
     for (const [exportName, value] of Object.entries(mod)) {
       if (!isWorkflow(value)) continue;
       const existing = workflows.get(value);

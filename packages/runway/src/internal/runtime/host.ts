@@ -7,7 +7,6 @@ import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import type { ExecResult } from "../../step.ts";
-import type { GitHubEventFilter, GitHubRepository } from "../../trigger.ts";
 import { Cache } from "../cache/cache.ts";
 import { normalizedCacheTarget } from "../cache/path.ts";
 import { CloudflareCacheSnapshot } from "../cache/snapshot.ts";
@@ -24,6 +23,20 @@ import {
 } from "../github/delivery.ts";
 import { createGitHubProvider } from "../github/provider.ts";
 import { Meter } from "../meter.ts";
+import {
+  activeReleaseKey,
+  decodeActiveRelease,
+  decodeReleaseRegistry,
+  releaseRegistryKey,
+  type ReleaseRegistry,
+  type ReleaseRoute,
+} from "../release/registry.ts";
+import {
+  activateRelease,
+  assertReleasePolicy,
+  preflightRelease,
+  readRelease,
+} from "../release/runtime.ts";
 import { cloudflareSandbox } from "../sandbox/cloudflare.ts";
 import {
   CACHE_SCHEMA,
@@ -53,6 +66,7 @@ import {
   COMPATIBILITY_DATE,
   isSecretSnapshotKeyBinding,
   LOADER_BINDING,
+  RELEASE_TOKEN_BINDING,
   RUNTIME_BINDING,
   RUNWAY_WORKFLOW_CLASS,
   SECRET_SNAPSHOT_KEY_BINDING,
@@ -63,7 +77,7 @@ import type { FailureDiagnostic } from "./diagnostic.ts";
 
 export { RunwayGitHubCoordinator } from "../github/coordinator.ts";
 
-const CACHE_PATH = /^\/\.runway\/cache\/([0-9a-f]{64})\.tar\.gz$/;
+const CACHE_PATH = /^\/runway\/cache\/([0-9a-f]{64})\.tar\.gz$/;
 
 const workflowCacheKey = (digest: string): string => `caches/${digest}.tar.gz`;
 
@@ -94,6 +108,7 @@ interface HostEnv {
   RUNWAY_GITHUB_APP_ID?: string;
   RUNWAY_GITHUB_PRIVATE_KEY?: string;
   RUNWAY_GITHUB_WEBHOOK_SECRET?: string;
+  [RELEASE_TOKEN_BINDING]?: string;
   [CACHE_R2_ACCESS_KEY_ID_BINDING]?: string;
   [CACHE_R2_SECRET_ACCESS_KEY_BINDING]?: string;
   [CACHE_R2_SESSION_TOKEN_BINDING]?: string;
@@ -129,27 +144,6 @@ interface LoaderContext {
   };
 }
 
-type HostRoute =
-  | {
-      readonly id: string;
-      readonly artifactVersion: string;
-      readonly type: "webhook";
-      readonly path: string;
-    }
-  | {
-      readonly id: string;
-      readonly artifactVersion: string;
-      readonly type: "cron";
-      readonly expression: string;
-    }
-  | {
-      readonly id: string;
-      readonly artifactVersion: string;
-      readonly type: "github";
-      readonly checkName: string;
-      readonly events: readonly GitHubEventFilter[];
-    };
-
 export interface HostConfig {
   readonly accountId: string;
   readonly cacheBucket: string;
@@ -157,11 +151,10 @@ export interface HostConfig {
   readonly deploymentName: string;
   readonly deploymentId: string;
   readonly secretSnapshotKey: string;
-  readonly routes: ReadonlyArray<HostRoute>;
-  readonly github?: {
-    readonly repository: GitHubRepository;
-    readonly installationId: number;
-  };
+  readonly authorSecretNames: readonly string[];
+  readonly repository: Omit<RepositorySource, "commit">;
+  readonly defaultBranch?: string;
+  readonly github?: ReleaseRegistry["github"];
 }
 
 export class RunwaySandboxBinding
@@ -760,7 +753,7 @@ export const createDynamicWorkflow = (config: HostConfig) =>
   });
 
 const dynamicFetch = async (
-  route: HostRoute,
+  route: ReleaseRoute,
   request: Request,
   env: HostEnv,
   ctx: LoaderContext,
@@ -778,6 +771,43 @@ const dynamicFetch = async (
   return await worker.getEntrypoint().fetch(request);
 };
 
+const readReleaseRegistry = async (env: HostEnv, config: HostConfig): Promise<ReleaseRegistry> => {
+  const activeObject = await env[DATA_BUCKET_BINDING].get(activeReleaseKey(config.deploymentName));
+  if (!activeObject) throw new Error("missing active release");
+  const active = decodeActiveRelease(await activeObject.arrayBuffer());
+  const registryObject = await env[DATA_BUCKET_BINDING].get(
+    releaseRegistryKey(config.deploymentName, active.registryVersion),
+  );
+  if (!registryObject) throw new Error("missing release registry");
+  const bytes = await registryObject.arrayBuffer();
+  if ((await sha256(bytes)) !== active.registryVersion) {
+    throw new Error("invalid release registry hash");
+  }
+  const registry = decodeReleaseRegistry(bytes);
+  if (registry.repository.commit !== active.commit) {
+    throw new Error("release registry does not match host");
+  }
+  assertReleasePolicy(registry, {
+    deploymentName: config.deploymentName,
+    authorSecretNames: config.authorSecretNames,
+    repository: config.repository,
+    ...(config.defaultBranch ? { defaultBranch: config.defaultBranch } : {}),
+    ...(config.github ? { github: config.github } : {}),
+  });
+  return registry;
+};
+
+const currentRelease = async (
+  env: HostEnv,
+  config: HostConfig,
+): Promise<ReleaseRegistry | Response> => {
+  try {
+    return await readReleaseRegistry(env, config);
+  } catch {
+    return new Response("Runway release is unavailable", { status: 503 });
+  }
+};
+
 export const createHost = (config: HostConfig) => ({
   async fetch(req: Request, env: HostEnv, ctx: LoaderContext): Promise<Response> {
     const url = new URL(req.url);
@@ -793,26 +823,68 @@ export const createHost = (config: HostConfig) => ({
         },
       });
     }
-    if (req.method === "GET" && url.pathname === "/.runway/version") {
+    if (req.method === "GET" && url.pathname === "/runway/version") {
       return Response.json(
         { deploymentId: config.deploymentId },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
     const pathname = url.pathname;
-    if (pathname === "/.runway/github" && req.method === "POST") {
-      if (!config.github) return new Response("not found", { status: 404 });
+    if (pathname === "/runway/release") {
+      const token = env[RELEASE_TOKEN_BINDING];
+      if (!token || req.headers.get("authorization") !== `Bearer ${token}`) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      try {
+        if (req.method === "GET") {
+          const release = await readRelease(env[DATA_BUCKET_BINDING], config.deploymentName);
+          return release ? Response.json(release) : new Response("not found", { status: 404 });
+        }
+        if (req.method === "PUT") {
+          return Response.json(
+            await preflightRelease(
+              env[DATA_BUCKET_BINDING],
+              config.deploymentName,
+              await req.json(),
+            ),
+          );
+        }
+        if (req.method === "POST") {
+          return Response.json(
+            await activateRelease(
+              env[DATA_BUCKET_BINDING],
+              config.deploymentName,
+              config.authorSecretNames,
+              config.repository,
+              config.defaultBranch,
+              config.github,
+              await req.json(),
+            ),
+          );
+        }
+        return new Response("method not allowed", { status: 405 });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "release activation failed";
+        return new Response(message, {
+          status: message.includes("concurrent update") ? 409 : 400,
+        });
+      }
+    }
+    const release = await currentRelease(env, config);
+    if (release instanceof Response) return release;
+    if (pathname === "/runway/github" && req.method === "POST") {
+      if (!release.github) return new Response("not found", { status: 404 });
       const secret = env.RUNWAY_GITHUB_WEBHOOK_SECRET;
       if (typeof secret !== "string" || secret.length === 0) {
         return new Response("GitHub webhook is not configured", { status: 503 });
       }
-      const routes = config.routes.filter((route) => route.type === "github");
+      const routes = release.routes.filter((route) => route.type === "github");
       let delivery: GitHubAcceptedDelivery | undefined;
       const workflows: GitHubCoordinatorAdmission["workflows"][number][] = [];
       try {
         const normalized = await normalizeGitHubDelivery(req, {
-          repository: config.github.repository,
-          installationId: config.github.installationId,
+          repository: release.github.repository,
+          installationId: release.github.installationId,
           webhookSecret: secret,
         });
         for (const route of routes) {
@@ -835,7 +907,7 @@ export const createHost = (config: HostConfig) => ({
       if (!delivery || workflows.length === 0) return Response.json({ skipped: true });
       const namespace = env[GITHUB_COORDINATOR_BINDING];
       if (!namespace) return new Response("GitHub coordinator is not configured", { status: 503 });
-      const coordinator = namespace.getByName(String(config.github.repository.id));
+      const coordinator = namespace.getByName(String(release.github.repository.id));
       const result = (await coordinator.admit({
         accountId: config.accountId,
         delivery,
@@ -845,7 +917,7 @@ export const createHost = (config: HostConfig) => ({
       };
       return Response.json({ runs: result.runs }, { status: 202 });
     }
-    const matches = config.routes.filter(
+    const matches = release.routes.filter(
       (route) => route.type === "webhook" && route.path === pathname && req.method === "POST",
     );
     if (matches.length === 0) return new Response("not found", { status: 404 });
@@ -876,13 +948,14 @@ export const createHost = (config: HostConfig) => ({
     env: HostEnv,
     ctx: LoaderContext,
   ): Promise<void> {
+    const release = await readReleaseRegistry(env, config);
     await Promise.all(
-      config.routes
+      release.routes
         .filter((route) => route.type === "cron" && route.expression === event.cron)
         .map(async (route) => {
           const response = await dynamicFetch(
             route,
-            new Request("https://runway.local/.runway/scheduled", {
+            new Request("https://runway.local/runway/scheduled", {
               method: "POST",
               headers: {
                 "content-type": "application/json",

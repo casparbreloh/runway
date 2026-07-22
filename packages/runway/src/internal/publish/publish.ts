@@ -1,10 +1,13 @@
+import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
+import { promisify } from "node:util";
 
 import { resolveAuth } from "../auth.ts";
 import type { AccountSelector, WranglerCommand } from "../auth.ts";
 import type { CloudflareApi } from "../cloudflare.ts";
 import { createGitHubProvider, type GitHubProvider } from "../github/provider.ts";
+import { CloudflareReleaseControl } from "../release/cloudflare.ts";
 import {
   CACHE_R2_ACCESS_KEY_ID_BINDING,
   CACHE_R2_SECRET_ACCESS_KEY_BINDING,
@@ -13,6 +16,7 @@ import {
   GITHUB_PRIVATE_KEY_BINDING,
   GITHUB_WEBHOOK_SECRET_BINDING,
   DATA_BUCKET,
+  RELEASE_TOKEN_BINDING,
   SECRET_SNAPSHOT_KEY_BINDING,
   STATE_BUCKET,
 } from "../runtime/contract.ts";
@@ -35,6 +39,8 @@ import { waitForRollout } from "./rollout.ts";
 
 export type { CloudflareApi } from "../cloudflare.ts";
 
+const execFileAsync = promisify(execFile);
+
 export interface ProgressEvent {
   readonly step: "build" | "publish";
   readonly status: "start" | "done";
@@ -46,16 +52,18 @@ interface PublishContext {
   readonly onProgress?: (event: ProgressEvent) => void;
   readonly wranglerAuth?: boolean;
   readonly interactive?: boolean;
+  readonly activateRelease?: boolean;
 }
 
 interface PublishOutput {
   readonly name: string;
+  readonly release: Awaited<ReturnType<typeof buildDeployment>>;
   readonly artifactVersions: ReadonlyArray<string>;
   readonly urls: ReadonlyArray<{ readonly id: string; readonly url: string }>;
   readonly remove: () => Promise<void>;
 }
 
-interface PublishAdapters {
+export interface PublishAdapters {
   readonly deploymentName?: string;
   readonly wranglerCommand?: WranglerCommand;
   readonly accountSelector?: AccountSelector;
@@ -214,6 +222,8 @@ export const publishWithAdapters = async (
   if (hasGitHubTrigger && webhookSecret) {
     secretBindings[GITHUB_WEBHOOK_SECRET_BINDING] = webhookSecret;
   }
+  const releaseToken = env[RELEASE_TOKEN_BINDING];
+  if (releaseToken) secretBindings[RELEASE_TOKEN_BINDING] = releaseToken;
   const cacheConfigured = CACHE_SECRET_BINDINGS.some(
     (name) => env[name] !== undefined || remoteSecrets.has(name),
   );
@@ -240,6 +250,7 @@ export const publishWithAdapters = async (
     accountId,
     ...opts,
     deploymentName,
+    ...(env.RUNWAY_DEFAULT_BRANCH ? { defaultBranch: env.RUNWAY_DEFAULT_BRANCH } : {}),
     repository,
     snapshotKeyAvailable,
     ...(hasGitHubTrigger && repository.authentication.type === "github"
@@ -294,10 +305,30 @@ export const publishWithAdapters = async (
     });
   const stack = new Stack(manifest, control);
   await stack.sync();
+  if (!adapters.stack && opts.activateRelease !== false) {
+    await new CloudflareReleaseControl({
+      cf,
+      accountId,
+      bucket: dataBucket,
+      deploymentName,
+      isAncestor: async (ancestor, descendant) => {
+        try {
+          await execFileAsync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+            cwd: opts.cwd,
+          });
+          return true;
+        } catch (error) {
+          if ((error as { code?: unknown }).code === 1) return false;
+          throw new Error("cannot prove release commit ancestry", { cause: error });
+        }
+      },
+    }).activate(deployment);
+  }
 
   opts.onProgress?.({ step: "publish", status: "done" });
   return {
     name: deploymentName,
+    release: deployment,
     artifactVersions: deployment.artifacts.map(({ artifactVersion }) => artifactVersion),
     urls: control.urls(),
     remove: async () => {

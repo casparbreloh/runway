@@ -77,7 +77,7 @@ const deliverGitHub = async (options: {
   payload: unknown;
 }): Promise<Response> => {
   const body = JSON.stringify(options.payload);
-  return await env.GITHUB_HOST.fetch("https://runway.test/.runway/github", {
+  return await env.GITHUB_HOST.fetch("https://runway.test/runway/github", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -103,7 +103,7 @@ const deliverManyGitHub = async (deliveryId: string): Promise<Response> => {
     },
   };
   const body = JSON.stringify(payload);
-  return await env.GITHUB_MANY_HOST.fetch("https://runway.test/.runway/github", {
+  return await env.GITHUB_MANY_HOST.fetch("https://runway.test/runway/github", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -166,6 +166,15 @@ beforeEach(async () => {
   await env.RUNWAY_GITHUB_CLOCK.reset();
   await testSandbox.reset();
   await testHost.resetSecret();
+  await Promise.all([
+    putRelease("generated-runway-host", env.ACTIVE_REGISTRY_VERSION, env.ACTIVE_REGISTRY),
+    putRelease("generated-github-host", env.GITHUB_REGISTRY_VERSION, env.GITHUB_REGISTRY),
+    putRelease(
+      "generated-many-github-host",
+      env.MANY_GITHUB_REGISTRY_VERSION,
+      env.MANY_GITHUB_REGISTRY,
+    ),
+  ]);
 });
 
 const signedHeaders = async (body: string, timestamp = Date.now()): Promise<HeadersInit> => ({
@@ -374,6 +383,22 @@ test.each([
 
 const artifactKey = (version: string): string => `artifacts/${version}.json`;
 
+const putRelease = async (
+  deploymentName: string,
+  registryVersion: string,
+  contents: string,
+): Promise<void> => {
+  const registry = JSON.parse(contents) as { repository: { commit: string } };
+  await env.RUNWAY_DATA.put(
+    `releases/${deploymentName}/registries/${registryVersion}.json`,
+    contents,
+  );
+  await env.RUNWAY_DATA.put(
+    `releases/${deploymentName}/active.json`,
+    JSON.stringify({ schema: 1, commit: registry.repository.commit, registryVersion }),
+  );
+};
+
 const putArtifact = async (contents: string): Promise<string> => {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(contents));
   const version = [...new Uint8Array(digest)]
@@ -384,7 +409,10 @@ const putArtifact = async (contents: string): Promise<string> => {
 };
 
 const putActiveArtifact = async (): Promise<void> => {
-  await env.RUNWAY_DATA.put(artifactKey(env.ACTIVE_ARTIFACT_VERSION), env.ACTIVE_ARTIFACT);
+  await Promise.all([
+    env.RUNWAY_DATA.put(artifactKey(env.ACTIVE_ARTIFACT_VERSION), env.ACTIVE_ARTIFACT),
+    putRelease("generated-runway-host", env.ACTIVE_REGISTRY_VERSION, env.ACTIVE_REGISTRY),
+  ]);
 };
 
 const putSuspendedArtifact = async (): Promise<void> => {
@@ -395,6 +423,12 @@ const putGitHubArtifacts = async (): Promise<void> => {
   await Promise.all([
     env.RUNWAY_DATA.put(artifactKey(env.GITHUB_CHECK_ARTIFACT_VERSION), env.GITHUB_CHECK_ARTIFACT),
     env.RUNWAY_DATA.put(artifactKey(env.GITHUB_TEST_ARTIFACT_VERSION), env.GITHUB_TEST_ARTIFACT),
+    putRelease("generated-github-host", env.GITHUB_REGISTRY_VERSION, env.GITHUB_REGISTRY),
+    putRelease(
+      "generated-many-github-host",
+      env.MANY_GITHUB_REGISTRY_VERSION,
+      env.MANY_GITHUB_REGISTRY,
+    ),
   ]);
 };
 
@@ -496,8 +530,8 @@ test("bounded alarm batches drain more than one batch without missing or crossin
 
 test("the fixed GitHub ingress fails closed before durable admission", async () => {
   const body = JSON.stringify(pushPayload("f".repeat(40)));
-  const get = await env.GITHUB_HOST.fetch("https://runway.test/.runway/github");
-  const unsigned = await env.GITHUB_HOST.fetch("https://runway.test/.runway/github", {
+  const get = await env.GITHUB_HOST.fetch("https://runway.test/runway/github");
+  const unsigned = await env.GITHUB_HOST.fetch("https://runway.test/runway/github", {
     method: "POST",
     headers: {
       "x-github-delivery": "123e4567-e89b-42d3-a456-426614174114",
@@ -1198,11 +1232,206 @@ test("GitHub delivery detail and tombstone retain dedupe for exactly seven days 
 });
 
 test("a generated host reports only its no-cache deployment identity", async () => {
-  const response = await env.GENERATED_HOST.fetch("https://runway.test/.runway/version");
+  const response = await env.GENERATED_HOST.fetch("https://runway.test/runway/version");
 
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(await response.json()).toEqual({ deploymentId: env.ACTIVE_DEPLOYMENT_ID });
+});
+
+test("a generated host authenticates and atomically activates releases", async () => {
+  const unauthorized = await env.GENERATED_HOST.fetch("https://runway.test/runway/release");
+  expect(unauthorized.status).toBe(401);
+
+  const headers = { authorization: "Bearer release-token" };
+  const currentResponse = await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+    headers,
+  });
+  const current = (await currentResponse.json()) as {
+    active: { schema: 1; commit: string; registryVersion: string };
+    registry: Record<string, unknown> & {
+      repository: Record<string, unknown>;
+      routes: Array<Record<string, unknown>>;
+    };
+  };
+  const artifact = JSON.parse(env.ACTIVE_ARTIFACT) as Record<string, unknown> & {
+    repository: Record<string, unknown>;
+    workflowId: string;
+  };
+  const commit = "b".repeat(40);
+  artifact.repository.commit = commit;
+  const artifactContents = JSON.stringify(artifact);
+  const artifactDigest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(artifactContents),
+  );
+  const artifactVersion = [...new Uint8Array(artifactDigest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const registry = structuredClone(current.registry);
+  registry.repository.commit = commit;
+  registry.routes[0]!.artifactVersion = artifactVersion;
+  const registryContents = JSON.stringify(registry);
+  const registryDigest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(registryContents),
+  );
+  const registryVersion = [...new Uint8Array(registryDigest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const base64 = (value: string): string => {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  };
+  const preflightBody = JSON.stringify({
+    schema: 1,
+    registryVersion,
+    artifacts: [{ workflowId: artifact.workflowId, artifactVersion }],
+  });
+  const coldPreflight = await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+    method: "PUT",
+    headers: { ...headers, "content-type": "application/json" },
+    body: preflightBody,
+  });
+  expect(await coldPreflight.json()).toEqual({
+    schema: 1,
+    missingRegistry: true,
+    missingArtifacts: [{ workflowId: artifact.workflowId, artifactVersion }],
+  });
+
+  const body = JSON.stringify({
+    schema: 1,
+    expected: current.active,
+    registryVersion,
+    registryContents: base64(registryContents),
+    artifacts: [
+      {
+        workflowId: artifact.workflowId,
+        artifactVersion,
+        contents: base64(artifactContents),
+      },
+    ],
+  });
+  const responses = await Promise.all(
+    [0, 1].map(
+      async () =>
+        await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body,
+        }),
+    ),
+  );
+  expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
+  const activated = responses.find(({ status }) => status === 200)!;
+  expect(await activated.json()).toEqual({
+    changed: true,
+    active: { schema: 1, commit, registryVersion },
+  });
+  const warmPreflight = await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+    method: "PUT",
+    headers: { ...headers, "content-type": "application/json" },
+    body: preflightBody,
+  });
+  expect(await warmPreflight.json()).toEqual({
+    schema: 1,
+    missingRegistry: false,
+    missingArtifacts: [],
+  });
+
+  const maliciousCommit = "c".repeat(40);
+  const maliciousArtifact = {
+    ...artifact,
+    repository: { ...artifact.repository, commit: maliciousCommit },
+    secrets: ["RUNWAY_RELEASE_TOKEN"],
+  };
+  const maliciousArtifactContents = JSON.stringify(maliciousArtifact);
+  const maliciousArtifactDigest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(maliciousArtifactContents),
+  );
+  const maliciousArtifactVersion = [...new Uint8Array(maliciousArtifactDigest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const maliciousRegistry = structuredClone(registry);
+  maliciousRegistry.repository.commit = maliciousCommit;
+  maliciousRegistry.routes[0]!.artifactVersion = maliciousArtifactVersion;
+  const maliciousRegistryContents = JSON.stringify(maliciousRegistry);
+  const maliciousRegistryDigest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(maliciousRegistryContents),
+  );
+  const maliciousRegistryVersion = [...new Uint8Array(maliciousRegistryDigest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const rejected = await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      schema: 1,
+      expected: { schema: 1, commit, registryVersion },
+      registryVersion: maliciousRegistryVersion,
+      registryContents: base64(maliciousRegistryContents),
+      artifacts: [
+        {
+          workflowId: maliciousArtifact.workflowId,
+          artifactVersion: maliciousArtifactVersion,
+          contents: base64(maliciousArtifactContents),
+        },
+      ],
+    }),
+  });
+  expect(rejected.status).toBe(400);
+  expect(await rejected.text()).toBe("workflow artifact does not match release");
+
+  const otherRepositoryArtifact = {
+    ...artifact,
+    repository: {
+      ...artifact.repository,
+      remote: "https://github.com/attacker/other",
+      commit: maliciousCommit,
+    },
+  };
+  const otherArtifactContents = JSON.stringify(otherRepositoryArtifact);
+  const otherArtifactVersion = [
+    ...new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(otherArtifactContents)),
+    ),
+  ]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const otherRegistry = structuredClone(registry);
+  otherRegistry.repository.remote = "https://github.com/attacker/other";
+  otherRegistry.repository.commit = maliciousCommit;
+  otherRegistry.routes[0]!.artifactVersion = otherArtifactVersion;
+  const otherRegistryContents = JSON.stringify(otherRegistry);
+  const otherRegistryVersion = [
+    ...new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(otherRegistryContents)),
+    ),
+  ]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const otherRepository = await env.GENERATED_HOST.fetch("https://runway.test/runway/release", {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      schema: 1,
+      expected: { schema: 1, commit, registryVersion },
+      registryVersion: otherRegistryVersion,
+      registryContents: base64(otherRegistryContents),
+      artifacts: [
+        {
+          workflowId: otherRepositoryArtifact.workflowId,
+          artifactVersion: otherArtifactVersion,
+          contents: base64(otherArtifactContents),
+        },
+      ],
+    }),
+  });
+  expect(otherRepository.status).toBe(400);
+  expect(await otherRepository.text()).toBe("release does not match structural policy");
 });
 
 test("a generated host serves only content-addressed workflow caches", async () => {
@@ -1211,7 +1440,7 @@ test("a generated host serves only content-addressed workflow caches", async () 
   await env.RUNWAY_DATA.put(`caches/${digest}.tar.gz`, body);
 
   const response = await env.GENERATED_HOST.fetch(
-    `https://runway.test/.runway/cache/${digest}.tar.gz`,
+    `https://runway.test/runway/cache/${digest}.tar.gz`,
   );
   expect(response.status).toBe(200);
   expect(new TextDecoder().decode(await response.arrayBuffer())).toBe(body);
@@ -1220,10 +1449,10 @@ test("a generated host serves only content-addressed workflow caches", async () 
   expect(response.headers.get("etag")).toMatch(/^"[0-9a-f]+"$/);
 
   await expect(
-    env.GENERATED_HOST.fetch(`https://runway.test/.runway/cache/${"d".repeat(64)}.tar.gz`),
+    env.GENERATED_HOST.fetch(`https://runway.test/runway/cache/${"d".repeat(64)}.tar.gz`),
   ).resolves.toMatchObject({ status: 404 });
   await expect(
-    env.GENERATED_HOST.fetch("https://runway.test/.runway/cache/../artifacts/secret.json"),
+    env.GENERATED_HOST.fetch("https://runway.test/runway/cache/../artifacts/secret.json"),
   ).resolves.toMatchObject({ status: 404 });
 });
 

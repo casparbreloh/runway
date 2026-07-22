@@ -199,7 +199,7 @@ const firstVersionId = async (
 };
 
 const deploymentIdAt = async (host: string): Promise<string> => {
-  const response = await fetch(`https://${host}/.runway/version`);
+  const response = await fetch(`https://${host}/runway/version`);
   if (!response.ok) throw new Error(`Version endpoint returned ${response.status}`);
   const body = (await response.json()) as { deploymentId?: unknown };
   if (typeof body.deploymentId !== "string")
@@ -655,7 +655,7 @@ const run = async (): Promise<void> => {
       identities,
       timings: { ...timings, totalMs: Date.now() - startedAt },
       readiness:
-        "each publication returned only after thirty-one matching cache-busted /.runway/version observations over thirty seconds",
+        "each publication returned only after thirty-one matching cache-busted /runway/version observations over thirty seconds",
       loaderEviction:
         "Cloudflare exposes no supported Worker Loader eviction control; live cold-loader recovery remains unforced",
       workersRuntimeMetadataProof:

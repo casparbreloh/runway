@@ -31,6 +31,70 @@ test("Worker uploads use Cloudflare's filename-addressed multipart format", asyn
   expect(await uploaded.text()).toBe("export default { fetch() {} };");
 });
 
+test("Workers Builds uses the exact repository, token, and trigger endpoints", async () => {
+  const request = vi
+    .fn<typeof fetch>()
+    .mockImplementation(async () => Response.json({ success: true, result: { ok: true } }));
+  const builds = defaultClient("token", request).builds;
+
+  await builds.repos.connections.upsert({
+    account_id: "account",
+    provider_type: "github",
+    provider_account_id: "1",
+    provider_account_name: "example",
+    repo_id: "2",
+    repo_name: "runway",
+  });
+  await builds.tokens.list({ account_id: "account" });
+  await builds.triggers.list("worker/tag", { account_id: "account" });
+  await builds.triggers.create({ account_id: "account", trigger_name: "Runway releases" });
+  await builds.triggers.update("trigger/id", {
+    account_id: "account",
+    trigger_name: "Runway releases",
+  });
+  await builds.triggers.environmentVariables.update("trigger/id", {
+    account_id: "account",
+    variables: { RUNWAY_RELEASE_URL: { value: "https://example.com", is_secret: false } },
+  });
+
+  expect(request.mock.calls.map(([url, init]) => [url, init?.method, init?.body])).toEqual([
+    [
+      "https://api.cloudflare.com/client/v4/accounts/account/builds/repos/connections",
+      "PUT",
+      JSON.stringify({
+        provider_type: "github",
+        provider_account_id: "1",
+        provider_account_name: "example",
+        repo_id: "2",
+        repo_name: "runway",
+      }),
+    ],
+    ["https://api.cloudflare.com/client/v4/accounts/account/builds/tokens", "GET", undefined],
+    [
+      "https://api.cloudflare.com/client/v4/accounts/account/builds/workers/worker%2Ftag/triggers",
+      "GET",
+      undefined,
+    ],
+    [
+      "https://api.cloudflare.com/client/v4/accounts/account/builds/triggers",
+      "POST",
+      JSON.stringify({ trigger_name: "Runway releases" }),
+    ],
+    [
+      "https://api.cloudflare.com/client/v4/accounts/account/builds/triggers/trigger%2Fid",
+      "PATCH",
+      JSON.stringify({ trigger_name: "Runway releases" }),
+    ],
+    [
+      "https://api.cloudflare.com/client/v4/accounts/account/builds/triggers/trigger%2Fid/environment_variables",
+      "PATCH",
+      JSON.stringify({
+        RUNWAY_RELEASE_URL: { value: "https://example.com", is_secret: false },
+      }),
+    ],
+  ]);
+});
+
 test("Containers GET retries bounded transport and server failures", async () => {
   const request = vi
     .fn<typeof fetch>()

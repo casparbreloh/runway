@@ -8,6 +8,12 @@ import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
 import { resolveAuth } from "../src/internal/auth.ts";
+import {
+  assertCleanWorktree,
+  assertWorkersBuildEnvironment,
+  connectGitHub,
+  releaseFromBuild,
+} from "../src/internal/connect.ts";
 import { runLocal } from "../src/internal/local.ts";
 import { deploymentNameOf } from "../src/internal/publish/name.ts";
 import { loadRegistry } from "../src/internal/publish/registry.ts";
@@ -189,6 +195,63 @@ const secrets = defineCommand({
   meta: { name: "secrets", description: "Manage workflow secrets" },
   subCommands: { set: secretsSet },
 });
+
+const connectGitHubCommand = defineCommand({
+  meta: { name: "github", description: "Connect this repository to GitHub" },
+  async run({ rawArgs }) {
+    try {
+      if (rawArgs.length > 0) throw new Error("usage: runway connect github");
+      await assertCleanWorktree(process.cwd());
+      const result = await connectGitHub(await loadRegistry(process.cwd(), { committed: true }), {
+        cwd: process.cwd(),
+        interactive: interactiveCloudAuth(),
+      });
+      console.log(`Connected ${result.name} to ${result.defaultBranch}`);
+      for (const endpoint of result.urls) console.log(`${endpoint.id}: ${endpoint.url}`);
+    } catch (err) {
+      console.error("runway: connect failed");
+      console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+  },
+});
+
+const connect = defineCommand({
+  meta: { name: "connect", description: "Connect repository automation" },
+  subCommands: { github: connectGitHubCommand },
+});
+
+const internalRelease = defineCommand({
+  meta: { name: "release", description: "Activate a Workers Builds release" },
+  async run({ rawArgs }) {
+    try {
+      if (rawArgs.length > 0) throw new Error("invalid internal release arguments");
+      assertWorkersBuildEnvironment(process.env);
+      await assertCleanWorktree(process.cwd());
+      const result = await releaseFromBuild(
+        await loadRegistry(process.cwd(), { committed: true }),
+        {
+          cwd: process.cwd(),
+        },
+      );
+      console.log(
+        result.changed
+          ? `Activated release ${result.registryVersion}`
+          : `Release ${result.registryVersion} is already active`,
+      );
+    } catch (err) {
+      console.error("runway: release failed");
+      console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+  },
+});
+
+const internal = defineCommand({
+  meta: { name: "internal", description: "Runway provider operations" },
+  subCommands: { release: internalRelease },
+});
+
 const init = defineCommand({
   meta: { name: "init", description: "Create an example workflow" },
   async run({ rawArgs }) {
@@ -207,7 +270,9 @@ await runMain(
   defineCommand({
     meta: { name: "runway", version: pkg.version, description: "Run code-first workflows" },
     subCommands: {
+      connect,
       init,
+      internal,
       run,
       secrets,
     },

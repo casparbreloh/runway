@@ -21,6 +21,19 @@ const deployment: PreparedDeployment = {
   ],
   deploymentId: "build-deployment",
   secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
+  registry: {
+    schema: 1,
+    deploymentName: "runway",
+    repository: {
+      remote: "https://github.com/example/runway",
+      commit: "a".repeat(40),
+      authentication: { type: "public" },
+    },
+    secretNames: [],
+    routes: [],
+  },
+  registryContents: new TextEncoder().encode("{}"),
+  registryVersion: "b".repeat(64),
 };
 
 const manifest = cloudflareStackManifest({

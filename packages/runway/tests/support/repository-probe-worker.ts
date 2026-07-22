@@ -94,5 +94,9 @@ export const RepositoryProbeDynamic: typeof WorkflowEntrypoint<unknown, unknown>
     deploymentName: "generated-runway-host",
     deploymentId: "repository-probe-deployment",
     secretSnapshotKey: "RUNWAY_SECRET_SNAPSHOT_KEY",
-    routes: [],
+    authorSecretNames: [],
+    repository: {
+      remote: "https://github.com/example/repository-probe",
+      authentication: { type: "public" },
+    },
   });
