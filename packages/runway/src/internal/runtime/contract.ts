@@ -22,11 +22,10 @@ export const GITHUB_SECRET_BINDINGS = [
   GITHUB_PRIVATE_KEY_BINDING,
   GITHUB_WEBHOOK_SECRET_BINDING,
 ] as const;
-export const SECRET_SNAPSHOT_KEY_PREFIX = `${SECRET_SNAPSHOT_KEY_BINDING}_`;
+const SECRET_SNAPSHOT_KEY_PREFIX = `${SECRET_SNAPSHOT_KEY_BINDING}_`;
 export const secretSnapshotBackupBinding = (deploymentId: string): string =>
   `${SECRET_SNAPSHOT_KEY_PREFIX}${deploymentId.replaceAll("-", "")}`;
 export const isSecretSnapshotKeyBinding = (name: string): boolean =>
   name === SECRET_SNAPSHOT_KEY_BINDING || name.startsWith(SECRET_SNAPSHOT_KEY_PREFIX);
 export const DYNAMIC_WORKFLOW_CLASS = "DynamicWorkflow";
 export const RUNWAY_WORKFLOW_CLASS = "RunwayWorkflow";
-export { GITHUB_COORDINATOR_BINDING, GITHUB_COORDINATOR_CLASS } from "../sandbox/config.ts";

@@ -813,10 +813,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     const state = request.state;
     if (state !== "in_progress") invariant();
     const now = await this.#now();
-    const key = runKey(source.runId);
-    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
-    await this.#validateDispatchIdentity(initial);
-    this.#validateLifecycleSource(initial, source);
+    const key = await this.#loadLifecycleKey(source);
     const result = await this.ctx.storage.transaction(async (transaction) => {
       const run = parseRun(await transaction.get(key), source.runId);
       this.#validateLifecycleSource(run, source);
@@ -835,23 +832,12 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       ) {
         invariant();
       }
-      const oldPending = pendingKey(run.nextAttemptAt, run.runId);
-      const wasPending = isPending(run);
       let proceed = true;
-      if (run.desired === "queued") run.desired = "in_progress";
-      else if (run.desired !== "in_progress") proceed = false;
-      run.workflowKnown = true;
-      run.retryCount = 0;
-      run.nextAttemptAt = now;
-      if (wasPending) await transaction.delete(oldPending);
-      await transaction.put(key, run);
-      if (isPending(run)) {
-        await transaction.put(pendingKey(now, run.runId), {
-          kind: "pending",
-          runId: run.runId,
-          dueAt: now,
-        } satisfies PendingRecord);
-      }
+      await this.#savePendingChange(transaction, run, now, () => {
+        if (run.desired === "queued") run.desired = "in_progress";
+        else if (run.desired !== "in_progress") proceed = false;
+        run.workflowKnown = true;
+      });
       return { proceed };
     });
     await this.ctx.storage.setAlarm(Date.now());
@@ -919,10 +905,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     const diagnostic = diagnosticOf(request.diagnostic);
     if (finalization.outcome !== "failure" && diagnostic !== null) invariant();
     const now = await this.#now();
-    const key = runKey(source.runId);
-    const initial = parseRun(await this.ctx.storage.get(key), source.runId);
-    await this.#validateDispatchIdentity(initial);
-    this.#validateLifecycleSource(initial, source);
+    const key = await this.#loadLifecycleKey(source);
     await this.ctx.storage.transaction(async (transaction) => {
       const run = parseRun(await transaction.get(key), source.runId);
       this.#validateLifecycleSource(run, source);
@@ -937,22 +920,11 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
         if (!sameFailureDiagnostic(run.diagnostic, diagnostic)) invariant();
         return;
       }
-      const oldPending = pendingKey(run.nextAttemptAt, run.runId);
-      const wasPending = isPending(run);
-      run.terminalPublished = true;
-      run.diagnostic = diagnostic;
-      run.desired = finalization.outcome;
-      run.retryCount = 0;
-      run.nextAttemptAt = now;
-      if (wasPending) await transaction.delete(oldPending);
-      await transaction.put(key, run);
-      if (isPending(run)) {
-        await transaction.put(pendingKey(now, run.runId), {
-          kind: "pending",
-          runId: run.runId,
-          dueAt: now,
-        } satisfies PendingRecord);
-      }
+      await this.#savePendingChange(transaction, run, now, () => {
+        run.terminalPublished = true;
+        run.diagnostic = diagnostic;
+        run.desired = finalization.outcome;
+      });
     });
     await this.ctx.storage.setAlarm(Date.now());
   }
@@ -1040,6 +1012,14 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       }
       await transaction.delete(deleteKeys);
     });
+  }
+
+  async #loadLifecycleKey(source: GitHubRunSource): Promise<string> {
+    const key = runKey(source.runId);
+    const run = parseRun(await this.ctx.storage.get(key), source.runId);
+    await this.#validateDispatchIdentity(run);
+    this.#validateLifecycleSource(run, source);
+    return key;
   }
 
   async #validateDispatchIdentity(run: RunRecord): Promise<void> {
@@ -1135,6 +1115,28 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
       invariant();
     }
     return parseRun(raw, key.slice("run:".length));
+  }
+
+  async #savePendingChange(
+    transaction: DurableObjectTransaction,
+    run: RunRecord,
+    now: number,
+    change: () => void,
+  ): Promise<void> {
+    const oldPending = pendingKey(run.nextAttemptAt, run.runId);
+    const wasPending = isPending(run);
+    change();
+    run.retryCount = 0;
+    run.nextAttemptAt = now;
+    if (wasPending) await transaction.delete(oldPending);
+    await transaction.put(runKey(run.runId), run);
+    if (isPending(run)) {
+      await transaction.put(pendingKey(now, run.runId), {
+        kind: "pending",
+        runId: run.runId,
+        dueAt: now,
+      } satisfies PendingRecord);
+    }
   }
 
   async #saveProgress(run: RunRecord, now: number): Promise<void> {

@@ -1,10 +1,22 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
-  "ignoreExports": [
-    {
-      "file": "packages/runway/tests/runtime-worker.ts",
-      "exports": ["DailyWorkflow", "IssueCreatedWorkflow"],
-    },
+  "entry": [
+    ".runway/workflows/**/*.ts",
+    "packages/runway/src/internal/runtime/host.ts",
+    "packages/runway/tests/adapter/sandbox.workers.test.ts",
+    "packages/runway/tests/adapter/snapshot.image.test.ts",
+    "packages/runway/tests/live/artifact-recovery.ts",
+    "packages/runway/tests/live/cache-transfer-worker.ts",
+    "packages/runway/tests/live/cache-transfer.ts",
+    "packages/runway/tests/live/github-recovery.ts",
+    "packages/runway/tests/live/repository-recovery.ts",
+    "packages/runway/tests/runtime.workers.test.ts",
+    "packages/runway/tests/support/repository-probe-worker.ts",
+    "packages/runway/tests/support/runtime-worker.ts",
+    "packages/runway/vitest.image.config.ts",
+    "packages/runway/vitest.workers.config.ts",
+    "scripts/test.ts",
   ],
+  "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
+  "rules": { "unused-class-members": "off" },
 }

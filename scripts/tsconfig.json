@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "outDir": "../.tsbuild/scripts",
+    "declarationDir": "../.tsbuild/scripts",
+    "tsBuildInfoFile": "../.tsbuild/scripts.tsbuildinfo"
+  },
+  "include": ["*.ts"]
+}
