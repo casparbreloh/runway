@@ -277,10 +277,10 @@ mise run fallow
 mise run test
 ```
 
-Run the opt-in deep suite separately:
+Run the opt-in end-to-end suite separately:
 
 ```sh
-mise run test:deep
+mise run test:e2e
 ```
 
 It runs the exact pinned-image cache contract followed by live Cloudflare cache, artifact, repository,

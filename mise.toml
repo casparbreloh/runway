@@ -30,5 +30,5 @@ run = "aube exec tsc --build"
 [tasks.test]
 run = "aube exec vitest run"
 
-[tasks."test:deep"]
+[tasks."test:e2e"]
 run = "aube exec vitest run --root packages/runway --config vitest.image.config.ts && node packages/runway/tests/live/cache-transfer.ts && node packages/runway/tests/live/artifact-recovery.ts && node packages/runway/tests/live/repository-recovery.ts && node packages/runway/tests/live/github-recovery.ts"

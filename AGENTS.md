@@ -34,7 +34,7 @@ task runs.
 
 - Full gate: `mise run format-check`, `mise run lint`, `mise run typecheck`, `mise run fallow`, and
   `mise run test`.
-- Opt-in deep suite: `mise run test:deep` runs the exact pinned-image cache contract and live
+- Opt-in end-to-end suite: `mise run test:e2e` runs the exact pinned-image cache contract and live
   Cloudflare recovery smokes sequentially. It requires privileged Docker with linux/amd64 support,
   Cloudflare authentication, and R2 S3 credentials; it is not part of routine CI.
 - CLI: `runway init`, local `runway run <id> [--event <file|->]`, and `runway secrets set`; cloud
