@@ -436,11 +436,11 @@ export class CloudflareStackControl implements StackControl {
     const host = `${manifest.worker.name}.${subdomain}.workers.dev`;
     this.#urls = [
       ...this.#opts.registry.flatMap((item) =>
-        item.def.trigger.type === "webhook"
+        item.def.trigger?.type === "webhook"
           ? [{ id: item.def.id, url: `https://${host}${item.def.trigger.path}` }]
           : [],
       ),
-      ...(this.#opts.registry.some(({ def }) => def.trigger.type === "github")
+      ...(this.#opts.registry.some(({ def }) => def.trigger?.type === "github")
         ? [{ id: "github", url: `https://${host}/.runway/github` }]
         : []),
     ];

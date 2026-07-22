@@ -1,6 +1,6 @@
 export { ExecError } from "./step.ts";
 
-export { cron, github, manual, webhook } from "./trigger.ts";
+export { cron, github, webhook } from "./trigger.ts";
 export { workflow } from "./workflow.ts";
 export { mise } from "./mise.ts";
 export { release } from "./release.ts";
@@ -33,7 +33,6 @@ export type { ToolProvider, Tools } from "./tools.ts";
 export type {
   CronParams,
   CronTrigger,
-  ManualTrigger,
   Trigger,
   WebhookOptions,
   WebhookTimestamp,

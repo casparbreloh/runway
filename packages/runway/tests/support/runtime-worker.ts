@@ -1030,6 +1030,6 @@ const secretSnapshot = workflow({
 export class SecretSnapshotWorkflow extends toEntrypoint(secretSnapshot) {}
 
 export default createRouter([
-  { id: issueCreated.id, binding: "ISSUE_CREATED", trigger: issueCreated.trigger },
-  { id: daily.id, binding: "DAILY", trigger: daily.trigger },
+  { id: issueCreated.id, binding: "ISSUE_CREATED", trigger: issueCreated.trigger! },
+  { id: daily.id, binding: "DAILY", trigger: daily.trigger! },
 ]);

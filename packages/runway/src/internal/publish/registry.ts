@@ -26,7 +26,7 @@ export const secretNamesOf = (registry: Registry): ReadonlyArray<string> => [
 
 export const cronsOf = (registry: Registry): ReadonlyArray<string> =>
   registry.flatMap((workflow) =>
-    workflow.def.trigger.type === "cron" ? [workflow.def.trigger.expression] : [],
+    workflow.def.trigger?.type === "cron" ? [workflow.def.trigger.expression] : [],
   );
 
 const timestampEqual = (a?: WebhookTimestamp, b?: WebhookTimestamp): boolean =>
@@ -54,7 +54,7 @@ const verificationDiffs = (
 export const validateRegistry = (registry: Registry): void => {
   const paths = new Map<string, { path: string; trigger: WebhookTrigger<unknown> }>();
   for (const workflow of registry) {
-    if (workflow.def.trigger.type !== "webhook") continue;
+    if (workflow.def.trigger?.type !== "webhook") continue;
     const owner = paths.get(workflow.def.trigger.path);
     if (!owner) {
       paths.set(workflow.def.trigger.path, {
@@ -159,7 +159,7 @@ export const loadRegistry = async (cwd: string, opts: RegistryOptions = {}): Pro
         }
         continue;
       }
-      validateTrigger(value.trigger);
+      if (value.trigger !== undefined) validateTrigger(value.trigger);
       validateSecrets(value.secrets);
       workflows.set(value, { path, exportName });
     }

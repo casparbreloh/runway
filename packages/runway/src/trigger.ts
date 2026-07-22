@@ -97,10 +97,6 @@ export interface CronTrigger extends Trigger<CronParams> {
   readonly expression: string;
 }
 
-export interface ManualTrigger extends Trigger<undefined> {
-  readonly type: "manual";
-}
-
 export interface WebhookOptions {
   path: string;
   secret: SecretRef;
@@ -116,7 +112,7 @@ export const validateTrigger = (trigger: WorkflowTrigger): void => {
     throw new Error("invalid workflow trigger");
   }
   const type = (trigger as { type?: unknown }).type;
-  if (type !== "cron" && type !== "webhook" && type !== "github" && type !== "manual") {
+  if (type !== "cron" && type !== "webhook" && type !== "github") {
     throw new Error(`invalid workflow trigger type: ${String(type)}`);
   }
   if (trigger.type === "cron" && trigger.expression.trim().length === 0) {
@@ -243,11 +239,6 @@ export const cron = (expression: string): CronTrigger =>
     type: "cron",
     expression,
   }) as CronTrigger;
-
-export const manual = (): ManualTrigger =>
-  ({
-    type: "manual",
-  }) as ManualTrigger;
 
 export const github = <const F extends readonly [GitHubEventFilter, ...GitHubEventFilter[]]>(
   options: GitHubOptions<F>,

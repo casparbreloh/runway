@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -8,7 +8,9 @@ import { toFile } from "cloudflare";
 
 import pkg from "../package.json" with { type: "json" };
 import { resolveAuth } from "../src/internal/auth.ts";
+import { runLocal } from "../src/internal/local.ts";
 import { deploymentNameOf } from "../src/internal/publish/name.ts";
+import { loadRegistry } from "../src/internal/publish/registry.ts";
 import {
   COMPATIBILITY_DATE,
   isSecretSnapshotKeyBinding,
@@ -17,12 +19,9 @@ import { setScriptSecret } from "../src/internal/secret/store.ts";
 import { resolveRepositorySource } from "../src/internal/source/repository.ts";
 import { validateSecrets } from "../src/workflow.ts";
 
-const EXAMPLE_WORKFLOW = `import { manual, workflow } from "runway";
+const EXAMPLE_WORKFLOW = `import { workflow } from "runway";
 
-export default workflow({
-  id: "example",
-  trigger: () => manual(),
-}).run(async (step) => {
+export default workflow({ id: "example" }).run(async (step) => {
   await step.exec("echo", 'echo "Hello from Runway"');
 });
 `;
@@ -102,6 +101,77 @@ const runSecrets = async (args: ReadonlyArray<string>): Promise<void> => {
   console.log(`Set ${name}`);
 };
 
+const readEvent = async (file: string | undefined): Promise<unknown> => {
+  if (!file) return undefined;
+  const contents =
+    file === "-"
+      ? await (async () => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+          return Buffer.concat(chunks).toString("utf8");
+        })()
+      : await readFile(path.resolve(file), "utf8");
+  try {
+    return JSON.parse(contents) as unknown;
+  } catch {
+    throw new Error(`invalid event JSON: ${file}`);
+  }
+};
+
+const runWorkflow = async (id: string, eventFile?: string): Promise<void> => {
+  const registry = await loadRegistry(process.cwd());
+  const selected = registry.filter(({ def }) => def.id === id);
+  if (selected.length !== 1) throw new Error(`unknown workflow: ${id}`);
+
+  const event = await readEvent(eventFile);
+  const controller = new AbortController();
+  let cancelledWith: 130 | 143 | undefined;
+  const interrupt = (): void => {
+    cancelledWith ??= 130;
+    controller.abort();
+  };
+  const terminate = (): void => {
+    cancelledWith ??= 143;
+    controller.abort();
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  try {
+    await runLocal(selected[0]!.def, {
+      cwd: process.cwd(),
+      event,
+      signal: controller.signal,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    if (cancelledWith) process.exitCode = cancelledWith;
+  } catch (error) {
+    if (!cancelledWith) throw error;
+    process.exitCode = cancelledWith;
+  } finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
+  }
+};
+
+const run = defineCommand({
+  meta: { name: "run", description: "Run a workflow locally" },
+  args: {
+    workflow: { type: "positional", required: true, description: "Workflow id" },
+    event: { type: "string", description: "Normalized event JSON file, or - for stdin" },
+  },
+  async run({ args }) {
+    try {
+      if (args._.length !== 1) throw new Error("usage: runway run <workflow> [--event <file|->]");
+      await runWorkflow(args.workflow, args.event);
+    } catch (err) {
+      console.error("runway: run failed");
+      console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
+  },
+});
+
 const secretsSet = defineCommand({
   meta: { name: "set", description: "Set a workflow secret" },
   async run({ rawArgs }) {
@@ -138,6 +208,7 @@ await runMain(
     meta: { name: "runway", version: pkg.version, description: "Run code-first workflows" },
     subCommands: {
       init,
+      run,
       secrets,
     },
   }),
