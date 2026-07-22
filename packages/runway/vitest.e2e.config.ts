@@ -1,7 +1,6 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  root: import.meta.dirname,
   test: {
     name: "runway-e2e",
     include: [

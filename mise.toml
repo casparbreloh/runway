@@ -31,4 +31,4 @@ run = "aube exec tsc --build"
 run = "aube exec vitest run"
 
 [tasks."test:e2e"]
-run = "aube exec vitest run --config packages/runway/vitest.e2e.config.ts"
+run = "aube exec vitest run --config vitest.e2e.config.ts"

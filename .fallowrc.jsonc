@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
   "entry": [
-    "packages/runway/vitest*.config.ts",
+    "**/vitest*.config.ts",
     "packages/runway/tests/**/*.test.ts",
     "packages/runway/tests/e2e/*.e2e.ts",
     "packages/runway/tests/support/*-worker.ts",
