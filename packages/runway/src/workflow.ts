@@ -2,28 +2,18 @@ import { secretNameOf, secretRef, type SecretRef } from "./secret.ts";
 import type { Step } from "./step.ts";
 import { toolProviders, type ToolProvider, type Tools } from "./tools.ts";
 import { BINDING, validateTrigger } from "./trigger.ts";
-import type {
-  CronTrigger,
-  GitHubTrigger,
-  ManualTrigger,
-  Trigger,
-  WebhookTrigger,
-} from "./trigger.ts";
+import type { CronTrigger, GitHubTrigger, Trigger, WebhookTrigger } from "./trigger.ts";
 
 export type TriggerContext<S extends string> = {
   readonly secrets: { readonly [K in S]: SecretRef<K> };
 };
 
-export type WorkflowTrigger =
-  | WebhookTrigger<unknown>
-  | CronTrigger
-  | GitHubTrigger<unknown>
-  | ManualTrigger;
+export type WorkflowTrigger = WebhookTrigger<unknown> | CronTrigger | GitHubTrigger<unknown>;
 
 export interface WorkflowDefinition {
   readonly __kind: "workflow";
   readonly id: string;
-  readonly trigger: WorkflowTrigger;
+  readonly trigger?: WorkflowTrigger;
   readonly secrets: ReadonlyArray<string>;
   readonly tools?: readonly ToolProvider[];
   readonly run: (step: Step, event: unknown) => void | Promise<void>;
@@ -52,14 +42,26 @@ export const validateSecrets = (secrets: ReadonlyArray<string> | undefined): voi
   }
 };
 
-export function workflow<const S extends readonly string[] = readonly [], E = unknown>(opts: {
-  id: string;
-  secrets?: S;
-  tools?: Tools;
-  trigger: (ctx: TriggerContext<S[number]>) => Trigger<E>;
-}): {
+interface WorkflowOptions<S extends readonly string[]> {
+  readonly id: string;
+  readonly secrets?: S;
+  readonly tools?: Tools;
+}
+
+interface WorkflowBuilder<S extends readonly string[], E> {
   run(fn: (run: Step<S[number]>, event: E) => void | Promise<void>): WorkflowDefinition;
-} {
+}
+
+type TriggerEvent<T> = T extends Trigger<infer E> ? E : undefined;
+
+export function workflow<
+  const S extends readonly string[] = readonly [],
+  T extends Trigger<unknown> | undefined = undefined,
+>(
+  opts: WorkflowOptions<S> & {
+    trigger?: (ctx: TriggerContext<S[number]>) => T;
+  },
+): WorkflowBuilder<S, TriggerEvent<T>> {
   validateWorkflowId(opts.id);
   validateSecrets(opts.secrets);
   const tools = toolProviders(opts.tools);
@@ -67,9 +69,9 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
   const context = {
     secrets: Object.fromEntries(secrets.map((name) => [name, secretRef(name)])),
   } as TriggerContext<S[number]>;
-  const trigger = opts.trigger(context) as WorkflowTrigger;
-  validateTrigger(trigger);
-  if (trigger.type === "webhook" && !secrets.includes(secretNameOf(trigger.secret))) {
+  const trigger = opts.trigger?.(context) as WorkflowTrigger | undefined;
+  if (trigger !== undefined) validateTrigger(trigger);
+  if (trigger?.type === "webhook" && !secrets.includes(secretNameOf(trigger.secret))) {
     throw new Error(
       `workflow webhook secret ${JSON.stringify(secretNameOf(trigger.secret))} must be declared in secrets`,
     );
@@ -78,7 +80,7 @@ export function workflow<const S extends readonly string[] = readonly [], E = un
     run: (fn) => ({
       __kind: "workflow",
       id: opts.id,
-      trigger,
+      ...(trigger ? { trigger } : {}),
       secrets,
       ...(tools.length > 0 ? { tools } : {}),
       run: fn as unknown as WorkflowDefinition["run"],

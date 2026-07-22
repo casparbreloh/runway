@@ -57,43 +57,37 @@ const hostSource = (
   },
 ): string => {
   validateRegistry(registry);
-  const routes = registry.map((workflow) => {
+  const routes: Array<Record<string, unknown>> = [];
+  for (const workflow of registry) {
     const artifactVersion = opts.workflowArtifacts[workflow.def.id]!;
-    if (workflow.def.trigger.type === "webhook") {
-      return {
-        id: workflow.def.id,
-        artifactVersion,
-        type: "webhook",
-        path: workflow.def.trigger.path,
-      };
+    const trigger = workflow.def.trigger;
+    if (!trigger) continue;
+    if (trigger.type === "webhook") {
+      routes.push({ id: workflow.def.id, artifactVersion, type: "webhook", path: trigger.path });
+      continue;
     }
-    if (workflow.def.trigger.type === "github") {
-      return {
+    if (trigger.type === "github") {
+      routes.push({
         id: workflow.def.id,
         artifactVersion,
         type: "github",
-        checkName: workflow.def.trigger.checkName,
-        events: workflow.def.trigger.events,
-      };
+        checkName: trigger.checkName,
+        events: trigger.events,
+      });
+      continue;
     }
-    if (workflow.def.trigger.type === "cron") {
-      return {
+    if (trigger.type === "cron") {
+      routes.push({
         id: workflow.def.id,
         artifactVersion,
         type: "cron",
-        expression: workflow.def.trigger.expression,
-      };
+        expression: trigger.expression,
+      });
+      continue;
     }
-    if (workflow.def.trigger.type === "manual") {
-      return {
-        id: workflow.def.id,
-        artifactVersion,
-        type: "manual",
-      };
-    }
-    const unsupported: never = workflow.def.trigger;
+    const unsupported: never = trigger;
     throw new Error(`unsupported workflow trigger: ${String(unsupported)}`);
-  });
+  }
   const config = JSON.stringify({
     accountId: opts.accountId,
     cacheBucket: DATA_BUCKET,

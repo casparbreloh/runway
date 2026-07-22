@@ -44,7 +44,7 @@ const project = async (
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 };
 
-test("init works offline, creates one manual workflow, and preserves existing files", async () => {
+test("init works offline, creates one workflow without ingress, and preserves existing files", async () => {
   const app = await project({});
   const example = path.join(app.cwd, ".runway/workflows/example.ts");
   const existing = path.join(app.cwd, ".runway/workflows/existing.ts");
@@ -58,7 +58,7 @@ test("init works offline, creates one manual workflow, and preserves existing fi
     const registered = await loadRegistry(app.cwd);
     expect(registered).toHaveLength(1);
     expect(registered[0]!.def.id).toBe("example");
-    expect(registered[0]!.def.trigger.type).toBe("manual");
+    expect(registered[0]!.def.trigger).toBeUndefined();
 
     await writeFile(example, "custom example\n");
     await writeFile(existing, "existing workflow\n");
@@ -83,6 +83,47 @@ test("init rejects unexpected arguments without creating files", async () => {
     await expect(
       readFile(path.join(app.cwd, ".runway/workflows/example.ts")),
     ).rejects.toBeDefined();
+  } finally {
+    await app.cleanup();
+  }
+});
+
+test("run executes triggered workflows locally without requiring an event", async () => {
+  const app = await project({
+    ".runway/workflows/check.ts": `import { github, mise, workflow } from "runway";
+export default workflow({
+  id: "check",
+  tools: mise(),
+  trigger: () => github({ checkName: "Check", events: [{ type: "push", branches: ["main"] }] }),
+}).run(async (step) => {
+  await step.exec("check", 'printf "local check"');
+});
+`,
+  });
+  try {
+    const result = await run(["run", "check"], {}, app.cwd);
+
+    expect(result.code, result.output).toBe(0);
+    expect(result.output).toBe("local check");
+  } finally {
+    await app.cleanup();
+  }
+});
+
+test("run reads an optional event JSON file", async () => {
+  const app = await project({
+    ".runway/workflows/event.ts": `import { cron, workflow } from "runway";
+export default workflow({ id: "event", trigger: () => cron("0 9 * * *") }).run(
+  async (step, event) => await step.exec("event", \`printf "${"${event.scheduledTime}"}"\`),
+);
+`,
+    "event.json": JSON.stringify({ cron: "0 9 * * *", scheduledTime: 42 }),
+  });
+  try {
+    const result = await run(["run", "event", "--event", "event.json"], {}, app.cwd);
+
+    expect(result.code, result.output).toBe(0);
+    expect(result.output).toBe("42");
   } finally {
     await app.cleanup();
   }

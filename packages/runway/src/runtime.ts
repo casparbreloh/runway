@@ -450,7 +450,7 @@ export const createWorkflowWorker = (
       return new Response(`missing runtime binding: ${RUNTIME_BINDING}`, { status: 500 });
     }
     const secrets = secretsOf(def.secrets, await binding.secrets());
-    const router = createRouter([{ id: def.id, trigger: def.trigger }], {
+    const router = createRouter(def.trigger ? [{ id: def.id, trigger: def.trigger }] : [], {
       async start(_entry, event) {
         const instance = await workflow.create({ params: event });
         return { id: await instance.id };

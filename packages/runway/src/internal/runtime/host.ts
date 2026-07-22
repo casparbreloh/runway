@@ -148,11 +148,6 @@ type HostRoute =
       readonly type: "github";
       readonly checkName: string;
       readonly events: readonly GitHubEventFilter[];
-    }
-  | {
-      readonly id: string;
-      readonly artifactVersion: string;
-      readonly type: "manual";
     };
 
 export interface HostConfig {
@@ -626,7 +621,7 @@ export class RunwaySandboxBinding
 interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
   readonly artifactVersion: string;
   readonly source?: GitHubRunSource;
-  readonly trigger?: "webhook" | "cron" | "manual";
+  readonly trigger?: "webhook" | "cron";
 }
 
 type LoaderPurpose = "trigger" | "run";
@@ -652,7 +647,7 @@ const metadataOf = (value: unknown): WorkflowMetadata => {
   if (typeof artifactVersion !== "string" || !/^[0-9a-f]{64}$/.test(artifactVersion)) {
     throw new Error("invalid workflow metadata");
   }
-  if (trigger === "webhook" || trigger === "cron" || trigger === "manual") {
+  if (trigger === "webhook" || trigger === "cron") {
     return { artifactVersion, trigger };
   }
   if (source === undefined) return { artifactVersion };

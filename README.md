@@ -2,7 +2,7 @@
 
 Runway is a TypeScript-first authoring layer over a language-neutral workflow and repository-runner
 foundation on Cloudflare. Author workflows with
-`workflow({ id, secrets?, tools?, trigger }).run(async (step, event) => { ... })` and export them from
+`workflow({ id, secrets?, tools?, trigger? }).run(async (step, event) => { ... })` and export them from
 `.runway/workflows/**/*.ts`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox, cache transport, credentials,
@@ -23,7 +23,12 @@ npm add --save-dev runway
 npx runway init
 ```
 
-This creates only `.runway/workflows/example.ts` and preserves it on repeated initialization.
+This creates only `.runway/workflows/example.ts` and preserves it on repeated initialization. Run
+it directly in the current checkout:
+
+```sh
+npx runway run example
+```
 
 ```ts
 // .runway/workflows/hello.ts
@@ -74,9 +79,28 @@ await step.exec("check", {
 });
 ```
 
-Commands default to `/workspace`, `CI=true`, and a 15-minute timeout. They do not receive workflow
-secrets automatically. A non-zero exit throws a secret-safe `ExecError`; the result and diagnostics
-contain bounded, redacted output tails.
+Managed commands default to `/workspace`, `CI=true`, and a 15-minute timeout. They do not receive
+workflow secrets automatically. A non-zero exit throws a secret-safe `ExecError`; the result and
+diagnostics contain bounded, redacted output tails.
+
+## Local Runs
+
+`runway run <id>` invokes a workflow directly in the current checkout. Its trigger does not restrict
+explicit invocation, so a GitHub-triggered workflow such as Runway's own `check` can run without an
+event when its callback does not use one:
+
+```sh
+runway run check
+runway run event-dependent-workflow --event event.json
+cat event.json | runway run event-dependent-workflow --event -
+```
+
+Event files contain the normalized JSON value expected by the callback, not a raw provider webhook.
+When omitted, the callback receives `undefined`. Local execution is intentionally small: commands use
+the host shell and environment, workflows with declared secrets are rejected, tool providers are not
+provisioned, cache operations are skipped, and `do` and `sleep` are non-durable.
+It does not emulate Cloudflare retries, Sandbox placement, Source reconstruction, or cache
+publication.
 
 ## Exact Source And Continuity
 
@@ -154,9 +178,9 @@ evidence-driven: its own repository removed whole-tree caches after they lost on
 
 ## Triggers And Secrets
 
-Triggers are explicit; there is no default public start endpoint.
+Triggers are optional, and omitting one creates no automatic ingress or public start endpoint.
 
-- `manual()` declares a workflow with no automatic ingress and gives an `undefined` event.
+- An omitted trigger gives an `undefined` event.
 - `cron("0 9 * * *")` gives `event: { cron, scheduledTime }`.
 - `github({ checkName, events })` selects pushes and pull requests, binds each accepted delivery to
   its exact repository and SHA, and keeps the GitHub Checks lifecycle internal.

@@ -13,6 +13,7 @@ export default defineConfig({
       "tests/adapter/stack.test.ts",
       "tests/publish.test.ts",
       "tests/github.test.ts",
+      "tests/local.test.ts",
       "tests/meter.test.ts",
       "tests/sandbox.test.ts",
       "tests/stack.test.ts",

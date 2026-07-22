@@ -2,7 +2,7 @@
 
 TypeScript-first authoring over a language-neutral workflow and repository-runner foundation on
 Cloudflare. Author workflows with
-`workflow({ id, secrets?, tools?, trigger }).run(async (step, event) => { ... })` and export them from
+`workflow({ id, secrets?, tools?, trigger? }).run(async (step, event) => { ... })` and export them from
 `.runway/workflows/**/*.ts`.
 
 Repository execution and managed CI/CD come first. Cloudflare Sandbox stays internally behind the
@@ -36,8 +36,8 @@ task runs.
   `mise run test`.
 - Exact pinned-image cache contract: `mise run test:image` (requires privileged Docker with
   linux/amd64 support).
-- CLI: `runway init` and `runway secrets set`; cloud execution and GitHub connection commands are
-  still being implemented.
+- CLI: `runway init`, local `runway run <id> [--event <file|->]`, and `runway secrets set`; cloud
+  execution and GitHub connection commands are still being implemented.
 
 ## Authoring Model
 
@@ -64,7 +64,8 @@ export default workflow({
 });
 ```
 
-- Trigger is required and lives in the `workflow()` object.
+- Trigger is optional. Omitting it creates a workflow with no automatic ingress and an `undefined`
+  event.
 - The callback receives `(step, event)`.
 - `step` is `{ runId, secrets, do, exec, cache, sleep }`.
 - Wrap HTTP and API calls in named `step.do()` calls.

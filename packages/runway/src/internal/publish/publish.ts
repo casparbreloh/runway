@@ -137,7 +137,7 @@ export const publishWithAdapters = async (
   }
 
   validateBindings(secrets);
-  const hasGitHubTrigger = registry.some(({ def }) => def.trigger.type === "github");
+  const hasGitHubTrigger = registry.some(({ def }) => def.trigger?.type === "github");
   const appId = env[GITHUB_APP_ID_BINDING];
   const privateKey = env[GITHUB_PRIVATE_KEY_BINDING];
   const githubRepositoryName = githubRepositoryNameOf(repository);

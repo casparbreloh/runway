@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { cron, github, manual, webhook, workflow } from "runway";
+import { cron, github, webhook, workflow } from "runway";
 import type { WorkflowDefinition } from "runway";
 import { expect, test } from "vitest";
 
@@ -795,18 +795,18 @@ test("publish stops before Stack mutation when the source commit is unavailable"
   }
 });
 
-test("manual workflows bundle immutable artifacts without schedules", async () => {
+test("workflows without triggers bundle immutable artifacts without ingress", async () => {
   const project = await writeProject();
-  const definition = workflow({ id: "example", trigger: () => manual() }).run(async () => {});
-  const manualRegistry: Registry = [
+  const definition = workflow({ id: "example" }).run(async () => {});
+  const untriggeredRegistry: Registry = [
     { path: ".runway/workflows/example.ts", exportName: "default", def: definition },
   ];
   try {
     await writeFile(
-      path.join(project.cwd, manualRegistry[0]!.path),
+      path.join(project.cwd, untriggeredRegistry[0]!.path),
       moduleOf("default", definition),
     );
-    const deployment = await buildDeployment(manualRegistry, {
+    const deployment = await buildDeployment(untriggeredRegistry, {
       accountId: "account",
       cwd: project.cwd,
       deploymentName: "runway-example",
@@ -814,7 +814,7 @@ test("manual workflows bundle immutable artifacts without schedules", async () =
       snapshotKeyAvailable: true,
     });
     expect(deployment.artifacts.map((artifact) => artifact.workflowId)).toEqual(["example"]);
-    expect(cronsOf(manualRegistry)).toEqual([]);
+    expect(cronsOf(untriggeredRegistry)).toEqual([]);
   } finally {
     await project.cleanup();
   }

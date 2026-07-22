@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { cron, github, manual, webhook, workflow } from "runway";
+import { cron, github, webhook, workflow } from "runway";
 import type { CacheDeclaration, CronParams, ExecOptions, ExecResult, SecretRef } from "runway";
 import { expect, expectTypeOf, test } from "vitest";
 
@@ -38,6 +38,9 @@ test("invalid workflow definitions fail before registration", () => {
       trigger: () => ({}) as never,
     }),
   ).toThrow("invalid workflow trigger");
+  expect(() => workflow({ id: "null-trigger", trigger: () => null as never })).toThrow(
+    "invalid workflow trigger",
+  );
 });
 
 test("a webhook signing secret must belong to its workflow", () => {
@@ -98,14 +101,12 @@ test("the authoring API types secrets, runs, raw webhooks, and cron events", () 
   });
 });
 
-test("a manual trigger is declarative and has no event payload", () => {
-  const definition = workflow({ id: "manually-started", trigger: () => manual() }).run(
-    async (_step, event) => {
-      expectTypeOf(event).toEqualTypeOf<undefined>();
-    },
-  );
+test("a workflow may omit automatic ingress", () => {
+  const definition = workflow({ id: "manually-started" }).run(async (_step, event) => {
+    expectTypeOf(event).toEqualTypeOf<undefined>();
+  });
 
-  expect(JSON.parse(JSON.stringify(definition.trigger))).toEqual({ type: "manual" });
+  expect(definition.trigger).toBeUndefined();
 });
 
 test("a GitHub push trigger is declarative and types its normalized event", () => {
