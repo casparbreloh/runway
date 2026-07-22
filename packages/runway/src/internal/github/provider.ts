@@ -1,8 +1,8 @@
 import type { GitHubRepository } from "../../trigger.ts";
+import { concatBytes } from "./byte.ts";
+import { githubRepositoryName, validGitHubRepository } from "./repository.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
-const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -99,16 +99,6 @@ export interface GitHubProvider {
     },
   ): Promise<GitHubCheckRun>;
 }
-
-const concatBytes = (...parts: readonly Uint8Array[]): Uint8Array => {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.length;
-  }
-  return result;
-};
 
 const derLength = (length: number): Uint8Array => {
   if (length < 128) return new Uint8Array([length]);
@@ -236,35 +226,17 @@ const parseCheckRun = (value: unknown): GitHubCheckRun => {
 };
 
 const repositoryPath = (repository: GitHubRepository): string => {
-  const parts = repository.fullName.split("/");
-  if (
-    !positiveInteger(repository.id) ||
-    parts.length !== 2 ||
-    !parts[0] ||
-    !parts[1] ||
-    !REPOSITORY_PART.test(parts[0]) ||
-    !REPOSITORY_PART.test(parts[1]) ||
-    parts[1] !== repository.name
-  ) {
-    throw new Error("invalid GitHub Check request");
-  }
-  return `${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+  if (!validGitHubRepository(repository)) throw new Error("invalid GitHub Check request");
+  const parsed = githubRepositoryName(repository.fullName)!;
+  return `${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`;
 };
 
 const repositoryNamePath = (fullName: string): { readonly path: string; readonly name: string } => {
-  const parts = fullName.split("/");
-  if (
-    parts.length !== 2 ||
-    !parts[0] ||
-    !parts[1] ||
-    !REPOSITORY_PART.test(parts[0]) ||
-    !REPOSITORY_PART.test(parts[1])
-  ) {
-    throw new Error("invalid GitHub repository name");
-  }
+  const parsed = githubRepositoryName(fullName);
+  if (!parsed) throw new Error("invalid GitHub repository name");
   return {
-    path: `${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`,
-    name: parts[1],
+    path: `${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`,
+    name: parsed.name,
   };
 };
 

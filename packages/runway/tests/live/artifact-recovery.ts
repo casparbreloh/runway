@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+// fallow-ignore-file code-duplication -- independently bundled recovery fixtures intentionally mirror source recovery
+
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
 
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
@@ -15,9 +15,22 @@ import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
 import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { setScriptSecret } from "../../src/internal/secret/store.ts";
 import { resolveRepositorySource } from "../../src/internal/source/repository.ts";
-import { fetchWorkersDev, nonGitHubDeployEnv } from "./support.ts";
-
-const execFileAsync = promisify(execFile);
+import {
+  cloudflareAccountId as oneAccountId,
+  cloudflareStatusIs as isStatus,
+  cloudflareToken as tokenOf,
+  containerApplications,
+  deleteContainer,
+  matchingScripts,
+  nonGitHubDeployEnv,
+  r2BucketExists as bucketExists,
+  r2ObjectExists as objectExists,
+  r2ObjectKeys as objectKeys,
+  relatedWorkflows,
+  triggerSignedWebhook,
+  waitForWorkflow,
+  workflowStepOutput as stepOutput,
+} from "./support.ts";
 
 const hookSecret = `hook-${randomUUID()}`;
 const oldSecret = `old-${randomUUID()}`;
@@ -105,42 +118,6 @@ export default workflow({
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
-const tokenOf = async (): Promise<string> => {
-  const { stdout } = await execFileAsync("wrangler", ["auth", "token", "--json"], {
-    timeout: 10_000,
-  });
-  const auth = JSON.parse(stdout) as { token?: unknown };
-  if (typeof auth.token !== "string") throw new Error("Wrangler did not return an auth token");
-  return auth.token;
-};
-
-const oneAccountId = async (cf: Cloudflare): Promise<string> => {
-  const ids: string[] = [];
-  for await (const account of cf.accounts.list()) ids.push(account.id);
-  const explicit = process.env.CLOUDFLARE_ACCOUNT_ID;
-  if (explicit) return explicit;
-  if (ids.length !== 1)
-    throw new Error("Set CLOUDFLARE_ACCOUNT_ID when auth has multiple accounts");
-  return ids[0]!;
-};
-
-const isStatus = (error: unknown, status: number): boolean =>
-  !!error && typeof error === "object" && "status" in error && error.status === status;
-
-const bucketExists = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-): Promise<boolean> => {
-  try {
-    await cf.r2.buckets.get(bucketName, { account_id: accountId });
-    return true;
-  } catch (error) {
-    if (isStatus(error, 404)) return false;
-    throw error;
-  }
-};
-
 const ensureArtifactBucket = async (
   cf: Cloudflare,
   accountId: string,
@@ -149,39 +126,6 @@ const ensureArtifactBucket = async (
   if (await bucketExists(cf, accountId, bucketName)) return false;
   await cf.r2.buckets.create({ account_id: accountId, name: bucketName });
   return true;
-};
-
-const objectKeys = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-  prefix?: string,
-): Promise<ReadonlySet<string>> => {
-  if (!(await bucketExists(cf, accountId, bucketName))) return new Set();
-  const keys = new Set<string>();
-  for await (const object of cf.r2.buckets.objects.list(bucketName, {
-    account_id: accountId,
-    ...(prefix ? { prefix } : {}),
-  })) {
-    if (object.key) keys.add(object.key);
-  }
-  return keys;
-};
-
-const objectExists = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-  objectKey: string,
-): Promise<boolean> => {
-  if (!(await bucketExists(cf, accountId, bucketName))) return false;
-  try {
-    await cf.r2.buckets.objects.get(objectKey, { account_id: accountId, bucket_name: bucketName });
-    return true;
-  } catch (error) {
-    if (isStatus(error, 404)) return false;
-    throw error;
-  }
 };
 
 const firstVersionId = async (
@@ -210,70 +154,6 @@ const deploymentIdAt = async (host: string): Promise<string> => {
   return body.deploymentId;
 };
 
-const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
-  const body = JSON.stringify(event);
-  const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
-  const response = await fetchWorkersDev(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-smoke-signature": signature },
-    body,
-  });
-  if (response.status !== 202)
-    throw new Error(`Webhook returned ${response.status}: ${response.text.slice(0, 1024)}`);
-  const result = JSON.parse(response.text) as { runs?: ReadonlyArray<{ id?: unknown }> };
-  const id = result.runs?.[0]?.id;
-  if (typeof id !== "string") throw new Error("Webhook response omitted run id");
-  return id;
-};
-
-const instance = async (
-  cf: Cloudflare,
-  accountId: string,
-  workflowName: string,
-  instanceId: string,
-): Promise<InstanceDetails> =>
-  (await cf.workflows.instances.get(instanceId, {
-    account_id: accountId,
-    workflow_name: workflowName,
-  })) as InstanceDetails;
-
-const waitFor = async (
-  cf: Cloudflare,
-  accountId: string,
-  workflowName: string,
-  instanceId: string,
-  accepts: (details: InstanceDetails) => boolean,
-  timeoutMs: number,
-): Promise<InstanceDetails> => {
-  const deadline = Date.now() + timeoutMs;
-  let last: InstanceDetails | undefined;
-  while (Date.now() < deadline) {
-    const details = await instance(cf, accountId, workflowName, instanceId);
-    last = details;
-    if (accepts(details)) return details;
-    if (["errored", "terminated"].includes(details.status)) {
-      const diagnostic = JSON.stringify(details)
-        .replaceAll(hookSecret, "***")
-        .replaceAll(oldSecret, "***")
-        .replaceAll(newSecret, "***");
-      throw new Error(`Workflow ${instanceId} ${details.status}: ${diagnostic}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  throw new Error(`Timed out waiting for Workflow ${instanceId}: ${JSON.stringify(last)}`);
-};
-
-const stepNameMatches = (actual: string | undefined, expected: string): boolean =>
-  actual === expected || actual?.startsWith(`${expected}-`) === true;
-
-const stepOutput = (details: InstanceDetails, name: string): string => {
-  const output = details.steps.find(
-    (step) => step.type === "step" && stepNameMatches(step.name, name),
-  )?.output;
-  if (typeof output !== "string") throw new Error(`Missing output for step ${name}`);
-  return output;
-};
-
 const assertOutput = (
   details: InstanceDetails,
   bodyVersion: "v1" | "v2",
@@ -295,73 +175,6 @@ const assertOutput = (
   }
 };
 
-const containerApplications = async (
-  token: string,
-  accountId: string,
-): Promise<ReadonlyArray<{ readonly id: string; readonly name: string }>> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications`,
-    { headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok) throw new Error(`Container list returned ${response.status}`);
-  const body = (await response.json()) as {
-    result?: ReadonlyArray<{ id?: unknown; name?: unknown }>;
-  };
-  return (body.result ?? []).flatMap((application) =>
-    typeof application.id === "string" && typeof application.name === "string"
-      ? [{ id: application.id, name: application.name }]
-      : [],
-  );
-};
-
-const deleteContainer = async (
-  token: string,
-  accountId: string,
-  applicationId: string,
-): Promise<void> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications/${applicationId}`,
-    { method: "DELETE", headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Container delete returned ${response.status}`);
-  }
-};
-
-const matchingScripts = async (
-  cf: Cloudflare,
-  accountId: string,
-  scriptName: string,
-): Promise<ReadonlyArray<string>> => {
-  const scripts: string[] = [];
-  for await (const script of cf.workers.scripts.list({ account_id: accountId })) {
-    if (script.id === scriptName) scripts.push(script.id);
-  }
-  return scripts;
-};
-
-interface WorkflowIdentity {
-  readonly name: string;
-  readonly scriptName?: string;
-}
-
-const relatedWorkflows = async (
-  cf: Cloudflare,
-  accountId: string,
-  scriptName: string,
-): Promise<ReadonlyArray<WorkflowIdentity>> => {
-  const workflows: WorkflowIdentity[] = [];
-  for await (const candidate of cf.workflows.list({ account_id: accountId })) {
-    if (candidate.name === scriptName || candidate.script_name === scriptName) {
-      workflows.push({
-        name: candidate.name ?? "<unnamed>",
-        ...(candidate.script_name ? { scriptName: candidate.script_name } : {}),
-      });
-    }
-  }
-  return workflows;
-};
-
 const run = async (): Promise<void> => {
   const startedAt = Date.now();
   const suffix = `${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomUUID().slice(0, 8)}`;
@@ -369,10 +182,12 @@ const run = async (): Promise<void> => {
   const containerName = scriptName;
   const token = await tokenOf();
   const cf = new Cloudflare({ apiToken: token, timeout: 15_000 });
-  const accountId = await oneAccountId(cf);
+  const accountId = await oneAccountId(cf, true);
   const bucketName = DATA_BUCKET;
   const collisions = [
-    ...(await matchingScripts(cf, accountId, scriptName)).map((name) => `Worker ${name}`),
+    ...(await matchingScripts(cf, accountId, new Set([scriptName]))).map(
+      (name) => `Worker ${name}`,
+    ),
     ...(await relatedWorkflows(cf, accountId, scriptName)).map(
       (workflow) => `Workflow ${workflow.name} (Worker ${workflow.scriptName ?? "<unknown>"})`,
     ),
@@ -473,24 +288,33 @@ const run = async (): Promise<void> => {
     const oldHash = sha256(oldSecret);
     const newHash = sha256(newSecret);
     const sleepingStarted = Date.now();
-    const sleepingRunId = await trigger(webhookUrl, {
-      sleepMs: 180_000,
-      expectedSecretHash: oldHash,
-      rejectedSecretHash: newHash,
-      printSecret: false,
-    });
-    const sleeping = await waitFor(
+    const sleepingRunId = await triggerSignedWebhook(
+      webhookUrl,
+      {
+        sleepMs: 180_000,
+        expectedSecretHash: oldHash,
+        rejectedSecretHash: newHash,
+        printSecret: false,
+      },
+      hookSecret,
+      "x-smoke-signature",
+    );
+    const sleeping = await waitForWorkflow(
       cf,
       accountId,
       scriptName,
       sleepingRunId,
-      (details) =>
+      (details: InstanceDetails) =>
         ["running", "waiting"].includes(details.status) &&
         details.steps.some(
           (step) =>
-            step.type === "sleep" && stepNameMatches(step.name, "hold-v1") && !step.finished,
+            step.type === "sleep" &&
+            (step.name === "hold-v1" || step.name?.startsWith("hold-v1-") === true) &&
+            !step.finished,
         ),
       60_000,
+      (diagnostic) =>
+        secretValues.reduce((value, secret) => value.replaceAll(secret, "***"), diagnostic),
     );
     timings.v1ReachedSleepMs = Date.now() - sleepingStarted;
     identities.v1SleepingRunId = sleepingRunId;
@@ -534,19 +358,26 @@ const run = async (): Promise<void> => {
       a.localeCompare(b),
     );
 
-    const freshV2RunId = await trigger(v2WebhookUrl, {
-      sleepMs: 0,
-      expectedSecretHash: oldHash,
-      rejectedSecretHash: newHash,
-      printSecret: false,
-    });
-    const freshV2 = await waitFor(
+    const freshV2RunId = await triggerSignedWebhook(
+      v2WebhookUrl,
+      {
+        sleepMs: 0,
+        expectedSecretHash: oldHash,
+        rejectedSecretHash: newHash,
+        printSecret: false,
+      },
+      hookSecret,
+      "x-smoke-signature",
+    );
+    const freshV2 = await waitForWorkflow(
       cf,
       accountId,
       scriptName,
       freshV2RunId,
-      (details) => details.status === "complete",
+      (details: InstanceDetails) => details.status === "complete",
       60_000,
+      (diagnostic) =>
+        secretValues.reduce((value, secret) => value.replaceAll(secret, "***"), diagnostic),
     );
     assertOutput(freshV2, "v2", true, false);
     identities.v2PreRotationRunId = freshV2RunId;
@@ -568,22 +399,29 @@ const run = async (): Promise<void> => {
     let rotated: InstanceDetails | undefined;
     let rotatedRunId: string | undefined;
     while (Date.now() < propagationDeadline && !rotated) {
-      const propagationRunId = await trigger(v2WebhookUrl, {
-        sleepMs: 0,
-        expectedSecretHash: newHash,
-        rejectedSecretHash: oldHash,
-        printSecret: true,
-      });
+      const propagationRunId = await triggerSignedWebhook(
+        v2WebhookUrl,
+        {
+          sleepMs: 0,
+          expectedSecretHash: newHash,
+          rejectedSecretHash: oldHash,
+          printSecret: true,
+        },
+        hookSecret,
+        "x-smoke-signature",
+      );
       propagationRunIds.push(propagationRunId);
       let propagation: InstanceDetails;
       try {
-        propagation = await waitFor(
+        propagation = await waitForWorkflow(
           cf,
           accountId,
           scriptName,
           propagationRunId,
-          (details) => details.status === "complete",
+          (details: InstanceDetails) => details.status === "complete",
           60_000,
+          (diagnostic) =>
+            secretValues.reduce((value, secret) => value.replaceAll(secret, "***"), diagnostic),
         );
       } catch (error) {
         if (!String(error).includes("Durable Object reset because its code was updated")) {
@@ -632,13 +470,15 @@ const run = async (): Promise<void> => {
     assertOutput(rotated, "v2", true, false);
     identities.v2PostRotationRunId = rotatedRunId;
 
-    const oldCompleted = await waitFor(
+    const oldCompleted = await waitForWorkflow(
       cf,
       accountId,
       scriptName,
       sleepingRunId,
-      (details) => details.status === "complete",
+      (details: InstanceDetails) => details.status === "complete",
       180_000,
+      (diagnostic) =>
+        secretValues.reduce((value, secret) => value.replaceAll(secret, "***"), diagnostic),
     );
     timings.v1TotalRunMs = Date.now() - sleepingStarted;
     assertOutput(oldCompleted, "v1", true, false);
@@ -723,7 +563,7 @@ const run = async (): Promise<void> => {
       const remainingContainer = (await containerApplications(token, accountId)).some(
         (candidate) => candidate.name === containerName,
       );
-      const remainingScripts = await matchingScripts(cf, accountId, scriptName);
+      const remainingScripts = await matchingScripts(cf, accountId, new Set([scriptName]));
       const remainingWorkflows = await relatedWorkflows(cf, accountId, scriptName);
       const bucketRemains = await bucketExists(cf, accountId, bucketName);
       const remainingKeys = bucketRemains

@@ -4,6 +4,8 @@ import type {
   GitHubPushEvent,
   GitHubRepository,
 } from "../../trigger.ts";
+import { concatBytes } from "./byte.ts";
+import { validGitHubRepository } from "./repository.ts";
 
 export interface GitHubDeliveryConfig {
   readonly repository: GitHubRepository;
@@ -51,16 +53,6 @@ const equalBytes = (left: Uint8Array, right: Uint8Array): boolean => {
     difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
   }
   return difference === 0;
-};
-
-const concatBytes = (...parts: readonly Uint8Array[]): Uint8Array => {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.length;
-  }
-  return result;
 };
 
 const verifySignature = async (
@@ -123,7 +115,6 @@ const readGitHubWebhookBody = async (request: Request): Promise<Uint8Array> => {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
 const REF_PART = /^(?![./])(?!.*(?:\.\.|\/\/|@\{|\\|[~^:?*[]))(?!.*\.$).+$/;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -135,19 +126,11 @@ const positiveInteger = (value: unknown): value is number =>
 const parseRepository = (value: unknown, label: string): GitHubRepository => {
   if (!isRecord(value)) throw new Error(`invalid GitHub ${label} payload`);
   const { id, name, full_name: fullName } = value;
-  if (
-    !positiveInteger(id) ||
-    typeof name !== "string" ||
-    !REPOSITORY_PART.test(name) ||
-    typeof fullName !== "string"
-  ) {
+  const repository = { id, name, fullName };
+  if (!validGitHubRepository(repository)) {
     throw new Error(`invalid GitHub ${label} payload`);
   }
-  const parts = fullName.split("/");
-  if (parts.length !== 2 || !parts[0] || !REPOSITORY_PART.test(parts[0]) || parts[1] !== name) {
-    throw new Error(`invalid GitHub ${label} payload`);
-  }
-  return { id, name, fullName };
+  return repository;
 };
 
 const parseDefaultRef = (value: unknown, label: string): string => {

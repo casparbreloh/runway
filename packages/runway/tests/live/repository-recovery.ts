@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
+// fallow-ignore-file code-duplication -- public recovery independently proves the same contract as authenticated recovery
+
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { webhook, workflow } from "runway";
@@ -15,9 +15,23 @@ import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
 import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { COMPATIBILITY_DATE } from "../../src/internal/runtime/contract.ts";
 import { resolveRepositorySource } from "../../src/internal/source/repository.ts";
-import { fetchWorkersDev, nonGitHubDeployEnv } from "./support.ts";
+import {
+  cloudflareAccountId,
+  cloudflareStatusIs,
+  cloudflareToken,
+  containerApplications,
+  deleteContainer,
+  matchingScripts,
+  nonGitHubDeployEnv,
+  r2BucketExists,
+  r2ObjectExists,
+  r2ObjectKeys,
+  relatedWorkflows,
+  triggerSignedWebhook,
+  waitForWorkflow,
+  workflowStepOutput,
+} from "./support.ts";
 
-const execFileAsync = promisify(execFile);
 const WORKFLOW_ID = "repository-recovery-smoke";
 const WEBHOOK_PATH = "/smoke";
 const SIGNATURE_HEADER = "x-smoke-signature";
@@ -161,175 +175,6 @@ export default {
 };
 `;
 
-const tokenOf = async (): Promise<string> => {
-  const { stdout } = await execFileAsync("wrangler", ["auth", "token", "--json"], {
-    timeout: 10_000,
-  });
-  const auth = JSON.parse(stdout) as { token?: unknown };
-  if (typeof auth.token !== "string") throw new Error("Wrangler did not return an auth token");
-  return auth.token;
-};
-
-const oneAccountId = async (cf: Cloudflare): Promise<string> => {
-  if (process.env.CLOUDFLARE_ACCOUNT_ID) return process.env.CLOUDFLARE_ACCOUNT_ID;
-  const ids: string[] = [];
-  for await (const account of cf.accounts.list()) ids.push(account.id);
-  if (ids.length !== 1)
-    throw new Error("Set CLOUDFLARE_ACCOUNT_ID when auth has multiple accounts");
-  return ids[0]!;
-};
-
-const isStatus = (error: unknown, status: number): boolean =>
-  !!error && typeof error === "object" && "status" in error && error.status === status;
-
-const bucketExists = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-): Promise<boolean> => {
-  try {
-    await cf.r2.buckets.get(bucketName, { account_id: accountId });
-    return true;
-  } catch (error) {
-    if (isStatus(error, 404)) return false;
-    throw error;
-  }
-};
-
-const objectKeys = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-): Promise<ReadonlySet<string>> => {
-  if (!(await bucketExists(cf, accountId, bucketName))) return new Set();
-  const keys = new Set<string>();
-  for await (const object of cf.r2.buckets.objects.list(bucketName, { account_id: accountId })) {
-    if (object.key) keys.add(object.key);
-  }
-  return keys;
-};
-
-const objectExists = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucketName: string,
-  objectKey: string,
-): Promise<boolean> => {
-  if (!(await bucketExists(cf, accountId, bucketName))) return false;
-  try {
-    await cf.r2.buckets.objects.get(objectKey, { account_id: accountId, bucket_name: bucketName });
-    return true;
-  } catch (error) {
-    if (isStatus(error, 404)) return false;
-    throw error;
-  }
-};
-
-const containerApplications = async (
-  token: string,
-  accountId: string,
-): Promise<ReadonlyArray<{ readonly id: string; readonly name: string }>> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications`,
-    { headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok) throw new Error(`Container list returned ${response.status}`);
-  const body = (await response.json()) as {
-    result?: ReadonlyArray<{ id?: unknown; name?: unknown }>;
-  };
-  return (body.result ?? []).flatMap((application) =>
-    typeof application.id === "string" && typeof application.name === "string"
-      ? [{ id: application.id, name: application.name }]
-      : [],
-  );
-};
-
-const deleteContainer = async (
-  token: string,
-  accountId: string,
-  applicationId: string,
-): Promise<void> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications/${applicationId}`,
-    { method: "DELETE", headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Container delete returned ${response.status}`);
-  }
-};
-
-const matchingScripts = async (
-  cf: Cloudflare,
-  accountId: string,
-  names: ReadonlySet<string>,
-): Promise<ReadonlyArray<string>> => {
-  const matches: string[] = [];
-  for await (const script of cf.workers.scripts.list({ account_id: accountId })) {
-    if (typeof script.id === "string" && names.has(script.id)) matches.push(script.id);
-  }
-  return matches;
-};
-
-const relatedWorkflows = async (
-  cf: Cloudflare,
-  accountId: string,
-  scriptName: string,
-): Promise<ReadonlyArray<string>> => {
-  const matches: string[] = [];
-  for await (const candidate of cf.workflows.list({ account_id: accountId })) {
-    if (candidate.name === scriptName || candidate.script_name === scriptName) {
-      matches.push(candidate.name ?? "<unnamed>");
-    }
-  }
-  return matches;
-};
-
-const trigger = async (url: string, event: SmokeEvent): Promise<string> => {
-  const body = JSON.stringify(event);
-  const signature = createHmac("sha256", hookSecret).update(body).digest("hex");
-  const response = await fetchWorkersDev(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", [SIGNATURE_HEADER]: signature },
-    body,
-  });
-  if (response.status !== 202)
-    throw new Error(`Webhook returned ${response.status}: ${response.text.slice(0, 1024)}`);
-  const result = JSON.parse(response.text) as { runs?: ReadonlyArray<{ id?: unknown }> };
-  const id = result.runs?.[0]?.id;
-  if (typeof id !== "string") throw new Error("Webhook response omitted run id");
-  return id;
-};
-
-const waitForCompletion = async (
-  cf: Cloudflare,
-  accountId: string,
-  workflowName: string,
-  runId: string,
-): Promise<InstanceDetails> => {
-  const deadline = Date.now() + 180_000;
-  let last: InstanceDetails | undefined;
-  while (Date.now() < deadline) {
-    last = (await cf.workflows.instances.get(runId, {
-      account_id: accountId,
-      workflow_name: workflowName,
-    })) as InstanceDetails;
-    if (last.status === "complete") return last;
-    if (["errored", "terminated"].includes(last.status)) {
-      throw new Error(`Workflow ${runId} ${last.status}: ${JSON.stringify(last)}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  throw new Error(`Timed out waiting for Workflow ${runId}: ${JSON.stringify(last)}`);
-};
-
-const stepOutput = (details: InstanceDetails, name: string): string => {
-  const output = details.steps.find(
-    (step) => step.type === "step" && (step.name === name || step.name?.startsWith(`${name}-`)),
-  )?.output;
-  if (typeof output !== "string") throw new Error(`Missing output for step ${name}`);
-  return output;
-};
-
 const uploadDriver = async (
   cf: Cloudflare,
   accountId: string,
@@ -391,15 +236,17 @@ const run = async (): Promise<void> => {
   const scriptName = process.env.RUNWAY_SMOKE_SCRIPT ?? `runway-recovery-smoke-${suffix}`;
   const driverName = `${scriptName}-driver`;
   const containerName = scriptName;
-  const token = await tokenOf();
+  const token = await cloudflareToken(false);
   const cf = new Cloudflare({ apiToken: token });
-  const accountId = await oneAccountId(cf);
+  const accountId = await cloudflareAccountId(cf);
   const bucketName = DATA_BUCKET;
-  const bucketExisted = await bucketExists(cf, accountId, bucketName);
+  const bucketExisted = await r2BucketExists(cf, accountId, bucketName);
   const scriptNames = new Set([scriptName, driverName]);
   const collisions = [
     ...(await matchingScripts(cf, accountId, scriptNames)).map((name) => `Worker ${name}`),
-    ...(await relatedWorkflows(cf, accountId, scriptName)).map((name) => `Workflow ${name}`),
+    ...(await relatedWorkflows(cf, accountId, scriptName)).map(
+      (candidate) => `Workflow ${candidate.name}`,
+    ),
     ...(await containerApplications(token, accountId))
       .filter((candidate) => candidate.name === containerName)
       .map((candidate) => `container ${candidate.name}`),
@@ -431,7 +278,7 @@ const run = async (): Promise<void> => {
     });
     for (const artifact of prepared.artifacts) {
       const key = workflowArtifactKey(artifact.artifactVersion);
-      if (await objectExists(cf, accountId, bucketName, key)) {
+      if (await r2ObjectExists(cf, accountId, bucketName, key)) {
         throw new Error(`Refusing to overwrite pre-existing smoke object: ${key}`);
       }
       createdObjectKeys.add(key);
@@ -461,13 +308,25 @@ const run = async (): Promise<void> => {
     const prefix = `${scriptName}.`;
     if (!host.startsWith(prefix)) throw new Error(`Unexpected webhook host: ${host}`);
     const destroyUrl = `https://${driverName}.${host.slice(prefix.length)}/destroy`;
-    const runId = await trigger(webhookUrl, { destroyUrl });
-    const completed = await waitForCompletion(cf, accountId, scriptName, runId);
-    const coldReport = JSON.parse(stepOutput(completed, "cold-report")) as {
+    const runId = await triggerSignedWebhook(
+      webhookUrl,
+      { destroyUrl },
+      hookSecret,
+      SIGNATURE_HEADER,
+    );
+    const completed = await waitForWorkflow(
+      cf,
+      accountId,
+      scriptName,
+      runId,
+      (details: InstanceDetails) => details.status === "complete",
+      180_000,
+    );
+    const coldReport = JSON.parse(workflowStepOutput(completed, "cold-report")) as {
       coldStartedAtMs?: unknown;
       cold?: unknown;
     };
-    const lossReport = JSON.parse(stepOutput(completed, "loss-report")) as {
+    const lossReport = JSON.parse(workflowStepOutput(completed, "loss-report")) as {
       recoveryStartedAtMs?: unknown;
       loss?: { name?: unknown; message?: unknown };
     };
@@ -527,13 +386,13 @@ const run = async (): Promise<void> => {
       try {
         await cf.workers.scripts.delete(name, { account_id: accountId });
       } catch (error) {
-        if (!isStatus(error, 404)) cleanupErrors.push(`${name}: ${String(error)}`);
+        if (!cloudflareStatusIs(error, 404)) cleanupErrors.push(`${name}: ${String(error)}`);
       }
     }
     try {
       await cf.workflows.delete(scriptName, { account_id: accountId });
     } catch (error) {
-      if (!isStatus(error, 404)) cleanupErrors.push(`workflow: ${String(error)}`);
+      if (!cloudflareStatusIs(error, 404)) cleanupErrors.push(`workflow: ${String(error)}`);
     }
     try {
       const application = (await containerApplications(token, accountId)).find(
@@ -547,7 +406,7 @@ const run = async (): Promise<void> => {
       for (const key of createdObjectKeys) {
         await cf.r2.buckets.objects.delete(key, { account_id: accountId, bucket_name: bucketName });
       }
-      if (!bucketExisted && (await objectKeys(cf, accountId, bucketName)).size === 0) {
+      if (!bucketExisted && (await r2ObjectKeys(cf, accountId, bucketName)).size === 0) {
         await cf.r2.buckets.delete(bucketName, { account_id: accountId });
       }
     } catch (error) {
@@ -560,12 +419,14 @@ const run = async (): Promise<void> => {
       const remainingContainer = (await containerApplications(token, accountId)).some(
         (candidate) => candidate.name === containerName,
       );
-      const bucketRemains = await bucketExists(cf, accountId, bucketName);
+      const bucketRemains = await r2BucketExists(cf, accountId, bucketName);
       const remainingKeys = bucketRemains
-        ? await objectKeys(cf, accountId, bucketName)
+        ? await r2ObjectKeys(cf, accountId, bucketName)
         : new Set<string>();
       for (const name of remainingScripts) cleanupErrors.push(`Worker still exists: ${name}`);
-      for (const name of remainingWorkflows) cleanupErrors.push(`Workflow still exists: ${name}`);
+      for (const workflow of remainingWorkflows) {
+        cleanupErrors.push(`Workflow still exists: ${workflow.name}`);
+      }
       if (remainingContainer) cleanupErrors.push(`container still exists: ${containerName}`);
       for (const key of createdObjectKeys) {
         if (remainingKeys.has(key)) cleanupErrors.push(`R2 object still exists: ${key}`);

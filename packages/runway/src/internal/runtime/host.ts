@@ -12,6 +12,7 @@ import { Cache } from "../cache/cache.ts";
 import { normalizedCacheTarget } from "../cache/path.ts";
 import { CloudflareCacheSnapshot } from "../cache/snapshot.ts";
 import { CloudflareCacheTransfer } from "../cache/transfer.ts";
+import { lowercaseDigestHex } from "../digest.ts";
 import type {
   GitHubCoordinatorAdmission,
   GitHubCoordinatorRun,
@@ -626,11 +627,8 @@ interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
 
 type LoaderPurpose = "trigger" | "run";
 
-const hex = (bytes: ArrayBuffer): string =>
-  [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
 const sha256 = async (bytes: BufferSource): Promise<string> =>
-  hex(await crypto.subtle.digest("SHA-256", bytes));
+  lowercaseDigestHex(await crypto.subtle.digest("SHA-256", bytes));
 
 const metadataOf = (value: unknown): WorkflowMetadata => {
   if (

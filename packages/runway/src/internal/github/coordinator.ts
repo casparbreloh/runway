@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GitHubRepository } from "../../trigger.ts";
+import { lowercaseDigestHex } from "../digest.ts";
 import {
   parseFailureDiagnostic,
   sameFailureDiagnostic,
@@ -603,15 +604,12 @@ const isPending = (run: RunRecord): boolean =>
 const isExternallyTerminal = (run: RunRecord): boolean =>
   run.desired === "skipped" || run.checkCompletionComplete || run.checkCancellationComplete;
 
-const hex = (bytes: ArrayBuffer): string =>
-  [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
 const dispatchSeed = async (
   repositoryId: number,
   deliveryId: string,
   workflowId: string,
 ): Promise<string> =>
-  hex(
+  lowercaseDigestHex(
     await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(`${repositoryId}\0${deliveryId}\0${workflowId}`),
@@ -881,10 +879,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     const run = parseRun(await this.ctx.storage.get(runKey(source.runId)), source.runId);
     await this.#validateDispatchIdentity(run);
     this.#validateLifecycleSource(run, source);
-    const generation = await this.ctx.storage.get(generationStorageKey(run.activeKey));
-    if (!positiveInteger(generation) || generation < run.generation) invariant();
-    const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
-    const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
+    const { generation, active } = await this.#activeLifecycle(run);
     return (
       generation === run.generation &&
       active?.runId === run.runId &&
@@ -1069,14 +1064,22 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     }
   }
 
-  async #validatedRunForEffect(entry: PendingRecord): Promise<RunRecord> {
-    const run = parseRun(await this.ctx.storage.get(runKey(entry.runId)), entry.runId);
-    if (run.nextAttemptAt !== entry.dueAt || !isPending(run)) invariant();
-    await this.#validateDispatchIdentity(run);
+  async #activeLifecycle(run: RunRecord): Promise<{
+    readonly generation: number;
+    readonly active: ActiveRecord | undefined;
+  }> {
     const generation = await this.ctx.storage.get(generationStorageKey(run.activeKey));
     if (!positiveInteger(generation) || generation < run.generation) invariant();
     const rawActive = await this.ctx.storage.get(activeStorageKey(run.activeKey));
     const active = rawActive === undefined ? undefined : parseActive(rawActive, run.activeKey);
+    return { generation: generation as number, active };
+  }
+
+  async #validatedRunForEffect(entry: PendingRecord): Promise<RunRecord> {
+    const run = parseRun(await this.ctx.storage.get(runKey(entry.runId)), entry.runId);
+    if (run.nextAttemptAt !== entry.dueAt || !isPending(run)) invariant();
+    await this.#validateDispatchIdentity(run);
+    const { generation, active } = await this.#activeLifecycle(run);
     if (run.desired !== "cancelled" && run.desired !== "skipped" && run.terminal === null) {
       if (
         generation !== run.generation ||
@@ -1130,13 +1133,20 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     run.nextAttemptAt = now;
     if (wasPending) await transaction.delete(oldPending);
     await transaction.put(runKey(run.runId), run);
-    if (isPending(run)) {
-      await transaction.put(pendingKey(now, run.runId), {
-        kind: "pending",
-        runId: run.runId,
-        dueAt: now,
-      } satisfies PendingRecord);
-    }
+    await this.#putPending(transaction, run, now);
+  }
+
+  async #putPending(
+    transaction: DurableObjectTransaction,
+    run: RunRecord,
+    now: number,
+  ): Promise<void> {
+    if (!isPending(run)) return;
+    await transaction.put(pendingKey(now, run.runId), {
+      kind: "pending",
+      runId: run.runId,
+      dueAt: now,
+    } satisfies PendingRecord);
   }
 
   async #saveProgress(run: RunRecord, now: number): Promise<void> {
@@ -1146,13 +1156,7 @@ export class RunwayGitHubCoordinator extends DurableObject<CoordinatorEnv> {
     await this.ctx.storage.transaction(async (transaction) => {
       await transaction.delete(oldPending);
       await transaction.put(runKey(run.runId), run);
-      if (isPending(run)) {
-        await transaction.put(pendingKey(now, run.runId), {
-          kind: "pending",
-          runId: run.runId,
-          dueAt: now,
-        } satisfies PendingRecord);
-      }
+      await this.#putPending(transaction, run, now);
     });
   }
 

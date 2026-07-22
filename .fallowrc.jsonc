@@ -22,13 +22,9 @@
     { "implements": "StackControl", "members": ["urls"] },
   ],
   "duplicates": {
-    "mode": "mild",
     "minTokens": 80,
     "minLines": 8,
-    "threshold": 1,
-    "ignore": ["packages/runway/tests/live/**"],
   },
-  "health": { "suggestInlineSuppression": false },
   "rules": {
     "require-suppression-reason": "error",
     "stale-suppressions": "error",
