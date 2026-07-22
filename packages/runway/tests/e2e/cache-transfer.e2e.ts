@@ -71,7 +71,7 @@ const createSmokeContainer = async (
 
 const buildWorker = async (): Promise<Uint8Array> => {
   const result = await esbuild({
-    entryPoints: [path.join(import.meta.dirname, "cache-transfer-worker.live.ts")],
+    entryPoints: [path.join(import.meta.dirname, "cache-transfer-worker.e2e.ts")],
     bundle: true,
     format: "esm",
     platform: "browser",
