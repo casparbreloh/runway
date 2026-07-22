@@ -1,7 +1,5 @@
-// fallow-ignore-file code-duplication -- independently bundled recovery fixtures intentionally mirror source recovery
-
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
@@ -10,11 +8,11 @@ import { webhook, workflow } from "runway";
 
 import { buildDeployment } from "../../src/internal/publish/artifacts.ts";
 import { publishWithAdapters } from "../../src/internal/publish/publish.ts";
-import type { Registry } from "../../src/internal/publish/registry.ts";
 import { workflowArtifactKey } from "../../src/internal/runtime/artifact.ts";
 import { DATA_BUCKET } from "../../src/internal/runtime/contract.ts";
 import { setScriptSecret } from "../../src/internal/secret/store.ts";
 import { resolveRepositorySource } from "../../src/internal/source/repository.ts";
+import { artifactWorkflowSource } from "./artifact-fixture.ts";
 import {
   cloudflareAccountId as oneAccountId,
   cloudflareStatusIs as isStatus,
@@ -31,6 +29,7 @@ import {
   waitForWorkflow,
   workflowStepOutput as stepOutput,
 } from "./support.ts";
+import { fixtureRegistry, writeWorkflowFixture } from "./workflow-fixture.ts";
 
 const hookSecret = `hook-${randomUUID()}`;
 const oldSecret = `old-${randomUUID()}`;
@@ -66,55 +65,6 @@ const smokeDefinition = workflow({
       signatureHeader: "x-smoke-signature",
     }),
 }).run(async () => {});
-
-const registry = (cwd: string): Registry => [
-  {
-    path: path.join(cwd, ".runway/workflows/smoke.ts"),
-    exportName: "default",
-    def: smokeDefinition,
-  },
-];
-
-const workflowSource = (bodyVersion: "v1" | "v2", scriptName: string): string => `
-import { webhook, workflow } from "runway";
-
-interface SmokeEvent {
-  readonly sleepMs: number;
-  readonly expectedSecretHash: string;
-  readonly rejectedSecretHash: string;
-  readonly printSecret: boolean;
-}
-
-const hash = async (value: string): Promise<string> => {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-};
-
-export default workflow({
-  id: "immutable-smoke",
-  secrets: ["HOOK_SECRET", "SMOKE_SECRET"],
-  trigger: (ctx) => webhook<SmokeEvent>({
-    path: "/smoke",
-    secret: ctx.secrets.HOOK_SECRET,
-    signatureHeader: "x-smoke-signature",
-  }),
-}).run(async (run, event) => {
-  await run.do("version-before", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)}, scriptName: ${JSON.stringify(scriptName)} }));
-  if (event.sleepMs > 0) await run.sleep("hold-v1", event.sleepMs);
-  await run.do("version-after", () => ({ bodyVersion: ${JSON.stringify(bodyVersion)} }));
-  const actualSecretHash = await hash(run.secrets.SMOKE_SECRET);
-  await run.do("secret-state", () => ({
-    matchesExpected: actualSecretHash === event.expectedSecretHash,
-    matchesRejected: actualSecretHash === event.rejectedSecretHash,
-  }));
-  if (event.printSecret) {
-    await run.exec("secret-output", {
-      command: ${JSON.stringify(`printf '%s\\n' "$RUNWAY_SMOKE_SECRET"`)},
-      env: { RUNWAY_SMOKE_SECRET: run.secrets.SMOKE_SECRET },
-    });
-  }
-});
-`;
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -235,12 +185,10 @@ const run = async (): Promise<void> => {
 
   try {
     bucketCreated = await ensureArtifactBucket(cf, accountId, bucketName);
-    await mkdir(path.dirname(workflowPath), { recursive: true });
-    await writeFile(path.join(project, "package.json"), JSON.stringify({ name: scriptName }));
+    await writeWorkflowFixture(project, scriptName, artifactWorkflowSource("v1", scriptName));
     const repository = await resolveRepositorySource(project);
     console.log(JSON.stringify({ phase: "start", accountId, scriptName, bucketName }));
-    await writeFile(workflowPath, workflowSource("v1", scriptName));
-    const preparedV1 = await buildDeployment(registry(project), {
+    const preparedV1 = await buildDeployment(fixtureRegistry(project, smokeDefinition), {
       accountId,
       cwd: project,
       deploymentName: scriptName,
@@ -251,7 +199,7 @@ const run = async (): Promise<void> => {
     await ownPreparedArtifacts(expectedV1Artifacts);
     const v1Started = Date.now();
     const v1 = await publishWithAdapters(
-      registry(project),
+      fixtureRegistry(project, smokeDefinition),
       {
         cwd: project,
         env: nonGitHubDeployEnv(process.env, {
@@ -320,8 +268,8 @@ const run = async (): Promise<void> => {
     identities.v1SleepingRunId = sleepingRunId;
     identities.v1StatusBeforeRedeploy = sleeping.status;
 
-    await writeFile(workflowPath, workflowSource("v2", scriptName));
-    const preparedV2 = await buildDeployment(registry(project), {
+    await writeFile(workflowPath, artifactWorkflowSource("v2", scriptName));
+    const preparedV2 = await buildDeployment(fixtureRegistry(project, smokeDefinition), {
       accountId,
       cwd: project,
       deploymentName: scriptName,
@@ -332,7 +280,7 @@ const run = async (): Promise<void> => {
     await ownPreparedArtifacts(expectedV2Artifacts);
     const v2Started = Date.now();
     const v2 = await publishWithAdapters(
-      registry(project),
+      fixtureRegistry(project, smokeDefinition),
       {
         cwd: project,
         env: nonGitHubDeployEnv(process.env, {
