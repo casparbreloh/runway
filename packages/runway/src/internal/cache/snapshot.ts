@@ -773,6 +773,7 @@ export class CloudflareCacheSnapshot {
     return outcome!.value;
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the cache snapshot contract
   async inspect(path: string): Promise<"absent" | "empty" | "nonempty"> {
     return await this.#withProcess(async (process, helper) => {
       const result = await process.execute(
@@ -847,6 +848,7 @@ export class CloudflareCacheSnapshot {
     }
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the cache snapshot contract
   async upload(request: {
     readonly key: string;
     readonly path: string;

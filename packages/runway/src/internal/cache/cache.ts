@@ -644,6 +644,7 @@ export class Cache {
     this.#meter = options.meter;
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the generated host binding
   async record(id: string, declaration: CacheTreeDeclaration) {
     const result = await this.restore(id, declaration);
     const pending = this.#pending.get(id);
@@ -743,6 +744,7 @@ export class Cache {
     });
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the generated host binding
   async prepare(pendingCaches: readonly PendingCache[]): Promise<readonly PreparedCache[]> {
     const snapshots = this.#snapshots;
     if (!snapshots) {
@@ -833,6 +835,7 @@ export class Cache {
     return prepared;
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the generated host binding
   async commit(preparedCaches: readonly PreparedCache[]): Promise<void> {
     for (const prepared of preparedCaches) {
       if (prepared.state === "skipped") continue;
@@ -1341,6 +1344,7 @@ export class Cache {
     return await this.#refs.put(key, text, options);
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the generated host binding
   async flushMeter(): Promise<void> {
     await this.#meter?.flush().catch(() => {});
   }
