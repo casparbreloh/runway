@@ -738,6 +738,21 @@ const duration = (budget: SnapshotBudget): number =>
     Math.max(1, budget?.maxDurationMs ?? HELPER_TIMEOUT_SECONDS * 1000),
   );
 
+const parseSnapshotFailure = <State extends string, Reason extends string>(
+  value: Record<string, unknown>,
+  state: State,
+  reasons: readonly Reason[],
+): { readonly state: State; readonly reason: Reason } | undefined => {
+  if (
+    Object.keys(value).sort().join(",") !== "reason,state" ||
+    value.state !== state ||
+    !reasons.includes(String(value.reason) as Reason)
+  ) {
+    return undefined;
+  }
+  return { state, reason: value.reason as Reason };
+};
+
 export class CloudflareCacheSnapshot {
   readonly #now: () => number;
   readonly #process: () => Promise<CacheSnapshotProcess>;
@@ -773,6 +788,7 @@ export class CloudflareCacheSnapshot {
     return outcome!.value;
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the cache snapshot contract
   async inspect(path: string): Promise<"absent" | "empty" | "nonempty"> {
     return await this.#withProcess(async (process, helper) => {
       const result = await process.execute(
@@ -811,16 +827,13 @@ export class CloudflareCacheSnapshot {
           duration(request.budget),
         );
         const value = JSON.parse(result.stdout) as Record<string, unknown>;
-        if (
-          Object.keys(value).sort().join(",") === "reason,state" &&
-          value.state === "skipped" &&
-          ["unsafe", "corrupt", "unavailable", "budget"].includes(String(value.reason))
-        ) {
-          return {
-            state: "skipped" as const,
-            reason: value.reason as "unsafe" | "corrupt" | "unavailable" | "budget",
-          };
-        }
+        const failure = parseSnapshotFailure(value, "skipped", [
+          "unsafe",
+          "corrupt",
+          "unavailable",
+          "budget",
+        ]);
+        if (failure) return failure;
         if (
           Object.keys(value).sort().join(",") !==
           "archive,byteCount,diskBytes,entryCount,fileCount,maxDepth,schema,treeDigest,uniqueInodes"
@@ -847,6 +860,7 @@ export class CloudflareCacheSnapshot {
     }
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the cache snapshot contract
   async upload(request: {
     readonly key: string;
     readonly path: string;
@@ -931,16 +945,8 @@ export class CloudflareCacheSnapshot {
           duration(request.budget),
         );
         const value = JSON.parse(result.stdout) as Record<string, unknown>;
-        if (
-          Object.keys(value).sort().join(",") === "reason,state" &&
-          value.state === "miss" &&
-          ["corrupt", "unavailable", "budget"].includes(String(value.reason))
-        ) {
-          return {
-            state: "miss" as const,
-            reason: value.reason as "corrupt" | "unavailable" | "budget",
-          };
-        }
+        const failure = parseSnapshotFailure(value, "miss", ["corrupt", "unavailable", "budget"]);
+        if (failure) return failure;
         const restored = parseSummary(value);
         if (!sameTree(restored, summary)) throw new Error();
         return {

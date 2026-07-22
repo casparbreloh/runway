@@ -277,5 +277,16 @@ mise run fallow
 mise run test
 ```
 
-Run `mise run test:image` for the exact pinned-image cache contract when privileged Docker with
-linux/amd64 support is available.
+Run the opt-in end-to-end suite separately:
+
+```sh
+mise run test:e2e
+```
+
+It runs the exact pinned-image cache contract followed by live Cloudflare cache, artifact, repository,
+and GitHub recovery smokes. It is not part of routine CI and requires privileged Docker with
+linux/amd64 support, Wrangler authentication, and R2 S3 credentials in
+`RUNWAY_CACHE_SMOKE_R2_ACCESS_KEY_ID` and `RUNWAY_CACHE_SMOKE_R2_SECRET_ACCESS_KEY`. Set
+`RUNWAY_LIVE_GITHUB_RECOVERY=1` together with `RUNWAY_GITHUB_APP_ID`,
+`RUNWAY_GITHUB_PRIVATE_KEY`, `RUNWAY_LIVE_GITHUB_REPOSITORY`, and `RUNWAY_LIVE_GITHUB_SHA` to include
+private GitHub recovery; otherwise that final smoke is skipped.

@@ -59,6 +59,19 @@ interface StateObject {
 const status = (error: unknown, expected: number): boolean =>
   !!error && typeof error === "object" && "status" in error && error.status === expected;
 
+const recordOf = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+const customDomainsOf = (
+  value: { readonly domains?: readonly { domain?: unknown; enabled?: unknown }[] } | undefined,
+): string[] =>
+  (value?.domains ?? [])
+    .filter(({ enabled }) => enabled === true)
+    .map(({ domain }) => required(domain, "R2 custom domain"))
+    .sort();
+
 const required = (value: unknown, field: string): string => {
   if (typeof value !== "string" || value.length === 0)
     throw new Error(`invalid Cloudflare ${field}`);
@@ -307,13 +320,31 @@ export class CloudflareStackControl implements StackControl {
     return this.#urls;
   }
 
+  async #workflows(): Promise<readonly Record<string, unknown>[]> {
+    return await collectResultItems(
+      await this.#opts.cf.workflows.list({ account_id: this.#opts.accountId }),
+      recordOf,
+    );
+  }
+
+  async #workers(): Promise<readonly Record<string, unknown>[]> {
+    return await collectResultItems(
+      await this.#opts.cf.workers.scripts.list({ account_id: this.#opts.accountId }),
+      recordOf,
+    );
+  }
+
+  async #namespaces(): Promise<readonly Record<string, unknown>[]> {
+    return await collectResultItems(
+      await this.#opts.cf.durableObjects.namespaces.list({ account_id: this.#opts.accountId }),
+      recordOf,
+    );
+  }
+
   async apply(manifest: StackManifest): Promise<void> {
     if (manifest.owner.accountId !== this.#opts.accountId)
       throw new Error("Stack account mismatch");
-    const workflows = await collectResultItems(
-      await this.#opts.cf.workflows.list({ account_id: this.#opts.accountId }),
-      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
-    );
+    const workflows = await this.#workflows();
     const workflowCollision = workflows.find(
       ({ name, script_name: scriptName }) =>
         name === manifest.workflow.name && scriptName !== manifest.worker.name,
@@ -328,10 +359,7 @@ export class CloudflareStackControl implements StackControl {
       );
     }
     await this.#assertRouteOwnership(manifest);
-    const scripts = await collectResultItems(
-      await this.#opts.cf.workers.scripts.list({ account_id: this.#opts.accountId }),
-      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
-    );
+    const scripts = await this.#workers();
     const workerExists = scripts.some(({ id }) => id === manifest.worker.name);
 
     const dataBucket = manifest.buckets.find(({ lifecycle }) => lifecycle === "retain");
@@ -452,10 +480,7 @@ export class CloudflareStackControl implements StackControl {
   }
 
   async inventory(manifest: StackManifest): Promise<StackReceipt> {
-    const scripts = await collectResultItems(
-      await this.#opts.cf.workers.scripts.list({ account_id: this.#opts.accountId }),
-      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
-    );
+    const scripts = await this.#workers();
     const script = scripts.find(({ id }) => id === manifest.worker.name);
     if (!script) throw new Error("missing exact Cloudflare Worker");
     const deployment = deploymentOf(
@@ -500,10 +525,7 @@ export class CloudflareStackControl implements StackControl {
     if (JSON.stringify(observedBindings) !== JSON.stringify(manifestBindings)) {
       throw new Error("Cloudflare Worker bindings do not match Stack manifest");
     }
-    const workflows = await collectResultItems(
-      await this.#opts.cf.workflows.list({ account_id: this.#opts.accountId }),
-      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
-    );
+    const workflows = await this.#workflows();
     const workflow = workflows.find(
       ({ name, script_name, class_name }) =>
         name === manifest.workflow.name &&
@@ -611,12 +633,7 @@ export class CloudflareStackControl implements StackControl {
     if (JSON.stringify(secretSnapshot) !== JSON.stringify(manifest.secretSnapshot)) {
       throw new Error("Cloudflare secret snapshot ownership does not match Stack manifest");
     }
-    const providerNamespaces = await collectResultItems(
-      await this.#opts.cf.durableObjects.namespaces.list({
-        account_id: this.#opts.accountId,
-      }),
-      (item) => (item && typeof item === "object" ? (item as Record<string, unknown>) : undefined),
-    );
+    const providerNamespaces = await this.#namespaces();
     const namespaces = manifest.namespaces.map(({ binding, className, name }) => {
       const bound = bindings.find(
         (candidate) => candidate.name === binding && candidate.target === className,
@@ -674,10 +691,7 @@ export class CloudflareStackControl implements StackControl {
             account_id: this.#opts.accountId,
           }),
         ) as { domains?: readonly { domain?: unknown; enabled?: unknown }[] } | undefined;
-        const customDomains = (customResult?.domains ?? [])
-          .filter(({ enabled }) => enabled === true)
-          .map(({ domain }) => required(domain, "R2 custom domain"))
-          .sort();
+        const customDomains = customDomainsOf(customResult);
         if (JSON.stringify(customDomains) !== JSON.stringify(bucket.customDomains)) {
           throw new Error(`Cloudflare R2 bucket custom domains do not match Stack manifest`);
         }
@@ -685,8 +699,7 @@ export class CloudflareStackControl implements StackControl {
           await this.#opts.cf.r2.buckets.objects.list(bucket.name, {
             account_id: this.#opts.accountId,
           }),
-          (item) =>
-            item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
+          recordOf,
         );
         return {
           name: bucket.name,
@@ -902,10 +915,7 @@ export class CloudflareStackControl implements StackControl {
               account_id: this.#opts.accountId,
             }),
           ) as { domains?: readonly { domain?: unknown; enabled?: unknown }[] } | undefined;
-          const domains = (custom?.domains ?? [])
-            .filter(({ enabled }) => enabled === true)
-            .map(({ domain }) => required(domain, "R2 custom domain"))
-            .sort();
+          const domains = customDomainsOf(custom);
           if (
             deletesObjects ||
             lifecycleName !== resource.lifecycle ||
@@ -963,11 +973,7 @@ export class CloudflareStackControl implements StackControl {
           return true;
         }
         case "workflow": {
-          const workflows = await collectResultItems(
-            await this.#opts.cf.workflows.list({ account_id: this.#opts.accountId }),
-            (item) =>
-              item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
-          );
+          const workflows = await this.#workflows();
           const workflow = workflows.find(
             ({ id, name }) => id === resource.id || name === resource.name,
           );
@@ -983,11 +989,7 @@ export class CloudflareStackControl implements StackControl {
           return true;
         }
         case "worker": {
-          const workers = await collectResultItems(
-            await this.#opts.cf.workers.scripts.list({ account_id: this.#opts.accountId }),
-            (item) =>
-              item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
-          );
+          const workers = await this.#workers();
           if (!workers.some(({ id }) => id === resource.name)) return false;
           const deployment = deploymentOf(
             await this.#opts.cf.workers.scripts.deployments.list(resource.name, {
@@ -1016,13 +1018,7 @@ export class CloudflareStackControl implements StackControl {
           return true;
         }
         case "namespace": {
-          const namespaces = await collectResultItems(
-            await this.#opts.cf.durableObjects.namespaces.list({
-              account_id: this.#opts.accountId,
-            }),
-            (item) =>
-              item && typeof item === "object" ? (item as Record<string, unknown>) : undefined,
-          );
+          const namespaces = await this.#namespaces();
           const namespace = namespaces.find(
             ({ id, name }) => id === resource.id || name === resource.name,
           );

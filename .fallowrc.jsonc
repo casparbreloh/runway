@@ -1,10 +1,35 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
-  "ignoreExports": [
-    {
-      "file": "packages/runway/tests/runtime-worker.ts",
-      "exports": ["DailyWorkflow", "IssueCreatedWorkflow"],
-    },
+  "entry": [
+    "**/vitest*.config.ts",
+    "packages/runway/tests/**/*.test.ts",
+    "packages/runway/tests/e2e/*.e2e.ts",
+    "packages/runway/tests/support/*-worker.ts",
   ],
+  "dynamicallyLoaded": ["packages/runway/src/internal/runtime/host.ts"],
+  "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
+  "usedClassMembers": [
+    {
+      "extends": "DurableObject",
+      "members": [
+        "admit",
+        "lifecycle",
+        "claimTerminal",
+        "readTerminal",
+        "current",
+        "publishTerminal",
+        "alarm",
+      ],
+    },
+    { "implements": "StackControl", "members": ["urls"] },
+  ],
+  "duplicates": {
+    "minTokens": 80,
+    "minLines": 8,
+    "threshold": 0.01,
+  },
+  "rules": {
+    "require-suppression-reason": "error",
+    "stale-suppressions": "error",
+  },
 }

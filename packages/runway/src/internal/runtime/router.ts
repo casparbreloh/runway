@@ -14,15 +14,15 @@ export interface RouterEntry {
   readonly trigger: WorkflowTrigger;
 }
 
-export type WebhookRouterEntry = RouterEntry & { readonly trigger: WebhookTrigger<unknown> };
+type WebhookRouterEntry = RouterEntry & { readonly trigger: WebhookTrigger<unknown> };
 
-export interface PassedWebhookGate {
+interface PassedWebhookGate {
   readonly status: "passed";
   readonly entry: WebhookRouterEntry;
   readonly event: unknown;
 }
 
-export type SkippedWebhookGate =
+type SkippedWebhookGate =
   | {
       readonly status: "skipped";
       readonly entry: WebhookRouterEntry;
@@ -35,9 +35,9 @@ export type SkippedWebhookGate =
       readonly event: unknown;
     };
 
-export type WebhookGateDecision = PassedWebhookGate | SkippedWebhookGate;
+type WebhookGateDecision = PassedWebhookGate | SkippedWebhookGate;
 
-export type WebhookGateEvaluation =
+type WebhookGateEvaluation =
   | {
       readonly status: "ok";
       readonly decisions: ReadonlyArray<WebhookGateDecision>;

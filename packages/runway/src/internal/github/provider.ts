@@ -1,8 +1,8 @@
 import type { GitHubRepository } from "../../trigger.ts";
+import { concatBytes } from "./byte.ts";
+import { githubRepositoryName, validGitHubRepository } from "./repository.ts";
 
 const SHA = /^[0-9a-f]{40}$/;
-const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -99,16 +99,6 @@ export interface GitHubProvider {
     },
   ): Promise<GitHubCheckRun>;
 }
-
-const concatBytes = (...parts: readonly Uint8Array[]): Uint8Array => {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.length;
-  }
-  return result;
-};
 
 const derLength = (length: number): Uint8Array => {
   if (length < 128) return new Uint8Array([length]);
@@ -236,35 +226,17 @@ const parseCheckRun = (value: unknown): GitHubCheckRun => {
 };
 
 const repositoryPath = (repository: GitHubRepository): string => {
-  const parts = repository.fullName.split("/");
-  if (
-    !positiveInteger(repository.id) ||
-    parts.length !== 2 ||
-    !parts[0] ||
-    !parts[1] ||
-    !REPOSITORY_PART.test(parts[0]) ||
-    !REPOSITORY_PART.test(parts[1]) ||
-    parts[1] !== repository.name
-  ) {
-    throw new Error("invalid GitHub Check request");
-  }
-  return `${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`;
+  if (!validGitHubRepository(repository)) throw new Error("invalid GitHub Check request");
+  const parsed = githubRepositoryName(repository.fullName)!;
+  return `${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`;
 };
 
 const repositoryNamePath = (fullName: string): { readonly path: string; readonly name: string } => {
-  const parts = fullName.split("/");
-  if (
-    parts.length !== 2 ||
-    !parts[0] ||
-    !parts[1] ||
-    !REPOSITORY_PART.test(parts[0]) ||
-    !REPOSITORY_PART.test(parts[1])
-  ) {
-    throw new Error("invalid GitHub repository name");
-  }
+  const parsed = githubRepositoryName(fullName);
+  if (!parsed) throw new Error("invalid GitHub repository name");
   return {
-    path: `${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`,
-    name: parts[1],
+    path: `${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.name)}`,
+    name: parsed.name,
   };
 };
 
@@ -277,6 +249,51 @@ const checkArguments = (
     path: repositoryPath(repository),
     headers: githubHeaders(`Bearer ${token}`),
   };
+};
+
+const checkIdentityArguments = (
+  token: string,
+  repository: GitHubRepository,
+  name: string,
+  headSha: string,
+  runId: string,
+): { readonly path: string; readonly headers: Headers } => {
+  const result = checkArguments(token, repository);
+  if (name.length === 0 || runId.length === 0 || !SHA.test(headSha)) {
+    throw new Error("invalid GitHub Check request");
+  }
+  return result;
+};
+
+const parseInstallationToken = async (
+  response: Response,
+  now: () => number,
+): Promise<{
+  readonly token: string;
+  readonly expiresAt: string;
+  readonly repositories: unknown;
+}> => {
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("invalid GitHub installation token response");
+  }
+  if (!isRecord(value)) throw new Error("invalid GitHub installation token response");
+  const { token, expires_at: expiresAt, repositories } = value;
+  const expiresAtMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
+  const currentTime = now();
+  if (
+    typeof token !== "string" ||
+    token.length === 0 ||
+    typeof expiresAt !== "string" ||
+    !Number.isFinite(expiresAtMs) ||
+    expiresAtMs <= currentTime ||
+    expiresAtMs > currentTime + 60 * 60 * 1000
+  ) {
+    throw new Error("invalid GitHub installation token response");
+  }
+  return { token, expiresAt, repositories };
 };
 
 export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProvider => {
@@ -298,6 +315,43 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
     }
   };
 
+  const lookupInstallation = async (
+    path: string,
+    jwt: string,
+    expected?: { readonly installationId: number; readonly repositoryId: number },
+  ): Promise<number> => {
+    const requestFailure = expected
+      ? "GitHub installation token request failed"
+      : "GitHub repository resolution failed";
+    let response: Response;
+    try {
+      response = await fetchImpl(`https://api.github.com/repos/${path}/installation`, {
+        method: "GET",
+        headers: githubHeaders(`Bearer ${jwt}`),
+      });
+    } catch {
+      throw new Error(requestFailure);
+    }
+    if (expected && response.status === 404) {
+      throw new GitHubRepositoryUnavailableError(expected.installationId, expected.repositoryId);
+    }
+    if (!response.ok) throw new Error(`${requestFailure} (${response.status})`);
+    let installation: unknown;
+    try {
+      installation = await response.json();
+    } catch {
+      throw new Error("invalid GitHub repository installation response");
+    }
+    if (
+      !isRecord(installation) ||
+      !positiveInteger(installation.id) ||
+      (expected && installation.id !== expected.installationId)
+    ) {
+      throw new Error("invalid GitHub repository installation response");
+    }
+    return installation.id;
+  };
+
   return {
     async resolveRepository(fullName) {
       const { path, name } = repositoryNamePath(fullName);
@@ -307,28 +361,7 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       } catch {
         throw new Error("GitHub repository resolution failed");
       }
-      let installationResponse: Response;
-      try {
-        installationResponse = await fetchImpl(
-          `https://api.github.com/repos/${path}/installation`,
-          { method: "GET", headers: githubHeaders(`Bearer ${jwt}`) },
-        );
-      } catch {
-        throw new Error("GitHub repository resolution failed");
-      }
-      if (!installationResponse.ok) {
-        throw new Error(`GitHub repository resolution failed (${installationResponse.status})`);
-      }
-      let installation: unknown;
-      try {
-        installation = await installationResponse.json();
-      } catch {
-        throw new Error("invalid GitHub repository installation response");
-      }
-      if (!isRecord(installation) || !positiveInteger(installation.id)) {
-        throw new Error("invalid GitHub repository installation response");
-      }
-      const installationId = installation.id;
+      const installationId = await lookupInstallation(path, jwt);
       let tokenResponse: Response;
       try {
         tokenResponse = await fetchImpl(
@@ -348,16 +381,7 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       if (!tokenResponse.ok) {
         throw new Error(`GitHub repository resolution failed (${tokenResponse.status})`);
       }
-      let value: unknown;
-      try {
-        value = await tokenResponse.json();
-      } catch {
-        throw new Error("invalid GitHub installation token response");
-      }
-      if (!isRecord(value)) throw new Error("invalid GitHub installation token response");
-      const { token, expires_at: expiresAt, repositories } = value;
-      const expiresAtMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
-      const currentTime = now();
+      const { repositories } = await parseInstallationToken(tokenResponse, now);
       const candidate =
         Array.isArray(repositories) && repositories.length === 1 ? repositories[0] : undefined;
       const candidateName = isRecord(candidate) ? candidate.name : undefined;
@@ -377,16 +401,7 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       } catch {
         canonical = false;
       }
-      if (
-        typeof token !== "string" ||
-        token.length === 0 ||
-        typeof expiresAt !== "string" ||
-        !Number.isFinite(expiresAtMs) ||
-        expiresAtMs <= currentTime ||
-        expiresAtMs > currentTime + 60 * 60 * 1000 ||
-        !canonical ||
-        !candidateRepository
-      ) {
+      if (!canonical || !candidateRepository) {
         throw new Error("invalid GitHub installation token response");
       }
       return {
@@ -411,32 +426,10 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       } catch {
         throw new Error("GitHub installation token request failed");
       }
-      let installationResponse: Response;
-      try {
-        installationResponse = await fetchImpl(
-          `https://api.github.com/repos/${scopedRepositoryPath}/installation`,
-          { method: "GET", headers: githubHeaders(`Bearer ${jwt}`) },
-        );
-      } catch {
-        throw new Error("GitHub installation token request failed");
-      }
-      if (installationResponse.status === 404) {
-        throw new GitHubRepositoryUnavailableError(installationId, repository.id);
-      }
-      if (!installationResponse.ok) {
-        throw new Error(
-          `GitHub installation token request failed (${installationResponse.status})`,
-        );
-      }
-      let installation: unknown;
-      try {
-        installation = await installationResponse.json();
-      } catch {
-        throw new Error("invalid GitHub repository installation response");
-      }
-      if (!isRecord(installation) || installation.id !== installationId) {
-        throw new Error("invalid GitHub repository installation response");
-      }
+      await lookupInstallation(scopedRepositoryPath, jwt, {
+        installationId,
+        repositoryId: repository.id,
+      });
       let response: Response;
       try {
         response = await fetchImpl(
@@ -456,40 +449,20 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
       if (!response.ok) {
         throw new Error(`GitHub installation token request failed (${response.status})`);
       }
-      let value: unknown;
-      try {
-        value = await response.json();
-      } catch {
-        throw new Error("invalid GitHub installation token response");
-      }
-      if (!isRecord(value)) throw new Error("invalid GitHub installation token response");
-      const { token, expires_at: expiresAt, repositories } = value;
-      const expiresAtMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
+      const { token, expiresAt, repositories } = await parseInstallationToken(response, now);
       const requestedRepositoryGranted =
         Array.isArray(repositories) &&
         repositories.length === 1 &&
         isRecord(repositories[0]) &&
         repositories[0].id === repository.id;
-      const currentTime = now();
-      if (
-        typeof token !== "string" ||
-        token.length === 0 ||
-        typeof expiresAt !== "string" ||
-        !Number.isFinite(expiresAtMs) ||
-        expiresAtMs <= currentTime ||
-        expiresAtMs > currentTime + 60 * 60 * 1000 ||
-        !requestedRepositoryGranted
-      ) {
+      if (!requestedRepositoryGranted) {
         throw new Error("invalid GitHub installation token response");
       }
       return { token, expiresAt };
     },
 
     async createQueuedCheck({ token, repository, name, headSha, runId }) {
-      const { path, headers } = checkArguments(token, repository);
-      if (name.length === 0 || runId.length === 0 || !SHA.test(headSha)) {
-        throw new Error("invalid GitHub Check request");
-      }
+      const { path, headers } = checkIdentityArguments(token, repository, name, headSha, runId);
       const check = parseCheckRun(
         await checkRequest(`https://api.github.com/repos/${path}/check-runs`, {
           method: "POST",
@@ -515,10 +488,7 @@ export const createGitHubProvider = (options: GitHubProviderOptions): GitHubProv
     },
 
     async reconcileCheck({ token, repository, name, headSha, runId }) {
-      const { path, headers } = checkArguments(token, repository);
-      if (name.length === 0 || runId.length === 0 || !SHA.test(headSha)) {
-        throw new Error("invalid GitHub Check request");
-      }
+      const { path, headers } = checkIdentityArguments(token, repository, name, headSha, runId);
       let page = 1;
       let examined = 0;
       let expectedTotal: number | undefined;

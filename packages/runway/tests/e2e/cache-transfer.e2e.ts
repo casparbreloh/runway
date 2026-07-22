@@ -1,20 +1,27 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
+import { test } from "vitest";
 
 import type { CloudflareApi } from "../../src/internal/cloudflare.ts";
 import { collectResultItems, defaultClient, resultOf } from "../../src/internal/cloudflare.ts";
 import { COMPATIBILITY_DATE } from "../../src/internal/runtime/contract.ts";
 import { SANDBOX_APPLICATION, SANDBOX_CLASS } from "../../src/internal/sandbox/config.ts";
-import { fetchWorkersDev } from "./support.ts";
+import {
+  cloudflareAccountId as oneAccountId,
+  cloudflareStatusIs as isStatus,
+  cloudflareToken as tokenOf,
+  containerApplications,
+  deleteContainer,
+  fetchWorkersDev,
+  r2BucketExists as bucketExists,
+  r2ObjectKeys as objectKeys,
+} from "./support.ts";
 
-const execFileAsync = promisify(execFile);
 const credentials = (): { readonly accessKeyId: string; readonly secretAccessKey: string } => {
   const accessKeyId = process.env.RUNWAY_CACHE_SMOKE_R2_ACCESS_KEY_ID;
   const secretAccessKey = process.env.RUNWAY_CACHE_SMOKE_R2_SECRET_ACCESS_KEY;
@@ -25,27 +32,6 @@ const credentials = (): { readonly accessKeyId: string; readonly secretAccessKey
   }
   return { accessKeyId, secretAccessKey };
 };
-
-const tokenOf = async (): Promise<string> => {
-  const { stdout } = await execFileAsync("wrangler", ["auth", "token", "--json"], {
-    timeout: 10_000,
-  });
-  const auth = JSON.parse(stdout) as { token?: unknown };
-  if (typeof auth.token !== "string") throw new Error("Wrangler did not return an auth token");
-  return auth.token;
-};
-
-const oneAccountId = async (cf: Cloudflare): Promise<string> => {
-  if (process.env.CLOUDFLARE_ACCOUNT_ID) return process.env.CLOUDFLARE_ACCOUNT_ID;
-  const ids: string[] = [];
-  for await (const account of cf.accounts.list()) ids.push(account.id);
-  if (ids.length !== 1)
-    throw new Error("Set CLOUDFLARE_ACCOUNT_ID when auth has multiple accounts");
-  return ids[0]!;
-};
-
-const isStatus = (error: unknown, status: number): boolean =>
-  !!error && typeof error === "object" && "status" in error && error.status === status;
 
 const createSmokeContainer = async (
   cf: CloudflareApi,
@@ -84,69 +70,9 @@ const createSmokeContainer = async (
   });
 };
 
-const bucketExists = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucket: string,
-): Promise<boolean> => {
-  try {
-    await cf.r2.buckets.get(bucket, { account_id: accountId });
-    return true;
-  } catch (error) {
-    if (isStatus(error, 404)) return false;
-    throw error;
-  }
-};
-
-const objectKeys = async (
-  cf: Cloudflare,
-  accountId: string,
-  bucket: string,
-): Promise<ReadonlyArray<string>> => {
-  if (!(await bucketExists(cf, accountId, bucket))) return [];
-  const keys: string[] = [];
-  for await (const object of cf.r2.buckets.objects.list(bucket, { account_id: accountId })) {
-    if (object.key) keys.push(object.key);
-  }
-  return keys;
-};
-
-const containerApplications = async (
-  token: string,
-  accountId: string,
-): Promise<ReadonlyArray<{ readonly id: string; readonly name: string }>> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications`,
-    { headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok) throw new Error(`Container list returned ${response.status}`);
-  const body = (await response.json()) as {
-    result?: ReadonlyArray<{ id?: unknown; name?: unknown }>;
-  };
-  return (body.result ?? []).flatMap((application) =>
-    typeof application.id === "string" && typeof application.name === "string"
-      ? [{ id: application.id, name: application.name }]
-      : [],
-  );
-};
-
-const deleteContainer = async (
-  token: string,
-  accountId: string,
-  applicationId: string,
-): Promise<void> => {
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/containers/applications/${applicationId}`,
-    { method: "DELETE", headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Container delete returned ${response.status}`);
-  }
-};
-
 const buildWorker = async (): Promise<Uint8Array> => {
   const result = await esbuild({
-    entryPoints: [path.join(import.meta.dirname, "cache-transfer-worker.ts")],
+    entryPoints: [path.join(import.meta.dirname, "cache-transfer-worker.e2e.ts")],
     bundle: true,
     format: "esm",
     platform: "browser",
@@ -271,7 +197,7 @@ const run = async (): Promise<void> => {
       if (!(await bucketExists(cf, accountId, bucket))) {
         throw new Error(`Configured cache tracer bucket does not exist: ${bucket}`);
       }
-      if ((await objectKeys(cf, accountId, bucket)).length > 0) {
+      if ((await objectKeys(cf, accountId, bucket)).size > 0) {
         throw new Error("Configured cache tracer bucket must be empty so cleanup is exact");
       }
     }
@@ -349,8 +275,8 @@ const run = async (): Promise<void> => {
       const remainingObjects = await objectKeys(cf, accountId, bucket);
       if (remainingScript) cleanupErrors.push(`Worker still exists: ${scriptName}`);
       if (remainingContainer) cleanupErrors.push(`container still exists: ${containerName}`);
-      if (remainingObjects.length > 0) {
-        cleanupErrors.push(`R2 objects still exist: ${remainingObjects.join(", ")}`);
+      if (remainingObjects.size > 0) {
+        cleanupErrors.push(`R2 objects still exist: ${[...remainingObjects].join(", ")}`);
       }
       if (bucketIntentOwned && (await bucketExists(cf, accountId, bucket))) {
         cleanupErrors.push(`bucket still exists: ${bucket}`);
@@ -361,9 +287,7 @@ const run = async (): Promise<void> => {
   }
 
   if (cleanupErrors.length > 0) {
-    throw new Error(`Live cache tracer cleanup failed: ${cleanupErrors.join("; ")}`, {
-      cause: smokeError,
-    });
+    throw new Error(`Live cache tracer cleanup failed: ${cleanupErrors.join("; ")}`);
   }
   if (smokeError) throw smokeError;
   if (!report) throw new Error("Live cache tracer completed without a report");
@@ -384,8 +308,15 @@ const run = async (): Promise<void> => {
   );
 };
 
-await run().catch((error) => {
-  const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-  console.error(message);
-  process.exitCode = 1;
+test("transfers cache archives through the deployed Sandbox and R2", async () => {
+  await run().catch((error) => {
+    let message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    for (const secret of [
+      process.env.RUNWAY_CACHE_SMOKE_R2_ACCESS_KEY_ID,
+      process.env.RUNWAY_CACHE_SMOKE_R2_SECRET_ACCESS_KEY,
+    ].filter((value): value is string => !!value)) {
+      message = message.replaceAll(secret, "***");
+    }
+    throw new Error(message.replaceAll(/https?:\/\/\S+/g, "***"));
+  });
 });

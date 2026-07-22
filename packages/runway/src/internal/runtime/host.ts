@@ -626,11 +626,10 @@ interface WorkflowMetadata extends Readonly<Record<string, unknown>> {
 
 type LoaderPurpose = "trigger" | "run";
 
-const hex = (bytes: ArrayBuffer): string =>
-  [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-
-const sha256 = async (bytes: BufferSource): Promise<string> =>
-  hex(await crypto.subtle.digest("SHA-256", bytes));
+const sha256 = async (bytes: BufferSource): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 const metadataOf = (value: unknown): WorkflowMetadata => {
   if (

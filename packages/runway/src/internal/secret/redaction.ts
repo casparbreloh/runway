@@ -22,11 +22,13 @@ export class StreamingRedactor {
     this.maxLength = this.values[0]?.length ?? 0;
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the sandbox output collector
   push(chunk: string): string {
     this.pending += chunk;
     return this.drain(false);
   }
 
+  // fallow-ignore-next-line unused-class-member -- called through the sandbox output collector
   flush(): string {
     return this.drain(true);
   }

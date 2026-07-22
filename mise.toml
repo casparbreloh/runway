@@ -19,7 +19,7 @@ run = "aube exec oxfmt '!aube-lock.yaml'"
 run = "aube exec oxfmt --check '!aube-lock.yaml'"
 
 [tasks.fallow]
-run = "aube exec fallow --ci --no-cache"
+run = "aube exec fallow dead-code --quiet --fail-on-issues && aube exec fallow dupes --quiet --fail-on-issues && aube exec fallow health --score --min-score 80 --quiet --format compact"
 
 [tasks.lint]
 run = "aube exec oxlint"
@@ -30,8 +30,5 @@ run = "aube exec tsc --build"
 [tasks.test]
 run = "aube exec vitest run"
 
-[tasks."test:image"]
-run = "aube exec vitest run --root packages/runway --config vitest.image.config.ts"
-
-[tasks."test:live"]
-run = "node packages/runway/tests/live/cache-transfer.ts && node packages/runway/tests/live/artifact-recovery.ts && node packages/runway/tests/live/repository-recovery.ts && node packages/runway/tests/live/github-recovery.ts"
+[tasks."test:e2e"]
+run = "aube exec vitest run --config vitest.e2e.config.ts"

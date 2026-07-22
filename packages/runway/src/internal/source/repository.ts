@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { GitHubRepository } from "../../trigger.ts";
+import { validGitHubRepository } from "../github/repository.ts";
 import type { SourceIdentity } from "./source.ts";
 
 interface PublicRepositoryAuthentication {
@@ -64,8 +65,6 @@ const execFileAsync = promisify(execFile);
 const REPOSITORY_REACHABILITY_TIMEOUT_MS = 60_000;
 const SHA = /^[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const REPOSITORY_PART = /^[A-Za-z0-9_.-]+$/;
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -97,16 +96,7 @@ const branchRef = (value: unknown): value is string => {
 };
 
 export const githubRepositoryRemote = (repository: GitHubRepository): string => {
-  const parts = repository.fullName.split("/");
-  if (
-    !positiveInteger(repository.id) ||
-    parts.length !== 2 ||
-    !parts[0] ||
-    !parts[1] ||
-    !REPOSITORY_PART.test(parts[0]) ||
-    !REPOSITORY_PART.test(parts[1]) ||
-    repository.name !== parts[1]
-  ) {
+  if (!validGitHubRepository(repository)) {
     throw new Error("invalid GitHub repository identity");
   }
   return `https://github.com/${repository.fullName}`;

@@ -713,6 +713,36 @@ const shared = (
   stackIds: [stackId],
 });
 
+const bucketClaimsOf = (
+  buckets: readonly StackBucket[],
+  stackId: string,
+): readonly OwnershipRef[] =>
+  buckets.flatMap((bucket) => [
+    bucket.shared
+      ? shared(
+          "bucket",
+          bucket.name,
+          {
+            lifecycle: bucket.lifecycle,
+            publicAccess: bucket.publicAccess,
+            customDomains: bucket.customDomains,
+          },
+          stackId,
+        )
+      : exclusive("bucket", bucket.name, stackId),
+    ...bucket.objects.map((object) => {
+      const name = canonicalJson([bucket.name, object.key]);
+      return object.shared
+        ? shared(
+            "object",
+            name,
+            { bucket: bucket.name, key: object.key, digest: object.digest },
+            stackId,
+          )
+        : exclusive("object", name, stackId);
+    }),
+  ]);
+
 const claimsOf = (manifest: StackManifest, receipt: StackReceipt): readonly OwnershipRef[] => {
   const stackId = manifest.owner.stackId;
   const claims: OwnershipRef[] = [
@@ -727,36 +757,8 @@ const claimsOf = (manifest: StackManifest, receipt: StackReceipt): readonly Owne
     ...receipt.routes.map(({ zoneId, pattern }) =>
       exclusive("route", canonicalJson([zoneId, pattern]), stackId),
     ),
+    ...bucketClaimsOf(receipt.buckets, stackId),
   ];
-  for (const bucket of receipt.buckets) {
-    claims.push(
-      bucket.shared
-        ? shared(
-            "bucket",
-            bucket.name,
-            {
-              lifecycle: bucket.lifecycle,
-              publicAccess: bucket.publicAccess,
-              customDomains: bucket.customDomains,
-            },
-            stackId,
-          )
-        : exclusive("bucket", bucket.name, stackId),
-    );
-    for (const object of bucket.objects) {
-      const name = canonicalJson([bucket.name, object.key]);
-      claims.push(
-        object.shared
-          ? shared(
-              "object",
-              name,
-              { bucket: bucket.name, key: object.key, digest: object.digest },
-              stackId,
-            )
-          : exclusive("object", name, stackId),
-      );
-    }
-  }
   const unique = new Map<string, OwnershipRef>();
   for (const claim of claims) {
     const key = Stack.refPrefix(claim.kind, claim.name);
@@ -888,44 +890,15 @@ const resourcesOf = (receipt: StackReceipt): readonly StackResource[] => [
 
 const manifestClaimsOf = (manifest: StackManifest): readonly OwnershipRef[] => {
   const stackId = manifest.owner.stackId;
-  const claims: OwnershipRef[] = [
+  return [
     exclusive("stack", manifest.owner.name, stackId),
     exclusive("worker", manifest.worker.name, stackId),
     exclusive("workflow", manifest.workflow.name, stackId),
     exclusive("container", manifest.container.name, stackId),
     ...manifest.namespaces.map(({ name }) => exclusive("namespace-name", name, stackId)),
     ...manifest.routes.map((pattern) => exclusive("route-pattern", pattern, stackId)),
+    ...bucketClaimsOf(manifest.buckets, stackId),
   ];
-  for (const bucket of manifest.buckets) {
-    claims.push(
-      bucket.shared
-        ? shared(
-            "bucket",
-            bucket.name,
-            {
-              lifecycle: bucket.lifecycle,
-              publicAccess: bucket.publicAccess,
-              customDomains: bucket.customDomains,
-            },
-            stackId,
-          )
-        : exclusive("bucket", bucket.name, stackId),
-    );
-    for (const object of bucket.objects) {
-      const name = canonicalJson([bucket.name, object.key]);
-      claims.push(
-        object.shared
-          ? shared(
-              "object",
-              name,
-              { bucket: bucket.name, key: object.key, digest: object.digest },
-              stackId,
-            )
-          : exclusive("object", name, stackId),
-      );
-    }
-  }
-  return claims;
 };
 
 export class Stack {
