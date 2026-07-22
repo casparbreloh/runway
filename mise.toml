@@ -28,8 +28,7 @@ run = "aube exec oxlint"
 run = "aube exec tsc --build"
 
 [tasks.test]
-run = "node scripts/test.ts"
-quiet = true
+run = "aube exec vitest run"
 
 [tasks."test:image"]
 run = "aube exec vitest run --root packages/runway --config vitest.image.config.ts"

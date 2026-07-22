@@ -15,7 +15,6 @@
     "packages/runway/tests/support/runtime-worker.ts",
     "packages/runway/vitest.image.config.ts",
     "packages/runway/vitest.workers.config.ts",
-    "scripts/test.ts",
   ],
   "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
   "rules": { "unused-class-members": "off" },
