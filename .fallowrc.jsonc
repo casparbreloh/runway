@@ -6,33 +6,7 @@
     "packages/runway/tests/e2e/*.e2e.ts",
     "packages/runway/tests/support/*-worker.ts",
   ],
-  "ignorePatterns": [".runway/**", "packages/runway/src/internal/runtime/host.ts"],
-  "dynamicallyLoaded": [
-    "packages/runway/src/internal/github/coordinator.ts",
-    "packages/runway/src/internal/secret/snapshot.ts",
-  ],
-  "ignoreExports": [
-    {
-      "file": "packages/runway/src/internal/runtime/artifact.ts",
-      "exports": ["decodeWorkflowArtifact"],
-    },
-    {
-      "file": "packages/runway/src/internal/runtime/contract.ts",
-      "exports": ["CACHE_R2_SESSION_TOKEN_BINDING"],
-    },
-    {
-      "file": "packages/runway/src/internal/sandbox/config.ts",
-      "exports": ["CACHE_SCHEMA"],
-    },
-    {
-      "file": "packages/runway/src/internal/source/repository.ts",
-      "exports": ["sourceIdentity", "repositorySourceForRun"],
-    },
-    {
-      "file": "packages/runway/src/internal/terminal.ts",
-      "exports": ["parseTerminalIdentity"],
-    },
-  ],
+  "dynamicallyLoaded": ["packages/runway/src/internal/runtime/host.ts"],
   "ignoreDependencies": ["@cloudflare/dynamic-workflows"],
   "usedClassMembers": [
     {
