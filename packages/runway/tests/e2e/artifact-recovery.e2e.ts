@@ -5,6 +5,7 @@ import process from "node:process";
 
 import Cloudflare from "cloudflare";
 import { webhook, workflow } from "runway";
+import { test } from "vitest";
 
 import { buildDeployment } from "../../src/internal/publish/artifacts.ts";
 import { publishWithAdapters } from "../../src/internal/publish/publish.ts";
@@ -546,11 +547,12 @@ const run = async (): Promise<void> => {
   console.log(JSON.stringify(report, null, 2));
 };
 
-await run().catch((error) => {
-  const message = (error instanceof Error ? (error.stack ?? error.message) : String(error))
-    .replaceAll(hookSecret, "***")
-    .replaceAll(oldSecret, "***")
-    .replaceAll(newSecret, "***");
-  console.error(message);
-  process.exitCode = 1;
+test("preserves immutable workflow artifacts and captured secrets across recovery", async () => {
+  await run().catch((error) => {
+    const message = (error instanceof Error ? (error.stack ?? error.message) : String(error))
+      .replaceAll(hookSecret, "***")
+      .replaceAll(oldSecret, "***")
+      .replaceAll(newSecret, "***");
+    throw new Error(message);
+  });
 });

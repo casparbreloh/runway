@@ -112,28 +112,8 @@ const smokeDefinition = workflow({
     }),
 }).run(async () => {});
 
-const liveConfig = (): LiveConfig | undefined => {
-  if (process.env[OPT_IN] !== "1") {
-    console.log(
-      JSON.stringify(
-        {
-          outcome: "skipped",
-          smoke: "github-recovery",
-          reason: `Set ${OPT_IN}=1 and the documented GitHub App/repository credentials to run`,
-          required: [
-            GITHUB_APP_ID_BINDING,
-            GITHUB_PRIVATE_KEY_BINDING,
-            REPOSITORY_ENV,
-            SHA_ENV,
-            "Wrangler auth or CLOUDFLARE_API_TOKEN with Workers, Workflows, Containers, R2, and Durable Objects access",
-          ],
-        },
-        null,
-        2,
-      ),
-    );
-    return undefined;
-  }
+const liveConfig = (): LiveConfig => {
+  if (process.env[OPT_IN] !== "1") throw new Error(`Set ${OPT_IN}=1 to run GitHub recovery`);
   const values = {
     appId: process.env[GITHUB_APP_ID_BINDING],
     privateKey: process.env[GITHUB_PRIVATE_KEY_BINDING],
@@ -752,14 +732,9 @@ const runRecoveryVariant = async (variant: RecoveryVariant): Promise<void> => {
 export type RecoveryRunnerOptions = { readonly type: "repository" } | { readonly type: "github" };
 
 export const runRecovery = async (options: RecoveryRunnerOptions): Promise<void> => {
-  const variant = recoveryVariant(options);
-  if (variant) await dispatchRecovery(variant);
-};
-
-const recoveryVariant = (options: RecoveryRunnerOptions): RecoveryVariant | undefined => {
-  if (options.type === "repository") return repositoryVariant();
-  const config = liveConfig();
-  return config && githubVariant(config);
+  await dispatchRecovery(
+    options.type === "repository" ? repositoryVariant() : githubVariant(liveConfig()),
+  );
 };
 
 const dispatchRecovery = async (variant: RecoveryVariant): Promise<void> => {
@@ -770,7 +745,6 @@ const dispatchRecovery = async (variant: RecoveryVariant): Promise<void> => {
       (value): value is string => !!value,
     ))
       message = message.replaceAll(secret, "***");
-    console.error(message.replace(githubTokenPattern, "***"));
-    process.exitCode = 1;
+    throw new Error(message.replace(githubTokenPattern, "***"));
   });
 };

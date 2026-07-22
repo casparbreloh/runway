@@ -5,6 +5,7 @@ import process from "node:process";
 
 import Cloudflare, { toFile } from "cloudflare";
 import { build as esbuild } from "esbuild";
+import { test } from "vitest";
 
 import type { CloudflareApi } from "../../src/internal/cloudflare.ts";
 import { collectResultItems, defaultClient, resultOf } from "../../src/internal/cloudflare.ts";
@@ -286,9 +287,7 @@ const run = async (): Promise<void> => {
   }
 
   if (cleanupErrors.length > 0) {
-    throw new Error(`Live cache tracer cleanup failed: ${cleanupErrors.join("; ")}`, {
-      cause: smokeError,
-    });
+    throw new Error(`Live cache tracer cleanup failed: ${cleanupErrors.join("; ")}`);
   }
   if (smokeError) throw smokeError;
   if (!report) throw new Error("Live cache tracer completed without a report");
@@ -309,8 +308,15 @@ const run = async (): Promise<void> => {
   );
 };
 
-await run().catch((error) => {
-  const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-  console.error(message);
-  process.exitCode = 1;
+test("transfers cache archives through the deployed Sandbox and R2", async () => {
+  await run().catch((error) => {
+    let message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    for (const secret of [
+      process.env.RUNWAY_CACHE_SMOKE_R2_ACCESS_KEY_ID,
+      process.env.RUNWAY_CACHE_SMOKE_R2_SECRET_ACCESS_KEY,
+    ].filter((value): value is string => !!value)) {
+      message = message.replaceAll(secret, "***");
+    }
+    throw new Error(message.replaceAll(/https?:\/\/\S+/g, "***"));
+  });
 });

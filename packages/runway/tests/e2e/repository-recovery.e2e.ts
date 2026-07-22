@@ -1,3 +1,7 @@
+import { test } from "vitest";
+
 import { runRecovery } from "./recovery-runner.ts";
 
-await runRecovery({ type: "repository" });
+test("reports repository placement loss without replaying a command", async () => {
+  await runRecovery({ type: "repository" });
+});
