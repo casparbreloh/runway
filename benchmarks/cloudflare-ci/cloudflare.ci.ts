@@ -12,17 +12,24 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   ): Promise<void> {
     const deps = await ci.runner({
       name: "install",
-      command: "mise install && aube install --frozen-lockfile",
+      command: "mise install && mise exec aube@1 -- aube install --frozen-lockfile",
       cache: {
-        inputs: ["mise.toml", "mise.lock", "aube-workspace.yaml", "aube-lock.yaml"],
+        inputs: [
+          "package.json",
+          "packages/runway/package.json",
+          "mise.toml",
+          "mise.lock",
+          "aube-workspace.yaml",
+          "aube-lock.yaml",
+        ],
       },
     });
 
     await Promise.all([
-      deps.runner({
-        name: "check",
-        command: "mise run format-check && mise run lint && mise run typecheck && mise run fallow",
-      }),
+      deps.runner({ name: "format-check", command: "mise run format-check" }),
+      deps.runner({ name: "lint", command: "mise run lint" }),
+      deps.runner({ name: "typecheck", command: "mise run typecheck" }),
+      deps.runner({ name: "fallow", command: "mise run fallow" }),
       deps.runner({
         name: "test",
         command: "mise run test",

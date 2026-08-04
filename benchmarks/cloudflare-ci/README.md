@@ -3,8 +3,10 @@
 This is a standalone Cloudflare CI worker for comparing the same Runway checks against the
 repository's Runway and GitHub Actions implementations.
 
-The `install` runner is cached, then `check` and `test` run concurrently. The commands and
-`VITEST_MAX_WORKERS=1` setting match `.runway/workflows/check.ts` and `test.ts`.
+The `install` runner is cached, then format-check, lint, typecheck, fallow, and test run as
+independent concurrent runners. The commands and `VITEST_MAX_WORKERS=1` setting match
+`.runway/workflows/check.ts` and `test.ts`. Cache inputs include the lockfiles and package manifests;
+the image preinstalls Node and Aube so cache misses do not download the toolchain.
 
 ## Setup
 

@@ -14,7 +14,7 @@
     {
       "class_name": "CiSandbox",
       "image": "./Dockerfile",
-      "max_instances": 2,
+      "max_instances": 5,
       "instance_type": "standard-4",
     },
   ],
