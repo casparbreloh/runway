@@ -12,7 +12,7 @@ export class CI extends CIWorkflow<CloudflareArtifacts, Bindings> {
   ): Promise<void> {
     const deps = await ci.runner({
       name: "install",
-      command: "mise install && mise exec aube@1 -- aube install --frozen-lockfile",
+      command: "mise install && mise exec aube@1.29.1 -- aube install --frozen-lockfile",
       cache: {
         inputs: [
           "package.json",
